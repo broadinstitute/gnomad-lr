@@ -19,13 +19,14 @@ pub fn load_variants(
     region_chrom: &str,
     region_start: u32,
     region_stop: u32,
+    metrics: &mut super::IngestMetrics,
 ) -> anyhow::Result<()> {
     info!("Loading variants from VCF (site-level)...");
     info!("VCF: {}", vcf_path);
     info!("Region: {}:{}-{}", region_chrom, region_start, region_stop);
 
     // Pre-pass to build enveloped map
-    let enveloped_map = build_enveloped_map(vcf_path, region_chrom, region_start, region_stop)?;
+    let enveloped_map = build_enveloped_map(vcf_path, region_chrom, region_start, region_stop, metrics)?;
 
     // Main pass
     let stream = VcfStream::open_region(vcf_path, region_chrom, region_start, region_stop)?;
@@ -174,6 +175,9 @@ pub fn load_variants(
     }
 
     inserter.finish()?;
+    metrics.ch_insert_ms += inserter.insert_time_ms;
+    metrics.ch_insert_count += inserter.flush_count;
+    metrics.ch_rows_inserted += inserter.total_rows();
     info!("Variant loading complete: {} variant docs inserted", count);
     Ok(())
 }

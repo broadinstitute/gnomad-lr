@@ -21,6 +21,7 @@ pub fn load_haplotypes(
     region_chrom: &str,
     region_start: u32,
     region_stop: u32,
+    metrics: &mut super::IngestMetrics,
 ) -> anyhow::Result<()> {
     info!("Loading haplotypes from VCF...");
     info!("VCF: {}", vcf_path);
@@ -221,6 +222,9 @@ pub fn load_haplotypes(
     }
 
     inserter.finish()?;
+    metrics.ch_insert_ms += inserter.insert_time_ms;
+    metrics.ch_insert_count += inserter.flush_count;
+    metrics.ch_rows_inserted += inserter.total_rows();
     info!(
         "Haplotype loading complete: {} rows from {} variant sites",
         inserter.total_rows(),

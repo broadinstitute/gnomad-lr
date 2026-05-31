@@ -58,20 +58,23 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn run_load(target: LoadTarget) -> anyhow::Result<()> {
+    let mut metrics = loader::IngestMetrics::default();
+    let task_start = std::time::Instant::now();
+
     match target {
         LoadTarget::Haplotypes(args) => {
             let (chrom, start, stop) = parse_region(&args.region)?;
             let vcf_path = args.vcf_path.or_else(|| domain::resolve_vcf_path(&chrom));
             let vcf_path = vcf_path.ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
             info!("Loading haplotypes from {} for {}:{}-{}", vcf_path, chrom, start, stop);
-            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &vcf_path, &chrom, start, stop)?;
+            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
         }
         LoadTarget::Variants(args) => {
             let (chrom, start, stop) = parse_region(&args.region)?;
             let vcf_path = args.vcf_path.or_else(|| domain::resolve_vcf_path(&chrom));
             let vcf_path = vcf_path.ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
             info!("Loading variants from {} for {}:{}-{}", vcf_path, chrom, start, stop);
-            loader::variants::load_variants(&args.clickhouse_url, &vcf_path, &chrom, start, stop)?;
+            loader::variants::load_variants(&args.clickhouse_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
         }
         LoadTarget::All(args) => {
             let (chrom, start, stop) = parse_region(&args.region)?;
@@ -80,12 +83,16 @@ fn run_load(target: LoadTarget) -> anyhow::Result<()> {
             info!("Loading all from {} for {}:{}-{}", vcf_path, chrom, start, stop);
 
             // Load variants first (includes prescan)
-            loader::variants::load_variants(&args.clickhouse_url, &vcf_path, &chrom, start, stop)?;
+            loader::variants::load_variants(&args.clickhouse_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
 
             // Load haplotypes
-            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &vcf_path, &chrom, start, stop)?;
+            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
         }
     }
+
+    metrics.total_ms = task_start.elapsed().as_millis() as u64;
+    info!("Load complete: {}ms total, {}ms prescan, {}ms CH insert ({} flushes), {} rows",
+        metrics.total_ms, metrics.prescan_ms, metrics.ch_insert_ms, metrics.ch_insert_count, metrics.ch_rows_inserted);
 
     Ok(())
 }

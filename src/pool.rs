@@ -85,19 +85,34 @@ async fn handle_load_tasks(
 
         let ch_url = ch_url.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            loader::variants::load_variants(&ch_url, &vcf_path, &chrom, start, stop)?;
-            loader::haplotypes::load_haplotypes(&ch_url, &vcf_path, &chrom, start, stop)?;
-            info!("Task {} complete", task_id);
-            Ok::<_, anyhow::Error>(1usize)
+            let mut metrics = loader::IngestMetrics::default();
+            let task_start = std::time::Instant::now();
+
+            loader::variants::load_variants(&ch_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
+            loader::haplotypes::load_haplotypes(&ch_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
+
+            metrics.total_ms = task_start.elapsed().as_millis() as u64;
+            info!("Task {} complete ({}ms total, {}ms CH insert, {} rows)", task_id, metrics.total_ms, metrics.ch_insert_ms, metrics.ch_rows_inserted);
+            Ok::<_, anyhow::Error>(metrics)
         });
         handles.push(handle);
     }
 
-    // Wait for all tasks to complete
+    // Wait for all tasks and aggregate metrics
     let mut total_rows = 0usize;
-    for handle in handles {
-        total_rows += handle.await??;
-    }
+    let mut combined_metrics = loader::IngestMetrics::default();
+    let combined_start = std::time::Instant::now();
 
-    Ok(TaskResult::success(total_rows, None))
+    for handle in handles {
+        let metrics = handle.await??;
+        total_rows += metrics.ch_rows_inserted;
+        combined_metrics.prescan_ms += metrics.prescan_ms;
+        combined_metrics.ch_insert_ms += metrics.ch_insert_ms;
+        combined_metrics.ch_insert_count += metrics.ch_insert_count;
+        combined_metrics.ch_rows_inserted += metrics.ch_rows_inserted;
+    }
+    combined_metrics.total_ms = combined_start.elapsed().as_millis() as u64;
+
+    let metrics_json = serde_json::to_value(&combined_metrics)?;
+    Ok(TaskResult::success(total_rows, Some(metrics_json)))
 }

@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use super::vcf_reader::{VcfStream, parse_info_field};
+use super::IngestMetrics;
 use tracing::info;
 
 /// Build the enveloped map: TRID → list of enveloped variant IDs.
@@ -14,7 +15,9 @@ pub fn build_enveloped_map(
     region_chrom: &str,
     region_start: u32,
     region_stop: u32,
+    metrics: &mut IngestMetrics,
 ) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let prescan_start = std::time::Instant::now();
     info!("Pre-pass: building enveloped_ids map...");
 
     let mut enveloped_map: HashMap<String, Vec<String>> = HashMap::new();
@@ -62,10 +65,12 @@ pub fn build_enveloped_map(
     }
 
     let total_enveloped: usize = enveloped_map.values().map(|v| v.len()).sum();
+    metrics.prescan_ms += prescan_start.elapsed().as_millis() as u64;
     info!(
-        "Pre-pass complete: {} enveloped variants across {} TRs",
+        "Pre-pass complete: {} enveloped variants across {} TRs ({}ms)",
         total_enveloped,
-        enveloped_map.len()
+        enveloped_map.len(),
+        metrics.prescan_ms
     );
 
     Ok(enveloped_map)

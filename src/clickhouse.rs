@@ -12,6 +12,10 @@ pub struct ClickHouseInserter {
     buffer: Vec<String>,
     total_rows: usize,
     client: reqwest::blocking::Client,
+    /// Accumulated time spent in HTTP POSTs to ClickHouse (ms).
+    pub insert_time_ms: u64,
+    /// Number of flush() calls that sent data.
+    pub flush_count: usize,
 }
 
 impl ClickHouseInserter {
@@ -23,6 +27,8 @@ impl ClickHouseInserter {
             buffer: Vec::with_capacity(batch_size),
             total_rows: 0,
             client: reqwest::blocking::Client::new(),
+            insert_time_ms: 0,
+            flush_count: 0,
         }
     }
 
@@ -57,12 +63,14 @@ impl ClickHouseInserter {
         let query = format!("INSERT INTO {} FORMAT JSONEachRow", self.table);
         let url = format!("{}/?query={}", self.url, urlencoding::encode(&query));
 
+        let post_start = std::time::Instant::now();
         let resp = self
             .client
             .post(&url)
             .header("Content-Type", "application/x-ndjson")
             .body(body)
             .send()?;
+        let post_elapsed = post_start.elapsed();
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -74,6 +82,8 @@ impl ClickHouseInserter {
             );
         }
 
+        self.insert_time_ms += post_elapsed.as_millis() as u64;
+        self.flush_count += 1;
         self.total_rows += rows_in_batch;
         self.buffer.clear();
 
