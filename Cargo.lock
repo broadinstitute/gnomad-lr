@@ -1119,6 +1119,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "flate2",
  "genohype-core",
  "genohype-pool",
  "noodles",

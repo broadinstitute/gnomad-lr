@@ -5,6 +5,42 @@
 use serde::Serialize;
 use tracing::info;
 
+/// Execute a single DDL statement against ClickHouse.
+pub fn execute_ddl(ch_url: &str, query: &str) -> anyhow::Result<()> {
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(ch_url)
+        .header("Content-Type", "text/plain")
+        .body(query.to_string())
+        .send()?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        anyhow::bail!("ClickHouse DDL failed ({}): {}", status, &body[..body.len().min(500)]);
+    }
+    Ok(())
+}
+
+/// Initialize all gnomAD-LR tables in ClickHouse by executing embedded SQL files.
+pub fn init_tables(ch_url: &str) -> anyhow::Result<()> {
+    let schemas: &[(&str, &str)] = &[
+        ("lr_coverage", include_str!("../sql/lr_coverage.sql")),
+        ("lr_sample_metadata", include_str!("../sql/lr_sample_metadata.sql")),
+        ("lr_str_histograms", include_str!("../sql/lr_str_histograms.sql")),
+        ("lr_methylation", include_str!("../sql/lr_methylation.sql")),
+        ("lr_methylation_summary_mv", include_str!("../sql/lr_methylation_summary_mv.sql")),
+    ];
+
+    for (name, ddl) in schemas {
+        info!("Initializing table: {}", name);
+        execute_ddl(ch_url, ddl)?;
+    }
+
+    info!("All tables initialized");
+    Ok(())
+}
+
 pub struct ClickHouseInserter {
     url: String,
     table: String,

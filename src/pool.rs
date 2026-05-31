@@ -19,6 +19,10 @@ impl TaskHandler for LrTaskHandler {
 
         match action {
             "index" => handle_index_tasks(tasks).await,
+            "load_coverage" => handle_coverage_tasks(payload, tasks).await,
+            "load_metadata" => handle_metadata_tasks(payload, tasks).await,
+            "load_histograms" => handle_histograms_tasks(payload, tasks).await,
+            "load_methylation" => handle_methylation_tasks(payload, tasks).await,
             "load" | _ => handle_load_tasks(payload, tasks).await,
         }
     }
@@ -118,4 +122,134 @@ async fn handle_load_tasks(
 
     let metrics_json = serde_json::to_value(&combined_metrics)?;
     Ok(TaskResult::success(total_rows, Some(metrics_json)))
+}
+
+async fn handle_coverage_tasks(
+    payload: &Value,
+    tasks: Vec<TaskDescriptor>,
+) -> Result<TaskResult, anyhow::Error> {
+    let ch_url = payload["clickhouse_url"]
+        .as_str()
+        .unwrap_or("http://localhost:8123")
+        .to_string();
+
+    let mut total_rows = 0usize;
+
+    for task in &tasks {
+        let gcs_path = task.payload["gcs_path"]
+            .as_str()
+            .unwrap_or("gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.coverage.tsv.gz")
+            .to_string();
+        let downsample = task.payload["downsample"].as_u64().unwrap_or(1) as u32;
+        let ch_url = ch_url.clone();
+
+        info!("Task {}: loading coverage from {}", task.id, gcs_path);
+        let rows = tokio::task::spawn_blocking(move || {
+            loader::coverage::load_coverage(&ch_url, &gcs_path, downsample)
+        })
+        .await??;
+        total_rows += rows;
+    }
+
+    Ok(TaskResult::success(total_rows, None))
+}
+
+async fn handle_metadata_tasks(
+    payload: &Value,
+    tasks: Vec<TaskDescriptor>,
+) -> Result<TaskResult, anyhow::Error> {
+    let ch_url = payload["clickhouse_url"]
+        .as_str()
+        .unwrap_or("http://localhost:8123")
+        .to_string();
+
+    let mut total_rows = 0usize;
+
+    for task in &tasks {
+        let csv_url = task.payload["csv_url"]
+            .as_str()
+            .unwrap_or(loader::metadata::HPRC_METADATA_URL)
+            .to_string();
+        let ch_url = ch_url.clone();
+
+        info!("Task {}: loading sample metadata from {}", task.id, csv_url);
+        let rows = tokio::task::spawn_blocking(move || {
+            loader::metadata::load_sample_metadata(&ch_url, &csv_url)
+        })
+        .await??;
+        total_rows += rows;
+    }
+
+    Ok(TaskResult::success(total_rows, None))
+}
+
+async fn handle_histograms_tasks(
+    payload: &Value,
+    tasks: Vec<TaskDescriptor>,
+) -> Result<TaskResult, anyhow::Error> {
+    let ch_url = payload["clickhouse_url"]
+        .as_str()
+        .unwrap_or("http://localhost:8123")
+        .to_string();
+
+    let mut total_rows = 0usize;
+
+    for task in &tasks {
+        let gcs_path = task.payload["gcs_path"]
+            .as_str()
+            .unwrap_or("gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.af_histograms.tsv")
+            .to_string();
+        let ch_url = ch_url.clone();
+
+        info!("Task {}: loading STR histograms from {}", task.id, gcs_path);
+        let rows = tokio::task::spawn_blocking(move || {
+            loader::histograms::load_str_histograms(&ch_url, &gcs_path)
+        })
+        .await??;
+        total_rows += rows;
+    }
+
+    Ok(TaskResult::success(total_rows, None))
+}
+
+async fn handle_methylation_tasks(
+    payload: &Value,
+    tasks: Vec<TaskDescriptor>,
+) -> Result<TaskResult, anyhow::Error> {
+    let ch_url = payload["clickhouse_url"]
+        .as_str()
+        .unwrap_or("http://localhost:8123")
+        .to_string();
+
+    let mut total_rows = 0usize;
+
+    for task in &tasks {
+        let bed_path = task.payload["bed_path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing 'bed_path' in methylation task"))?
+            .to_string();
+        let sample_id = task.payload["sample_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing 'sample_id' in methylation task"))?
+            .to_string();
+        let chrom = task.payload["chrom"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing 'chrom' in methylation task"))?
+            .to_string();
+        let start = task.payload["start"].as_u64().unwrap_or(0) as u32;
+        let stop = task.payload["stop"].as_u64().unwrap_or(400_000_000) as u32;
+        let ch_url = ch_url.clone();
+
+        info!(
+            "Task {}: loading methylation for {} {}:{}-{}",
+            task.id, sample_id, chrom, start, stop
+        );
+        let rows = tokio::task::spawn_blocking(move || {
+            loader::methylation::load_methylation(&ch_url, &bed_path, &sample_id, &chrom, start, stop)
+        })
+        .await??;
+        total_rows += rows;
+    }
+
+    Ok(TaskResult::success(total_rows, None))
 }

@@ -104,6 +104,33 @@ fn run_load(target: LoadTarget) -> anyhow::Result<()> {
             // Load haplotypes
             loader::haplotypes::load_haplotypes(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
         }
+        LoadTarget::Coverage(args) => {
+            let count = loader::coverage::load_coverage(&args.clickhouse_url, &args.gcs_path, args.downsample)?;
+            info!("Coverage: {} rows loaded", count);
+            return Ok(());
+        }
+        LoadTarget::Metadata(args) => {
+            let count = loader::metadata::load_sample_metadata(&args.clickhouse_url, &args.csv_url)?;
+            info!("Metadata: {} rows loaded", count);
+            return Ok(());
+        }
+        LoadTarget::Histograms(args) => {
+            let count = loader::histograms::load_str_histograms(&args.clickhouse_url, &args.gcs_path)?;
+            info!("Histograms: {} rows loaded", count);
+            return Ok(());
+        }
+        LoadTarget::Methylation(args) => {
+            let count = loader::methylation::load_methylation(
+                &args.clickhouse_url,
+                &args.bed_path,
+                &args.sample_id,
+                &args.chrom,
+                args.start,
+                args.stop,
+            )?;
+            info!("Methylation: {} rows loaded", count);
+            return Ok(());
+        }
     }
 
     metrics.total_ms = task_start.elapsed().as_millis() as u64;

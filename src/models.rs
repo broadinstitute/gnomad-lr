@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// Per-sample haplotype row matching lr_haplotypes ClickHouse schema.
 #[derive(Debug, Serialize)]
@@ -94,4 +95,65 @@ pub struct VariantRow {
     pub transcript_consequences_json: String,
     pub genes_json: String,
     pub main_reference_region_json: String,
+}
+
+/// Per-base coverage statistics matching lr_coverage ClickHouse schema.
+#[derive(Debug, Serialize)]
+pub struct CoverageRow {
+    pub chrom: String,
+    pub pos: u32,
+    pub mean: f32,
+    pub median: f32,
+    pub over_1: f32,
+    pub over_5: f32,
+    pub over_10: f32,
+    pub over_15: f32,
+    pub over_20: f32,
+    pub over_25: f32,
+    pub over_30: f32,
+    pub over_50: f32,
+    pub over_100: f32,
+}
+
+/// Sample metadata matching lr_sample_metadata ClickHouse schema.
+#[derive(Debug, Serialize)]
+pub struct SampleMetadataRow {
+    pub sample_id: String,
+    pub subpopulation: String,
+    pub superpopulation: String,
+    pub population_descriptor: String,
+    pub sex: String,
+    pub collection: String,
+}
+
+/// STR allele frequency histogram matching lr_str_histograms ClickHouse schema.
+#[derive(Debug, Serialize)]
+pub struct StrHistogramRow {
+    pub chrom: String,
+    pub position: u32,
+    pub end_position: u32,
+    pub motif: String,
+    pub allele_size_histogram: String,
+    pub biallelic_histogram: String,
+    pub min_repeats: f32,
+    pub mode_repeats: f32,
+    pub mean_repeats: f32,
+    pub stdev_repeats: f32,
+    pub median_repeats: f32,
+    pub p99_repeats: f32,
+    pub max_repeats: f32,
+    pub unique_allele_lengths: u32,
+    pub num_called_alleles: u32,
+    pub populations: HashMap<String, String>,
+}
+
+/// Per-sample methylation row matching lr_methylation ClickHouse schema.
+#[derive(Debug, Serialize)]
+pub struct MethylationRow {
+    pub chrom: String,
+    pub pos1: u32,
+    pub pos2: u32,
+    pub sample_id: String,
+    pub methylation: f32,
+    pub coverage: u16,
 }

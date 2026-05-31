@@ -115,6 +115,78 @@ pub enum LoadTarget {
     Variants(LoadArgs),
     /// Load both haplotypes and variants
     All(LoadArgs),
+    /// Load coverage data from GCS TSV.gz
+    Coverage(CoverageArgs),
+    /// Load sample metadata from HPRC CSV
+    Metadata(MetadataArgs),
+    /// Load STR allele frequency histograms from GCS TSV
+    Histograms(HistogramsArgs),
+    /// Load methylation data from tabix-indexed BED
+    Methylation(MethylationArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct CoverageArgs {
+    /// GCS path to coverage TSV.gz
+    #[arg(long, default_value = "gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.coverage.tsv.gz")]
+    pub gcs_path: String,
+
+    /// ClickHouse HTTP URL
+    #[arg(long, default_value = "http://localhost:8123")]
+    pub clickhouse_url: String,
+
+    /// Downsample step (minimum bp spacing between retained rows)
+    #[arg(long, default_value = "1")]
+    pub downsample: u32,
+}
+
+#[derive(Args, Clone)]
+pub struct MetadataArgs {
+    /// URL for the HPRC sample metadata CSV
+    #[arg(long, default_value = "https://raw.githubusercontent.com/human-pangenomics/hprc_intermediate_assembly/main/data_tables/sample/hprc_release2_sample_metadata.csv")]
+    pub csv_url: String,
+
+    /// ClickHouse HTTP URL
+    #[arg(long, default_value = "http://localhost:8123")]
+    pub clickhouse_url: String,
+}
+
+#[derive(Args, Clone)]
+pub struct HistogramsArgs {
+    /// GCS path to STR histograms TSV
+    #[arg(long, default_value = "gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.af_histograms.tsv")]
+    pub gcs_path: String,
+
+    /// ClickHouse HTTP URL
+    #[arg(long, default_value = "http://localhost:8123")]
+    pub clickhouse_url: String,
+}
+
+#[derive(Args, Clone)]
+pub struct MethylationArgs {
+    /// GCS path to tabix-indexed BED file
+    #[arg(long)]
+    pub bed_path: String,
+
+    /// Sample ID
+    #[arg(long)]
+    pub sample_id: String,
+
+    /// Chromosome (e.g. chr22)
+    #[arg(long)]
+    pub chrom: String,
+
+    /// Start position
+    #[arg(long, default_value = "0")]
+    pub start: u32,
+
+    /// Stop position
+    #[arg(long, default_value = "400000000")]
+    pub stop: u32,
+
+    /// ClickHouse HTTP URL
+    #[arg(long, default_value = "http://localhost:8123")]
+    pub clickhouse_url: String,
 }
 
 #[derive(Args, Clone)]
