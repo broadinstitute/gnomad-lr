@@ -60,8 +60,12 @@ async fn handle_load_tasks(
         .unwrap_or("http://localhost:8123")
         .to_string();
 
-    // Process all tasks in parallel across threads
-    let mut handles = Vec::new();
+    // Process tasks sequentially to limit memory usage.
+    // Each region buffers all records in memory (~300MB for dense 5MB regions),
+    // so running multiple in parallel OOMs 7.5GB VMs.
+    let mut total_rows = 0usize;
+    let mut combined_metrics = loader::IngestMetrics::default();
+    let combined_start = std::time::Instant::now();
 
     for task in &tasks {
         let chrom = task.payload["chrom"]
@@ -85,7 +89,7 @@ async fn handle_load_tasks(
         );
 
         let ch_url = ch_url.clone();
-        let handle = tokio::task::spawn_blocking(move || {
+        let metrics = tokio::task::spawn_blocking(move || {
             let mut metrics = loader::IngestMetrics::default();
             let task_start = std::time::Instant::now();
 
@@ -102,17 +106,8 @@ async fn handle_load_tasks(
             metrics.total_ms = task_start.elapsed().as_millis() as u64;
             info!("Task {} complete ({}ms total, {}ms CH insert, {} rows)", task_id, metrics.total_ms, metrics.ch_insert_ms, metrics.ch_rows_inserted);
             Ok::<_, anyhow::Error>(metrics)
-        });
-        handles.push(handle);
-    }
+        }).await??;
 
-    // Wait for all tasks and aggregate metrics
-    let mut total_rows = 0usize;
-    let mut combined_metrics = loader::IngestMetrics::default();
-    let combined_start = std::time::Instant::now();
-
-    for handle in handles {
-        let metrics = handle.await??;
         total_rows += metrics.ch_rows_inserted;
         combined_metrics.prescan_ms += metrics.prescan_ms;
         combined_metrics.ch_insert_ms += metrics.ch_insert_ms;
