@@ -1,0 +1,14 @@
+[defaults]
+project = "gnomadev"
+zone = "us-east1-b"
+network = "gnomad-v4-dev"
+
+[pools.lr]
+machine_type = "n1-standard-2"
+spot = true
+starting_workers = 0
+workers = 32
+with_coordinator = true
+worker_binary = "target/release/gnomad-lr-worker"
+subnet = "gnomad-v4-dev-main"
+pool_db_path = "gs://gnomad-lr-data/pool-ops/ops.db"
