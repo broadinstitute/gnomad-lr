@@ -58,6 +58,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn run_load(target: LoadTarget) -> anyhow::Result<()> {
+    use loader::vcf_reader::VcfStream;
+
     let mut metrics = loader::IngestMetrics::default();
     let task_start = std::time::Instant::now();
 
@@ -67,14 +69,22 @@ fn run_load(target: LoadTarget) -> anyhow::Result<()> {
             let vcf_path = args.vcf_path.or_else(|| domain::resolve_vcf_path(&chrom));
             let vcf_path = vcf_path.ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
             info!("Loading haplotypes from {} for {}:{}-{}", vcf_path, chrom, start, stop);
-            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
+            let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
+            let sample_names = stream.sample_names.clone();
+            let records: Vec<String> = stream.records().collect();
+            info!("Buffered {} records", records.len());
+            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
         }
         LoadTarget::Variants(args) => {
             let (chrom, start, stop) = parse_region(&args.region)?;
             let vcf_path = args.vcf_path.or_else(|| domain::resolve_vcf_path(&chrom));
             let vcf_path = vcf_path.ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
             info!("Loading variants from {} for {}:{}-{}", vcf_path, chrom, start, stop);
-            loader::variants::load_variants(&args.clickhouse_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
+            let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
+            let sample_names = stream.sample_names.clone();
+            let records: Vec<String> = stream.records().collect();
+            info!("Buffered {} records", records.len());
+            loader::variants::load_variants(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
         }
         LoadTarget::All(args) => {
             let (chrom, start, stop) = parse_region(&args.region)?;
@@ -82,11 +92,17 @@ fn run_load(target: LoadTarget) -> anyhow::Result<()> {
             let vcf_path = vcf_path.ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
             info!("Loading all from {} for {}:{}-{}", vcf_path, chrom, start, stop);
 
+            // Read VCF region once into memory
+            let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
+            let sample_names = stream.sample_names.clone();
+            let records: Vec<String> = stream.records().collect();
+            info!("Buffered {} records", records.len());
+
             // Load variants first (includes prescan)
-            loader::variants::load_variants(&args.clickhouse_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
+            loader::variants::load_variants(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
 
             // Load haplotypes
-            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
+            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
         }
     }
 

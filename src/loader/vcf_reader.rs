@@ -187,83 +187,83 @@ fn load_tabix_index(tbi_path: &str) -> Option<tabix::Index> {
     tbi_reader.read_index().ok()
 }
 
-/// Parse a VCF INFO field string into key-value pairs.
+/// Parse a VCF INFO field string into key-value pairs (zero-allocation, borrows input).
 /// Flag fields (no `=`) get value `None`.
-pub fn parse_info_field(info_str: &str) -> HashMap<String, Option<String>> {
+pub fn parse_info_field_shallow(info_str: &str) -> HashMap<&str, Option<&str>> {
     let mut info = HashMap::new();
     for entry in info_str.split(';') {
         if let Some(eq_pos) = entry.find('=') {
             let key = &entry[..eq_pos];
             let val = &entry[eq_pos + 1..];
-            info.insert(key.to_string(), Some(val.to_string()));
+            info.insert(key, Some(val));
         } else {
-            info.insert(entry.to_string(), None);
+            info.insert(entry, None);
         }
     }
     info
 }
 
 /// Extract a float from the info map.
-pub fn info_float(info: &HashMap<String, Option<String>>, key: &str) -> Option<f32> {
+pub fn info_float(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<f32> {
     info.get(key)
         .and_then(|v| v.as_ref())
-        .and_then(|v| if v == "." { None } else { v.parse().ok() })
+        .and_then(|v| if *v == "." { None } else { v.parse().ok() })
 }
 
 /// Extract an int from the info map.
-pub fn info_int(info: &HashMap<String, Option<String>>, key: &str) -> Option<i32> {
+pub fn info_int(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<i32> {
     info.get(key)
         .and_then(|v| v.as_ref())
-        .and_then(|v| if v == "." { None } else { v.parse().ok() })
+        .and_then(|v| if *v == "." { None } else { v.parse().ok() })
 }
 
 /// Extract a u32 from the info map.
-pub fn info_u32(info: &HashMap<String, Option<String>>, key: &str) -> Option<u32> {
+pub fn info_u32(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<u32> {
     info.get(key)
         .and_then(|v| v.as_ref())
-        .and_then(|v| if v == "." { None } else { v.parse().ok() })
+        .and_then(|v| if *v == "." { None } else { v.parse().ok() })
 }
 
 /// Extract the first comma-separated value as a string.
-pub fn info_first(info: &HashMap<String, Option<String>>, key: &str) -> String {
+pub fn info_first(info: &HashMap<&str, Option<&str>>, key: &str) -> String {
     info.get(key)
         .and_then(|v| v.as_ref())
         .map(|v| {
-            if v == "." { return String::new(); }
+            if *v == "." { return String::new(); }
             v.split(',').next().unwrap_or("").to_string()
         })
         .unwrap_or_default()
 }
 
 /// Get an info string value, returning empty string for flags or missing.
-pub fn info_str(info: &HashMap<String, Option<String>>, key: &str) -> String {
+pub fn info_str(info: &HashMap<&str, Option<&str>>, key: &str) -> String {
     match info.get(key) {
-        Some(Some(v)) if v != "." => v.clone(),
+        Some(Some(v)) if *v != "." => v.to_string(),
         _ => String::new(),
     }
 }
 
 /// Check if an INFO flag is present.
-pub fn info_flag(info: &HashMap<String, Option<String>>, key: &str) -> bool {
+pub fn info_flag(info: &HashMap<&str, Option<&str>>, key: &str) -> bool {
     info.contains_key(key)
 }
 
 /// Extract the first element of a Number=A field as f32.
-pub fn info_first_float(info: &HashMap<String, Option<String>>, key: &str) -> Option<f32> {
+pub fn info_first_float(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<f32> {
     info.get(key)
         .and_then(|v| v.as_ref())
         .and_then(|v| {
-            if v == "." { return None; }
+            if *v == "." { return None; }
             v.split(',').next().and_then(|s| s.parse().ok())
         })
 }
 
 /// Extract the first element of a Number=A field as u32.
-pub fn info_first_u32(info: &HashMap<String, Option<String>>, key: &str) -> Option<u32> {
+pub fn info_first_u32(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<u32> {
     info.get(key)
         .and_then(|v| v.as_ref())
         .and_then(|v| {
-            if v == "." { return None; }
+            if *v == "." { return None; }
             v.split(',').next().and_then(|s| s.parse().ok())
         })
 }

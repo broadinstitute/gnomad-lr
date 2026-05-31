@@ -4,6 +4,7 @@ use serde_json::Value;
 use tracing::info;
 
 use crate::{domain, loader};
+use crate::loader::vcf_reader::VcfStream;
 
 pub struct LrTaskHandler;
 
@@ -88,8 +89,15 @@ async fn handle_load_tasks(
             let mut metrics = loader::IngestMetrics::default();
             let task_start = std::time::Instant::now();
 
-            loader::variants::load_variants(&ch_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
-            loader::haplotypes::load_haplotypes(&ch_url, &vcf_path, &chrom, start, stop, &mut metrics)?;
+            // Read the VCF region once into memory
+            info!("Reading VCF region into memory: {}:{}-{}", chrom, start, stop);
+            let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
+            let sample_names = stream.sample_names.clone();
+            let records: Vec<String> = stream.records().collect();
+            info!("Buffered {} records, {} samples", records.len(), sample_names.len());
+
+            loader::variants::load_variants(&ch_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
+            loader::haplotypes::load_haplotypes(&ch_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
 
             metrics.total_ms = task_start.elapsed().as_millis() as u64;
             info!("Task {} complete ({}ms total, {}ms CH insert, {} rows)", task_id, metrics.total_ms, metrics.ch_insert_ms, metrics.ch_rows_inserted);

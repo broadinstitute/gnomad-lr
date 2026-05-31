@@ -17,22 +17,20 @@ const BATCH_SIZE: usize = 50000;
 
 pub fn load_haplotypes(
     ch_url: &str,
-    vcf_path: &str,
+    records: &[String],
+    sample_names: &[String],
     region_chrom: &str,
     region_start: u32,
     region_stop: u32,
     metrics: &mut super::IngestMetrics,
 ) -> anyhow::Result<()> {
     info!("Loading haplotypes from VCF...");
-    info!("VCF: {}", vcf_path);
     info!("Region: {}:{}-{}", region_chrom, region_start, region_stop);
 
-    let stream = VcfStream::open_region(vcf_path, region_chrom, region_start, region_stop)?;
-    let sample_names = stream.sample_names.clone();
     let mut inserter = ClickHouseInserter::new(ch_url, "lr_haplotypes", BATCH_SIZE);
     let mut variants_seen: u64 = 0;
 
-    for line in stream.records() {
+    for line in records {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 10 {
             continue;
@@ -66,7 +64,7 @@ pub fn load_haplotypes(
             filter_field.split(';').map(|s| s.to_string()).collect()
         };
 
-        let info = parse_info_field(info_str);
+        let info = parse_info_field_shallow(info_str);
 
         let af = info_first_float(&info, "AF").unwrap_or(0.0);
         let ac = info_first_u32(&info, "AC").unwrap_or(0);
@@ -234,9 +232,9 @@ pub fn load_haplotypes(
 }
 
 /// Get a string value from the info map, returning empty string for flags/missing.
-fn info_str_val(info: &HashMap<String, Option<String>>, key: &str) -> String {
+fn info_str_val(info: &HashMap<&str, Option<&str>>, key: &str) -> String {
     match info.get(key) {
-        Some(Some(v)) if v != "." => v.clone(),
+        Some(Some(v)) if *v != "." => v.to_string(),
         _ => String::new(),
     }
 }

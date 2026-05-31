@@ -15,26 +15,26 @@ const BATCH_SIZE: usize = 50000;
 
 pub fn load_variants(
     ch_url: &str,
-    vcf_path: &str,
+    records: &[String],
+    sample_names: &[String],
     region_chrom: &str,
     region_start: u32,
     region_stop: u32,
     metrics: &mut super::IngestMetrics,
 ) -> anyhow::Result<()> {
+    let _ = sample_names; // reserved for future use
     info!("Loading variants from VCF (site-level)...");
-    info!("VCF: {}", vcf_path);
     info!("Region: {}:{}-{}", region_chrom, region_start, region_stop);
 
     // Pre-pass to build enveloped map
-    let enveloped_map = build_enveloped_map(vcf_path, region_chrom, region_start, region_stop, metrics)?;
+    let enveloped_map = build_enveloped_map(records, region_chrom, region_start, region_stop, metrics)?;
 
     // Main pass
-    let stream = VcfStream::open_region(vcf_path, region_chrom, region_start, region_stop)?;
     let mut inserter = ClickHouseInserter::new(ch_url, "lr_variants", BATCH_SIZE);
     let chrom_num = domain::compute_chrom_number(region_chrom);
     let mut count: u64 = 0;
 
-    for line in stream.records() {
+    for line in records {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 8 {
             continue;
@@ -60,7 +60,7 @@ pub fn load_variants(
         // variant_id from VCF ID column, strip "chr"
         let variant_id = parts[2].replacen("chr", "", 1);
 
-        let info = parse_info_field(info_str_raw);
+        let info = parse_info_field_shallow(info_str_raw);
 
         let allele_type = info_str_val(&info, "allele_type");
         let filters: Vec<String> = if filter_field == "." || filter_field == "PASS" {
@@ -183,9 +183,9 @@ pub fn load_variants(
 }
 
 /// Get a string value from the info map.
-fn info_str_val(info: &HashMap<String, Option<String>>, key: &str) -> String {
+fn info_str_val(info: &HashMap<&str, Option<&str>>, key: &str) -> String {
     match info.get(key) {
-        Some(Some(v)) if v != "." => v.clone(),
+        Some(Some(v)) if *v != "." => v.to_string(),
         _ => String::new(),
     }
 }
@@ -193,10 +193,10 @@ fn info_str_val(info: &HashMap<String, Option<String>>, key: &str) -> String {
 /// Parse VEP from INFO field.
 /// Returns (transcript_consequences, genes, intergenic, major_consequence).
 fn parse_vep_entries(
-    info: &HashMap<String, Option<String>>,
+    info: &HashMap<&str, Option<&str>>,
 ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>, u8, String) {
     let vep_str = match info.get("vep") {
-        Some(Some(v)) if !v.is_empty() => v.clone(),
+        Some(Some(v)) if !v.is_empty() => *v,
         _ => return (vec![], vec![], 0, String::new()),
     };
 
@@ -334,7 +334,7 @@ fn parse_vep_entries(
 }
 
 /// Build the nested frequency JSON matching LongReadVariantFrequencies.
-fn build_freq_json(info: &HashMap<String, Option<String>>) -> String {
+fn build_freq_json(info: &HashMap<&str, Option<&str>>) -> String {
     let populations_list = ["afr", "amr", "asj", "eas", "nfe", "sas"];
     let sexes = ["XX", "XY"];
 
@@ -353,7 +353,7 @@ fn build_freq_json(info: &HashMap<String, Option<String>>) -> String {
         info.get(key)
             .and_then(|v| v.as_ref())
             .and_then(|v| {
-                if v == "." { return None; }
+                if *v == "." { return None; }
                 v.split(',').next().and_then(|s| s.parse().ok())
             })
             .unwrap_or(0.0)
@@ -363,7 +363,7 @@ fn build_freq_json(info: &HashMap<String, Option<String>>) -> String {
         info.get(key)
             .and_then(|v| v.as_ref())
             .and_then(|v| {
-                if v == "." { return None; }
+                if *v == "." { return None; }
                 v.split(',').next().and_then(|s| s.parse().ok())
             })
             .unwrap_or(0)

@@ -5,13 +5,13 @@
 //! Returns: HashMap<trid, Vec<variant_id>> (enveloping TR → enveloped variants).
 
 use std::collections::HashMap;
-use super::vcf_reader::{VcfStream, parse_info_field};
+use super::vcf_reader::parse_info_field_shallow;
 use super::IngestMetrics;
 use tracing::info;
 
 /// Build the enveloped map: TRID → list of enveloped variant IDs.
 pub fn build_enveloped_map(
-    vcf_path: &str,
+    records: &[String],
     region_chrom: &str,
     region_start: u32,
     region_stop: u32,
@@ -22,8 +22,7 @@ pub fn build_enveloped_map(
 
     let mut enveloped_map: HashMap<String, Vec<String>> = HashMap::new();
 
-    let stream = VcfStream::open_region(vcf_path, region_chrom, region_start, region_stop)?;
-    for line in stream.records() {
+    for line in records {
         // Quick filter before parsing
         if !line.contains("TR_ENVELOPED") {
             continue;
@@ -47,7 +46,7 @@ pub fn build_enveloped_map(
             continue;
         }
 
-        let info = parse_info_field(parts[7]);
+        let info = parse_info_field_shallow(parts[7]);
         if !info.contains_key("TR_ENVELOPED") {
             continue;
         }
