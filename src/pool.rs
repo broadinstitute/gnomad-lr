@@ -23,9 +23,68 @@ impl TaskHandler for LrTaskHandler {
             "load_metadata" => handle_metadata_tasks(payload, tasks).await,
             "load_histograms" => handle_histograms_tasks(payload, tasks).await,
             "load_methylation" => handle_methylation_tasks(payload, tasks).await,
+            "build_cache" => handle_build_cache_tasks(payload, tasks).await,
             "load" | _ => handle_load_tasks(payload, tasks).await,
         }
     }
+}
+
+/// Phase-4 `gcs-cache` build: each task carries a chunk of `gene_id`s; the worker
+/// materializes one `{gene_id}.json` GeneVariantsResponse blob per gene to the
+/// shared `output_prefix` (a `gs://` cache prefix). Job-wide table paths come from
+/// the top-level payload; the per-task `gene_ids` array is the chunk to build.
+///
+/// Reuses [`genohype_core::export::build_cache`] (the single source of truth for
+/// the blob contract; see `genohype/core/src/export/cache_builder.rs`).
+async fn handle_build_cache_tasks(
+    payload: &Value,
+    tasks: Vec<TaskDescriptor>,
+) -> Result<TaskResult, anyhow::Error> {
+    let genes_path = payload["genes_path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing 'genes_path' in build_cache payload"))?
+        .to_string();
+    let variants_path = payload["variants_path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing 'variants_path' in build_cache payload"))?
+        .to_string();
+    let output_prefix = payload["output_prefix"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing 'output_prefix' in build_cache payload"))?
+        .to_string();
+
+    let mut total_blobs = 0usize;
+    for task in &tasks {
+        let gene_ids: Vec<String> = task.payload["gene_ids"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("missing 'gene_ids' in build_cache task {}", task.id))?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+
+        info!("Task {}: building cache for {} genes", task.id, gene_ids.len());
+
+        let genes_path = genes_path.clone();
+        let variants_path = variants_path.clone();
+        let output_prefix = output_prefix.clone();
+        let stats = tokio::task::spawn_blocking(move || {
+            genohype_core::export::build_cache(
+                &genes_path,
+                &variants_path,
+                &output_prefix,
+                Some(&gene_ids),
+            )
+        })
+        .await??;
+
+        info!(
+            "Task {} complete: {} blobs, {} variants, {} bytes",
+            task.id, stats.blobs_written, stats.total_variants, stats.total_bytes
+        );
+        total_blobs += stats.blobs_written;
+    }
+
+    Ok(TaskResult::success(total_blobs, None))
 }
 
 async fn handle_index_tasks(tasks: Vec<TaskDescriptor>) -> Result<TaskResult, anyhow::Error> {
