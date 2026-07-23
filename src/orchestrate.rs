@@ -46,6 +46,30 @@ fn chrom_length(chrom: &str) -> u32 {
     }
 }
 
+/// Split a 1-based chromosome into inclusive, non-overlapping regions.
+fn split_regions(chrom_len: u32, region_size: u32) -> anyhow::Result<Vec<(u32, u32)>> {
+    if region_size == 0 {
+        anyhow::bail!("region size must be greater than zero");
+    }
+    if chrom_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut regions = Vec::new();
+    let mut start = 1u32;
+    loop {
+        let stop = start
+            .saturating_add(region_size.saturating_sub(1))
+            .min(chrom_len);
+        regions.push((start, stop));
+        if stop == chrom_len {
+            break;
+        }
+        start = stop + 1;
+    }
+    Ok(regions)
+}
+
 fn vcf_path(base: &str, chrom: &str) -> String {
     format!("{}/{}.renamed.vcf.gz", base, chrom)
 }
@@ -160,10 +184,7 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
     let mut tasks: Vec<serde_json::Value> = Vec::new();
 
     for chrom in &chroms {
-        let len = chrom_length(chrom);
-        let mut start: u32 = 0;
-        while start < len {
-            let stop = (start + args.region_size).min(len);
+        for (start, stop) in split_regions(chrom_length(chrom), args.region_size)? {
             tasks.push(json!({
                 "chrom": chrom,
                 "vcf_path": vcf_path(&args.vcf_base, chrom),
@@ -171,7 +192,6 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
                 "stop": stop,
                 "label": format!("{}:{}-{}", chrom, start / 1_000_000, stop / 1_000_000),
             }));
-            start = stop;
         }
     }
 
@@ -188,4 +208,19 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
 
     info!("Load phase complete.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_regions;
+
+    #[test]
+    fn regions_are_one_based_non_overlapping_and_cover_the_chromosome() {
+        assert_eq!(split_regions(10, 4).unwrap(), vec![(1, 4), (5, 8), (9, 10)]);
+    }
+
+    #[test]
+    fn rejects_zero_region_size() {
+        assert!(split_regions(10, 0).is_err());
+    }
 }
