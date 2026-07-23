@@ -7,6 +7,7 @@
 //!
 //! Both modes yield raw tab-delimited lines one at a time without buffering.
 
+use anyhow::Context;
 use genohype_core::io::get_reader;
 use noodles::bgzf;
 use noodles::csi::BinningIndex;
@@ -20,7 +21,7 @@ use tracing::info;
 /// Records are yielded one at a time without buffering the entire file.
 pub struct VcfStream {
     pub sample_names: Vec<String>,
-    lines: Box<dyn Iterator<Item = String> + Send>,
+    lines: Box<dyn Iterator<Item = anyhow::Result<String>> + Send>,
 }
 
 impl VcfStream {
@@ -41,7 +42,14 @@ impl VcfStream {
                     }
                     if line.starts_with("#CHROM") {
                         let parts: Vec<&str> = line.split('\t').collect();
-                        let names: Vec<String> = parts[9..].iter().map(|s| s.to_string()).collect();
+                        if parts.len() < 8 {
+                            anyhow::bail!("invalid #CHROM header: expected at least 8 columns");
+                        }
+                        let names = if parts.len() > 9 {
+                            parts[9..].iter().map(|s| s.to_string()).collect()
+                        } else {
+                            Vec::new()
+                        };
                         info!("Found {} samples in VCF header", names.len());
                         break names;
                     }
@@ -51,7 +59,7 @@ impl VcfStream {
             }
         };
 
-        let streaming_iter = lines_iter.filter_map(|r| r.ok());
+        let streaming_iter = lines_iter.map(|result| result.map_err(anyhow::Error::from));
 
         Ok(VcfStream {
             sample_names,
@@ -59,45 +67,63 @@ impl VcfStream {
         })
     }
 
-    /// Open a bgzipped VCF and stream only records in the given region,
-    /// using a tabix index for efficient seeking.
-    ///
-    /// Falls back to streaming `open()` if no .tbi index is found.
-    pub fn open_region(
+    /// Open a bgzipped VCF and stream only records in the given region.
+    /// Legacy callers may fall back to a full scan when the adjacent TBI is absent.
+    pub fn open_region(vcf_path: &str, chrom: &str, start: u32, stop: u32) -> anyhow::Result<Self> {
+        Self::open_region_with_index_policy(vcf_path, chrom, start, stop, false)
+    }
+
+    /// Open a bounded region and require the adjacent TBI.
+    /// Y1 paths use this contract so a missing/corrupt index cannot become a full scan.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn open_region_required_index(
         vcf_path: &str,
         chrom: &str,
         start: u32,
         stop: u32,
     ) -> anyhow::Result<Self> {
-        // Try to load the tabix index
-        let tbi_path = format!("{}.tbi", vcf_path);
+        Self::open_region_with_index_policy(vcf_path, chrom, start, stop, true)
+    }
+
+    fn open_region_with_index_policy(
+        vcf_path: &str,
+        chrom: &str,
+        start: u32,
+        stop: u32,
+        require_index: bool,
+    ) -> anyhow::Result<Self> {
+        let tbi_path = format!("{vcf_path}.tbi");
         let index = match load_tabix_index(&tbi_path) {
-            Some(idx) => idx,
-            None => {
-                info!("No tabix index found at {}, falling back to full scan", tbi_path);
+            Ok(index) => index,
+            Err(error) if !require_index => {
+                info!(
+                    "No usable tabix index at {}, falling back to full scan: {}",
+                    tbi_path, error
+                );
                 return Self::open(vcf_path);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("required tabix index is unavailable at {tbi_path}"));
             }
         };
 
         info!("Using tabix index for {}:{}-{}", chrom, start, stop);
 
-        // Read the header (need sample names)
         let header_reader = get_reader(vcf_path)?;
         let bgzf_header = bgzf::Reader::new(header_reader);
         let mut vcf_header_reader = noodles::vcf::io::Reader::new(bgzf_header);
         let header = vcf_header_reader.read_header()?;
-
         let sample_names: Vec<String> = header
             .sample_names()
             .iter()
-            .map(|s| s.to_string())
+            .map(|sample| sample.to_string())
             .collect();
         info!("Found {} samples in VCF header", sample_names.len());
 
-        // Resolve chrom to reference sequence ID in the index
-        let index_header = index.header().ok_or_else(|| {
-            anyhow::anyhow!("tabix index has no header")
-        })?;
+        let index_header = index
+            .header()
+            .ok_or_else(|| anyhow::anyhow!("tabix index has no header"))?;
         let ref_seq_id = index_header
             .reference_sequence_names()
             .iter()
@@ -105,13 +131,11 @@ impl VcfStream {
                 let bytes: &[u8] = name.as_ref();
                 bytes == chrom.as_bytes()
             })
-            .ok_or_else(|| anyhow::anyhow!("chrom {} not found in tabix index", chrom))?;
+            .ok_or_else(|| anyhow::anyhow!("chrom {chrom} not found in tabix index"))?;
 
-        // Build the interval (noodles positions are 1-based)
         let interval_start = noodles::core::Position::try_from(start.max(1) as usize)?;
         let interval_end = noodles::core::Position::try_from(stop as usize)?;
         let interval = noodles::core::region::Interval::from(interval_start..=interval_end);
-
         let chunks = index.query(ref_seq_id, interval)?;
 
         if chunks.is_empty() {
@@ -123,17 +147,20 @@ impl VcfStream {
         }
 
         info!("Found {} chunks for region", chunks.len());
-
-        // Stream records via a background thread to avoid the borrow issue.
-        // The thread owns the BGZF reader + Query and sends lines through a channel.
         let vcf_path_owned = vcf_path.to_string();
         let chrom_owned = chrom.to_string();
-        let (tx, rx) = mpsc::sync_channel::<String>(1024);
+        let (tx, rx) = mpsc::sync_channel::<anyhow::Result<String>>(1024);
 
         std::thread::spawn(move || {
             let reader = match get_reader(&vcf_path_owned) {
-                Ok(r) => r,
-                Err(_) => return,
+                Ok(reader) => reader,
+                Err(error) => {
+                    let _ =
+                        tx.send(Err(error).with_context(|| {
+                            format!("failed to open indexed VCF {vcf_path_owned}")
+                        }));
+                    return;
+                }
             };
             let mut bgzf_data = bgzf::Reader::new(reader);
             let query = noodles::csi::io::Query::new(&mut bgzf_data, chunks);
@@ -141,28 +168,45 @@ impl VcfStream {
 
             for line_result in buf_query.lines() {
                 let line = match line_result {
-                    Ok(l) => l,
-                    Err(_) => continue,
+                    Ok(line) => line,
+                    Err(error) => {
+                        let _ = tx.send(Err(error.into()));
+                        return;
+                    }
                 };
 
-                // Post-filter by chrom and position (tabix is block-level)
-                if let Some(pos_end) = line.find('\t') {
-                    let line_chrom = &line[..pos_end];
-                    if line_chrom != chrom_owned {
-                        continue;
+                let Some(pos_end) = line.find('\t') else {
+                    let _ = tx.send(Err(anyhow::anyhow!(
+                        "indexed VCF record has no CHROM/POS separator"
+                    )));
+                    return;
+                };
+                let line_chrom = &line[..pos_end];
+                if line_chrom != chrom_owned {
+                    continue;
+                }
+                let Some(next_tab) = line[pos_end + 1..].find('\t') else {
+                    let _ = tx.send(Err(anyhow::anyhow!(
+                        "indexed VCF record has no POS/ID separator"
+                    )));
+                    return;
+                };
+                let pos_str = &line[pos_end + 1..pos_end + 1 + next_tab];
+                let pos = match pos_str.parse::<u32>() {
+                    Ok(pos) => pos,
+                    Err(error) => {
+                        let _ = tx.send(Err(anyhow::anyhow!(
+                            "invalid indexed VCF position {pos_str:?}: {error}"
+                        )));
+                        return;
                     }
-                    if let Some(next_tab) = line[pos_end + 1..].find('\t') {
-                        let pos_str = &line[pos_end + 1..pos_end + 1 + next_tab];
-                        if let Ok(pos) = pos_str.parse::<u32>() {
-                            if pos < start || pos > stop {
-                                continue;
-                            }
-                        }
-                    }
+                };
+                if pos < start || pos > stop {
+                    continue;
                 }
 
-                if tx.send(line).is_err() {
-                    break; // receiver dropped
+                if tx.send(Ok(line)).is_err() {
+                    break;
                 }
             }
         });
@@ -173,17 +217,16 @@ impl VcfStream {
         })
     }
 
-    /// Iterate over data lines.
-    pub fn records(self) -> impl Iterator<Item = String> + Send {
+    /// Iterate over data lines. I/O and BGZF decoding errors are never discarded.
+    pub fn records(self) -> impl Iterator<Item = anyhow::Result<String>> + Send {
         self.lines
     }
 }
 
-/// Try to load a tabix index from a path (local or GCS).
-fn load_tabix_index(tbi_path: &str) -> Option<tabix::Index> {
-    let reader = get_reader(tbi_path).ok()?;
+fn load_tabix_index(tbi_path: &str) -> anyhow::Result<tabix::Index> {
+    let reader = get_reader(tbi_path)?;
     let mut tbi_reader = tabix::io::Reader::new(reader);
-    tbi_reader.read_index().ok()
+    Ok(tbi_reader.read_index()?)
 }
 
 /// Parse a VCF INFO field string into key-value pairs (zero-allocation, borrows input).
@@ -228,7 +271,9 @@ pub fn info_first(info: &HashMap<&str, Option<&str>>, key: &str) -> String {
     info.get(key)
         .and_then(|v| v.as_ref())
         .map(|v| {
-            if *v == "." { return String::new(); }
+            if *v == "." {
+                return String::new();
+            }
             v.split(',').next().unwrap_or("").to_string()
         })
         .unwrap_or_default()
@@ -241,20 +286,50 @@ pub fn info_flag(info: &HashMap<&str, Option<&str>>, key: &str) -> bool {
 
 /// Extract the first element of a Number=A field as f32.
 pub fn info_first_float(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<f32> {
-    info.get(key)
-        .and_then(|v| v.as_ref())
-        .and_then(|v| {
-            if *v == "." { return None; }
-            v.split(',').next().and_then(|s| s.parse().ok())
-        })
+    info.get(key).and_then(|v| v.as_ref()).and_then(|v| {
+        if *v == "." {
+            return None;
+        }
+        v.split(',').next().and_then(|s| s.parse().ok())
+    })
 }
 
 /// Extract the first element of a Number=A field as u32.
 pub fn info_first_u32(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<u32> {
-    info.get(key)
-        .and_then(|v| v.as_ref())
-        .and_then(|v| {
-            if *v == "." { return None; }
-            v.split(',').next().and_then(|s| s.parse().ok())
-        })
+    info.get(key).and_then(|v| v.as_ref()).and_then(|v| {
+        if *v == "." {
+            return None;
+        }
+        v.split(',').next().and_then(|s| s.parse().ok())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VcfStream;
+
+    #[test]
+    fn record_iteration_exposes_background_errors() {
+        let stream = VcfStream {
+            sample_names: Vec::new(),
+            lines: Box::new(vec![Err(anyhow::anyhow!("fixture I/O failure"))].into_iter()),
+        };
+        let error = stream.records().next().unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "fixture I/O failure");
+    }
+
+    #[test]
+    fn bounded_strict_reads_require_a_tabix_index() {
+        let path = std::env::temp_dir().join(format!(
+            "gnomad-lr-missing-index-{}-{}.vcf.gz",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let error =
+            match VcfStream::open_region_required_index(path.to_str().unwrap(), "chr22", 1, 10) {
+                Ok(_) => panic!("strict indexed read unexpectedly succeeded"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains("required tabix index"));
+    }
 }

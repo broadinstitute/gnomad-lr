@@ -5,6 +5,7 @@ mod loader;
 mod models;
 mod orchestrate;
 mod pool;
+pub mod y1;
 
 #[cfg(not(feature = "clickhouse"))]
 compile_error!("gnomad-lr requires the default `clickhouse` feature");
@@ -74,7 +75,10 @@ fn read_vcf_records(
     domain::ensure_legacy_vcf_compatible(vcf_path)?;
     let stream = loader::vcf_reader::VcfStream::open_region(vcf_path, chrom, start, stop)?;
     let sample_names = stream.sample_names.clone();
-    let records = stream.records().take(limit.unwrap_or(usize::MAX)).collect();
+    let records = stream
+        .records()
+        .take(limit.unwrap_or(usize::MAX))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     Ok((sample_names, records))
 }
 

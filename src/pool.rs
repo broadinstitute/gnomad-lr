@@ -195,7 +195,10 @@ async fn handle_load_tasks(
             );
             let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
             let sample_names = stream.sample_names.clone();
-            let records: Vec<String> = stream.records().take(limit.unwrap_or(usize::MAX)).collect();
+            let records = stream
+                .records()
+                .take(limit.unwrap_or(usize::MAX))
+                .collect::<anyhow::Result<Vec<_>>>()?;
             info!(
                 "Buffered {} records, {} samples",
                 records.len(),

@@ -1,0 +1,102 @@
+##fileformat=VCFv4.2
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=RNC,Number=2,Type=Character,Description="Reason for No Call in GT: . = n/a, M = Missing data, P = Partial data, I = gVCF input site is non-called, D = insufficient Depth of coverage, - = unrepresentable overlapping deletion, L = Lost/unrepresentable allele (other than deletion), U = multiple Unphased variants present, O = multiple Overlapping variants present, 1 = site is Monoallelic, no assertion about presence of REF or ALT allele">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Approximate read depth (reads with MQ=255 or with bad mates are filtered)">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype Quality">
+##contig=<ID=chr22,length=50818468>
+##contig=<ID=chr22_KI270731v1_random,length=150754>
+##contig=<ID=chr22_KI270732v1_random,length=41543>
+##contig=<ID=chr22_KI270733v1_random,length=179772>
+##contig=<ID=chr22_KI270734v1_random,length=165050>
+##contig=<ID=chr22_KI270735v1_random,length=42811>
+##contig=<ID=chr22_KI270736v1_random,length=181920>
+##contig=<ID=chr22_KI270737v1_random,length=103838>
+##contig=<ID=chr22_KI270738v1_random,length=99375>
+##contig=<ID=chr22_KI270739v1_random,length=73985>
+##INFO=<ID=allele_length,Number=1,Type=Integer,Description="Allele length">
+##INFO=<ID=allele_type,Number=1,Type=String,Description="Allele type">
+##reference=file:///net/eichler/vol28/eee_shared/assemblies/hg38/no_alt/hg38.no_alt.fa
+##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Variant length">
+##FORMAT=<ID=AL,Number=1,Type=String,Description="Allele length">
+##FORMAT=<ID=APOS,Number=1,Type=String,Description="Allele breakpoint position">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+##FORMAT=<ID=PF,Number=1,Type=String,Description="Phasing flag">
+##FORMAT=<ID=ALLR,Number=.,Type=String,Description="Length range per allele">
+##FORMAT=<ID=SD,Number=.,Type=Integer,Description="Number of spanning reads supporting per allele">
+##FORMAT=<ID=MC,Number=.,Type=String,Description="Motif counts per allele">
+##FORMAT=<ID=MS,Number=.,Type=String,Description="Motif spans per allele">
+##FORMAT=<ID=AP,Number=.,Type=Float,Description="Allele purity per allele">
+##FORMAT=<ID=AM,Number=.,Type=Float,Description="Mean methylation level per allele">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths for the ref and alt alleles in the order listed">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled genotype Likelihoods">
+##FORMAT=<ID=EV,Number=.,Type=String,Description="Callers supporting this sample call; entries as caller_(refAD_altAD); dipcall/hapdiff omit the AD parens">
+##FORMAT=<ID=BEV,Number=1,Type=String,Description="Representative caller for this sample call: kanpig if in EV, else highest-GQ per-caller with valid AD">
+##INFO=<ID=AN,Number=1,Type=Integer,Description="Total number of alleles genotyped.">
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Number of alleles observed.">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency.">
+##INFO=<ID=AN_XY,Number=1,Type=Integer,Description="Total number of XY alleles genotyped.">
+##INFO=<ID=AC_XY,Number=A,Type=Integer,Description="Number of XY alleles observed.">
+##INFO=<ID=AF_XY,Number=A,Type=Float,Description="XY allele frequency.">
+##INFO=<ID=AN_XX,Number=1,Type=Integer,Description="Total number of XX alleles genotyped.">
+##INFO=<ID=AC_XX,Number=A,Type=Integer,Description="Number of XX alleles observed.">
+##INFO=<ID=AF_XX,Number=A,Type=Float,Description="XX allele frequency.">
+##INFO=<ID=AN_afr,Number=1,Type=Integer,Description="Total number of afr alleles genotyped.">
+##INFO=<ID=AC_afr,Number=A,Type=Integer,Description="Number of non-reference afr alleles observed.">
+##INFO=<ID=AF_afr,Number=A,Type=Float,Description="afr allele frequency.">
+##INFO=<ID=AN_afr_XY,Number=1,Type=Integer,Description="Total number of afr XY alleles genotyped.">
+##INFO=<ID=AC_afr_XY,Number=A,Type=Integer,Description="Number of non-reference afr XY alleles observed.">
+##INFO=<ID=AF_afr_XY,Number=A,Type=Float,Description="afr XY allele frequency.">
+##INFO=<ID=AN_afr_XX,Number=1,Type=Integer,Description="Total number of afr XX alleles genotyped.">
+##INFO=<ID=AC_afr_XX,Number=A,Type=Integer,Description="Number of non-reference afr XX alleles observed.">
+##INFO=<ID=AF_afr_XX,Number=A,Type=Float,Description="afr XX allele frequency.">
+##INFO=<ID=AN_amr,Number=1,Type=Integer,Description="Total number of amr alleles genotyped.">
+##INFO=<ID=AC_amr,Number=A,Type=Integer,Description="Number of non-reference amr alleles observed.">
+##INFO=<ID=AF_amr,Number=A,Type=Float,Description="amr allele frequency.">
+##INFO=<ID=AN_amr_XY,Number=1,Type=Integer,Description="Total number of amr XY alleles genotyped.">
+##INFO=<ID=AC_amr_XY,Number=A,Type=Integer,Description="Number of non-reference amr XY alleles observed.">
+##INFO=<ID=AF_amr_XY,Number=A,Type=Float,Description="amr XY allele frequency.">
+##INFO=<ID=AN_amr_XX,Number=1,Type=Integer,Description="Total number of amr XX alleles genotyped.">
+##INFO=<ID=AC_amr_XX,Number=A,Type=Integer,Description="Number of non-reference amr XX alleles observed.">
+##INFO=<ID=AF_amr_XX,Number=A,Type=Float,Description="amr XX allele frequency.">
+##INFO=<ID=AN_asj,Number=1,Type=Integer,Description="Total number of asj alleles genotyped.">
+##INFO=<ID=AC_asj,Number=A,Type=Integer,Description="Number of non-reference asj alleles observed.">
+##INFO=<ID=AF_asj,Number=A,Type=Float,Description="asj allele frequency.">
+##INFO=<ID=AN_asj_XY,Number=1,Type=Integer,Description="Total number of asj XY alleles genotyped.">
+##INFO=<ID=AC_asj_XY,Number=A,Type=Integer,Description="Number of non-reference asj XY alleles observed.">
+##INFO=<ID=AF_asj_XY,Number=A,Type=Float,Description="asj XY allele frequency.">
+##INFO=<ID=AN_asj_XX,Number=1,Type=Integer,Description="Total number of asj XX alleles genotyped.">
+##INFO=<ID=AC_asj_XX,Number=A,Type=Integer,Description="Number of non-reference asj XX alleles observed.">
+##INFO=<ID=AF_asj_XX,Number=A,Type=Float,Description="asj XX allele frequency.">
+##INFO=<ID=AN_eas,Number=1,Type=Integer,Description="Total number of eas alleles genotyped.">
+##INFO=<ID=AC_eas,Number=A,Type=Integer,Description="Number of non-reference eas alleles observed.">
+##INFO=<ID=AF_eas,Number=A,Type=Float,Description="eas allele frequency.">
+##INFO=<ID=AN_eas_XY,Number=1,Type=Integer,Description="Total number of eas XY alleles genotyped.">
+##INFO=<ID=AC_eas_XY,Number=A,Type=Integer,Description="Number of non-reference eas XY alleles observed.">
+##INFO=<ID=AF_eas_XY,Number=A,Type=Float,Description="eas XY allele frequency.">
+##INFO=<ID=AN_eas_XX,Number=1,Type=Integer,Description="Total number of eas XX alleles genotyped.">
+##INFO=<ID=AC_eas_XX,Number=A,Type=Integer,Description="Number of non-reference eas XX alleles observed.">
+##INFO=<ID=AF_eas_XX,Number=A,Type=Float,Description="eas XX allele frequency.">
+##INFO=<ID=AN_nfe,Number=1,Type=Integer,Description="Total number of nfe alleles genotyped.">
+##INFO=<ID=AC_nfe,Number=A,Type=Integer,Description="Number of non-reference nfe alleles observed.">
+##INFO=<ID=AF_nfe,Number=A,Type=Float,Description="nfe allele frequency.">
+##INFO=<ID=AN_nfe_XY,Number=1,Type=Integer,Description="Total number of nfe XY alleles genotyped.">
+##INFO=<ID=AC_nfe_XY,Number=A,Type=Integer,Description="Number of non-reference nfe XY alleles observed.">
+##INFO=<ID=AF_nfe_XY,Number=A,Type=Float,Description="nfe XY allele frequency.">
+##INFO=<ID=AN_nfe_XX,Number=1,Type=Integer,Description="Total number of nfe XX alleles genotyped.">
+##INFO=<ID=AC_nfe_XX,Number=A,Type=Integer,Description="Number of non-reference nfe XX alleles observed.">
+##INFO=<ID=AF_nfe_XX,Number=A,Type=Float,Description="nfe XX allele frequency.">
+##INFO=<ID=AN_sas,Number=1,Type=Integer,Description="Total number of sas alleles genotyped.">
+##INFO=<ID=AC_sas,Number=A,Type=Integer,Description="Number of non-reference sas alleles observed.">
+##INFO=<ID=AF_sas,Number=A,Type=Float,Description="sas allele frequency.">
+##INFO=<ID=AN_sas_XY,Number=1,Type=Integer,Description="Total number of sas XY alleles genotyped.">
+##INFO=<ID=AC_sas_XY,Number=A,Type=Integer,Description="Number of non-reference sas XY alleles observed.">
+##INFO=<ID=AF_sas_XY,Number=A,Type=Float,Description="sas XY allele frequency.">
+##INFO=<ID=AN_sas_XX,Number=1,Type=Integer,Description="Total number of sas XX alleles genotyped.">
+##INFO=<ID=AC_sas_XX,Number=A,Type=Integer,Description="Number of non-reference sas XX alleles observed.">
+##INFO=<ID=AF_sas_XX,Number=A,Type=Float,Description="sas XX allele frequency.">
+##fixture_source=gs://fc-fd42e80c-b41e-4e60-a9cf-b7c0ade168c4/gnomAD_LR_vcfs/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr22.vcf.gz
+##fixture_source_generation=1784223795164521
+##fixture_source_md5=dc0abb80759049312f7adecf722e0e14
+##fixture_transform=Header and INFO reduced to fields exercised by the pure Y1 transformer; REF, ALT, ID, FORMAT, and all sample calls are unchanged.
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG00096	HG00097	HG00099	HG00126	HG00128	HG00133	HG00140	HG00146	HG00171	HG002	HG00232	HG00235	HG00253	HG00268	HG00272	HG00280	HG00290	HG00320	HG00321	HG00323	HG00329	HG00344	HG00350	HG00358	HG00408	HG00423	HG00438	HG005	HG00512	HG00513	HG00514	HG00544	HG00558	HG00597	HG00609	HG00621	HG00639	HG00642	HG00658	HG00673	HG00706	HG00731	HG00732	HG00733	HG00735	HG00738	HG00741	HG00864	HG01071	HG01074	HG01081	HG01099	HG01106	HG01109	HG01114	HG01123	HG01150	HG01167	HG01175	HG01192	HG01243	HG01252	HG01255	HG01258	HG01261	HG01346	HG01352	HG01358	HG01361	HG01433	HG01457	HG01496	HG01505	HG01530	HG01573	HG01596	HG01784	HG01786	HG01884	HG01890	HG01891	HG01928	HG01934	HG01940	HG01943	HG01952	HG01960	HG01969	HG01975	HG01978	HG01981	HG01993	HG02004	HG02011	HG02015	HG02018	HG02027	HG02040	HG02055	HG02056	HG02059	HG02071	HG02074	HG02080	HG02083	HG02106	HG02109	HG02129	HG02132	HG02135	HG02145	HG02148	HG02155	HG02165	HG02178	HG02257	HG02258	HG02273	HG02280	HG02282	HG02293	HG02300	HG02391	HG02392	HG02451	HG02486	HG02492	HG02514	HG02523	HG02554	HG02559	HG02572	HG02583	HG02587	HG02602	HG02615	HG02622	HG02630	HG02647	HG02666	HG02668	HG02698	HG02717	HG02723	HG02735	HG02738	HG02769	HG02809	HG02818	HG02841	HG02886	HG02922	HG02953	HG02965	HG02976	HG02984	HG03009	HG03017	HG03041	HG03050	HG03065	HG03098	HG03130	HG03139	HG03195	HG03209	HG03225	HG03239	HG03248	HG03270	HG03369	HG03371	HG03452	HG03453	HG03456	HG03470	HG03471	HG03486	HG03516	HG03520	HG03521	HG03540	HG03579	HG03583	HG03654	HG03669	HG03683	HG03688	HG03704	HG03710	HG03732	HG03742	HG03784	HG03804	HG03807	HG03816	HG03831	HG03834	HG03874	HG03927	HG03942	HG04036	HG04115	HG04157	HG04160	HG04184	HG04187	HG04199	HG04204	HG04217	HG04228	HG06807	NA12329	NA18505	NA18508	NA18522	NA18534	NA18565	NA18570	NA18608	NA18620	NA18747	NA18879	NA18906	NA18939	NA18940	NA18943	NA18944	NA18945	NA18948	NA18952	NA18959	NA18960	NA18967	NA18970	NA18971	NA18974	NA18976	NA18982	NA18983	NA18989	NA19036	NA19043	NA19087	NA19129	NA19159	NA19185	NA19238	NA19239	NA19240	NA19317	NA19331	NA19338	NA19347	NA19384	NA19391	NA19434	NA19443	NA19468	NA19650	NA19682	NA19700	NA19705	NA19776	NA19835	NA19836	NA19909	NA19983	NA20129	NA20282	NA20346	NA20355	NA20503	NA20509	NA20752	NA20762	NA20799	NA20805	NA20806	NA20809	NA20827	NA20847	NA20850	NA20870	NA20905	NA21093	NA21102	NA21106	NA21110	NA21144	NA21309	NA21487
+chr22	20147573	chr22-20147573-INS-2_2	T	TTG	50	PASS	allele_length=2;allele_type=ins;AN=420;AC=36;AF=0.085714;AN_XY=204;AC_XY=20;AF_XY=0.098039;AN_XX=216;AC_XX=16;AF_XX=0.074074;AN_afr=148;AC_afr=0;AF_afr=0;AN_afr_XY=56;AC_afr_XY=0;AF_afr_XY=0;AN_afr_XX=92;AC_afr_XX=0;AF_afr_XX=0;AN_amr=68;AC_amr=8;AF_amr=0.117647;AN_amr_XY=30;AC_amr_XY=4;AF_amr_XY=0.133333;AN_amr_XX=38;AC_amr_XX=4;AF_amr_XX=0.105263;AN_asj=2;AC_asj=0;AF_asj=0;AN_asj_XY=2;AC_asj_XY=0;AF_asj_XY=0;AN_asj_XX=0;AC_asj_XX=0;AF_asj_XX=0;AN_eas=74;AC_eas=1;AF_eas=0.013514;AN_eas_XY=52;AC_eas_XY=1;AF_eas_XY=0.019231;AN_eas_XX=22;AC_eas_XX=0;AF_eas_XX=0;AN_nfe=60;AC_nfe=13;AF_nfe=0.216667;AN_nfe_XY=26;AC_nfe_XY=6;AF_nfe_XY=0.230769;AN_nfe_XX=34;AC_nfe_XX=7;AF_nfe_XX=0.205882;AN_sas=68;AC_sas=14;AF_sas=0.205882;AN_sas_XY=38;AC_sas_XY=9;AF_sas_XY=0.236842;AN_sas_XX=30;AC_sas_XX=5;AF_sas_XX=0.166667	GT:DP:GQ:RNC:PF:AD:PL	0|1:30:41:..:TR_OVERLAP:14,10:41,0,54	0/0:0:1:.:.:0,0:0,0,0	1|0:21:18:..:TR_OVERLAP:11,6:18,0,42	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	1|0:17:31:..:TR_OVERLAP:10,5:30,0,48	0|1:25:12:..:TR_OVERLAP:14,7:11,0,43	0/0:0:1:.:.:0,0:0,0,0	0/0:23:39:.:.:13,0:39,990,990	0/0:30:34:.:.:16,0:33,990,990	0/0:0:1:.:.:0,0:0,0,0	0|1:22:25:..:TR_OVERLAP:14,5:24,0,44	0/0:0:1:.:.:0,0:0,0,0	0/0:24:40:.:.:10,0:40,990,990	0/1:23:44:..:TR_OVERLAP:4,12:45,0,52	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:21:37:.:.:6,0:40,990,990	1|0:22:8:..:TR_OVERLAP:5,7:35,25,33	0|1:32:21:..:TR_OVERLAP:19,8:21,0,47	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:14:28:.:.:6,0:28,990,990	./.:0:0:.:.:0,0:0,0,0	./.:20:15:.:.:10,0:0,990,990	./.:22:8:.:.:12,0:0,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	1|0:16:22:..:TR_OVERLAP:5,8:22,0,43	1|0:27:37:..:TR_OVERLAP:11,11:37,0,50	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:24:11:.:.:17,0:0,990,990	0/0:26:47:.:.:10,0:49,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:15:19:.:.:9,0:0,990,990	1|0:16:28:..:TR_OVERLAP:5,8:27,0,48	1|0:19:27:..:TR_OVERLAP:10,5:27,0,46	./.:18:11:.:.:11,0:0,990,990	1|0:11:20:..:TR_OVERLAP:4,4:20,0,38	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0|1:18:23:..:TR_OVERLAP:8,5:22,0,44	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:27:28:.:.:14,0:28,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:19:18:.:.:13,0:0,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:21:12:.:.:14,0:0,990,990	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:30:28:.:.:10,0:38,990,990	./.:0:0:.:.:0,0:0,0,0	./.:0:1:.:.:0,0:0,0,0	0/0:21:18:.:.:1,0:27,990,990	./.:0:0:.:.:0,0:0,0,0	0|1:18:15:..:TR_OVERLAP:10,4:15,0,44	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:14:13:.:.:10,0:0,990,990	0/0:0:1:.:.:0,0:0,0,0	0|1:25:31:..:TR_OVERLAP:10,9:31,0,46	./.:0:0:.:.:0,0:0,0,0	./.:20:19:.:.:14,0:0,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:23:19:.:.:11,0:18,990,990	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:26:18:.:.:16,0:0,990,990	./.:25:19:.:.:17,0:0,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:19:3:.:.:11,0:0,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:27:15:.:.:10,0:14,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:25:49:.:.:12,0:50,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:13:23:.:.:4,0:23,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:27:41:.:.:12,0:41,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	1|0:22:45:..:TR_OVERLAP:12,8:46,0,51	./.:28:9:.:.:16,0:0,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:27:23:.:.:11,0:22,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:28:6:.:.:12,0:31,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:28:38:.:.:11,0:39,990,990	0/0:23:36:.:.:7,0:38,990,990	0/0:21:37:.:.:12,0:38,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:23:41:.:.:11,0:47,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:15:6:.:.:8,0:0,990,990	0/0:19:40:.:.:8,0:40,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	1|0:25:18:..:TR_OVERLAP:11,8:17,0,41	0/0:0:1:.:.:0,0:0,0,0	0/0:22:25:.:.:13,0:25,990,990	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:35:45:.:.:12,0:49,990,990	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:18:10:.:.:6,0:10,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0|1:21:38:..:TR_OVERLAP:9,8:38,0,50	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/1:34:15:..:TR_OVERLAP:4,12:18,0,17	0|1:23:45:..:TR_OVERLAP:11,10:45,0,52	0/0:0:1:.:.:0,0:0,0,0	0/0:27:16:.:.:14,0:15,990,990	1|0:30:45:..:TR_OVERLAP:19,9:44,0,57	0/0:30:40:.:.:13,0:41,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:23:38:.:.:9,0:40,990,990	1|0:23:7:..:TR_OVERLAP:13,5:5,0,36	./.:0:0:.:.:0,0:0,0,0	1|0:30:23:..:TR_OVERLAP:7,11:23,0,39	1|0:31:6:..:TR_OVERLAP:15,8:5,0,40	0/0:0:1:.:.:0,0:0,0,0	0/0:34:13:.:.:10,0:12,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:14:27:.:.:6,0:27,990,990	./.:25:17:.:.:17,0:0,990,990	1|0:22:9:..:TR_OVERLAP:9,6:8,0,37	./.:0:0:.:.:0,0:0,0,0	0|1:34:23:..:TR_OVERLAP:11,11:23,0,46	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:24:30:.:.:8,0:30,990,990	./.:0:0:.:.:0,0:0,0,0	0|1:22:12:..:TR_OVERLAP:8,5:11,0,44	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:32:47:.:.:18,0:48,990,990	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:26:31:.:.:14,0:31,990,990	0/0:17:9:.:.:5,0:8,990,990	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:24:29:.:.:15,0:28,990,990	0/0:28:35:.:.:11,0:35,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:24:33:.:.:9,0:34,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:26:38:.:.:9,0:38,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:27:35:.:.:10,0:35,990,990	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:27:38:.:.:13,0:44,990,990	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	1|0:22:31:..:TR_OVERLAP:9,7:31,0,47	0/0:0:1:.:.:0,0:0,0,0	0/0:20:15:.:.:7,0:36,990,990	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	0|1:19:25:..:TR_OVERLAP:9,4:24,0,49	./.:0:0:.:.:0,0:0,0,0	0|1:12:24:..:TR_OVERLAP:7,2:23,0,44	0|1:35:39:..:TR_OVERLAP:16,11:39,0,48	./.:0:0:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:28:35:.:.:15,0:35,990,990	1|0:11:35:..:TR_OVERLAP:7,3:35,0,46	./.:22:19:.:.:13,0:0,990,990	0/0:22:31:.:.:2,0:38,990,990	0|1:19:24:..:TR_OVERLAP:10,5:23,0,41	./.:0:1:.:.:0,0:0,0,0	1|0:18:24:..:TR_OVERLAP:10,5:24,0,36	1|0:25:37:..:TR_OVERLAP:12,8:36,0,52	0/0:0:1:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0	0/0:0:1:.:.:0,0:0,0,0	./.:0:0:.:.:0,0:0,0,0

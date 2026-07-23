@@ -1,0 +1,41 @@
+##fileformat=VCFv4.2
+##contig=<ID=chr22,length=50818468>
+##contig=<ID=chr22_KI270731v1_random,length=150754>
+##contig=<ID=chr22_KI270732v1_random,length=41543>
+##contig=<ID=chr22_KI270733v1_random,length=179772>
+##contig=<ID=chr22_KI270734v1_random,length=165050>
+##contig=<ID=chr22_KI270735v1_random,length=42811>
+##contig=<ID=chr22_KI270736v1_random,length=181920>
+##contig=<ID=chr22_KI270737v1_random,length=103838>
+##contig=<ID=chr22_KI270738v1_random,length=99375>
+##contig=<ID=chr22_KI270739v1_random,length=73985>
+##INFO=<ID=allele_length,Number=1,Type=Integer,Description="Allele length">
+##INFO=<ID=allele_type,Number=1,Type=String,Description="Allele type">
+##INFO=<ID=SOURCE,Number=1,Type=String,Description="Source of variant call">
+##INFO=<ID=SVLEN,Number=.,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##INFO=<ID=ORIGINAL_ID,Number=1,Type=String,Description="Original ID from truvari collapse">
+##reference=file:///cromwell_root/fc-secure-f7d80b48-be60-426f-aa6b-f037a1bf7f34/references/GRCh38_noalt/GCA_000001405.15_GRCh38_no_alt_analysis_set.fa
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count in genotypes">
+##INFO=<ID=AN,Number=1,Type=Integer,Description="Total number of alleles in called genotypes">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency.">
+##INFO=<ID=AN_XY,Number=1,Type=Integer,Description="Total number of XY alleles genotyped.">
+##INFO=<ID=AC_XY,Number=A,Type=Integer,Description="Number of XY alleles observed.">
+##INFO=<ID=AF_XY,Number=A,Type=Float,Description="XY allele frequency.">
+##INFO=<ID=AN_XX,Number=1,Type=Integer,Description="Total number of XX alleles genotyped.">
+##INFO=<ID=AC_XX,Number=A,Type=Integer,Description="Number of XX alleles observed.">
+##INFO=<ID=AF_XX,Number=A,Type=Float,Description="XX allele frequency.">
+##INFO=<ID=AN_afr,Number=1,Type=Integer,Description="Total number of afr alleles genotyped.">
+##INFO=<ID=AC_afr,Number=A,Type=Integer,Description="Number of non-reference afr alleles observed.">
+##INFO=<ID=AF_afr,Number=A,Type=Float,Description="afr allele frequency.">
+##INFO=<ID=AN_afr_XY,Number=1,Type=Integer,Description="Total number of afr XY alleles genotyped.">
+##INFO=<ID=AC_afr_XY,Number=A,Type=Integer,Description="Number of non-reference afr XY alleles observed.">
+##INFO=<ID=AF_afr_XY,Number=A,Type=Float,Description="afr XY allele frequency.">
+##INFO=<ID=AN_afr_XX,Number=1,Type=Integer,Description="Total number of afr XX alleles genotyped.">
+##INFO=<ID=AC_afr_XX,Number=A,Type=Integer,Description="Number of non-reference afr XX alleles observed.">
+##INFO=<ID=AF_afr_XX,Number=A,Type=Float,Description="afr XX allele frequency.">
+##fixture_source=gs://fc-fd42e80c-b41e-4e60-a9cf-b7c0ade168c4/gnomAD_LR_vcfs/aou/vcfs/gnomAD_LR_Y1.aou.chr22.vcf.gz
+##fixture_source_generation=1784224178088415
+##fixture_source_md5=c2a6ec29995808f4ac87fd3b6ebe6a26
+##fixture_transform=Header and INFO reduced to fields exercised by the pure Y1 transformer; REF, ALT, ID, FORMAT, and all sample calls are unchanged.
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr22	20001505	chr22-20001505-INS-486	A	ATAAGACCTGCGCACGATGGCTCATACCTATAATCCCAGCATACAGTGACATAAGCTAGAAAAAAAAGAAATAATAAAAAAAAAAAAAAAAAAATACTAAATAAAAACAGAACATAAAAAAAAAGAAAAAAACAAGAAAAAAAAAAAAGAAATATGAAAAAAAAAAAAAAAAGAAAACATATACAAATAAGAAAAATAAAAAATAAATAAAACAAAAAGAAACTAAAATAACAAACTAAAAAAAAAATAAAAATAAAATAGAAAAAACAAATAAAAAATACAAAAAAAAAATAAAAAAAACCAAAAAATAAAAATAATAAAACAAAAAGCAATAATAAAAAAAAAAAAAAAAAAACATAAAAAAGAAAAAATAAAGACAAAAAAAAATCAACAAAAACAATAAATAAATAAAAAACAAAAGAAAAAAACAAAAAAAAATAAAGAAAATAAAAAAAAAAAAAAAATACAATACAAACTAGAACAAAAA	3	SINGLE_READ_SUPPORT	SVLEN=486;ORIGINAL_ID=73146-pbsv.INS.243;allele_length=486;allele_type=ins;SOURCE=SV;AC=1;AN=2052;AF=0.000487;AN_XY=588;AC_XY=0;AF_XY=0;AN_XX=1448;AC_XX=1;AF_XX=0.000691;AN_afr=2052;AC_afr=1;AF_afr=0.000487;AN_afr_XY=588;AC_afr_XY=0;AF_afr_XY=0;AN_afr_XX=1448;AC_afr_XX=1;AF_afr_XX=0.000691

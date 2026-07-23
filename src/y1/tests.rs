@@ -1,0 +1,259 @@
+use super::*;
+use std::collections::BTreeSet;
+
+const HGSVC_FIXTURE: &str = include_str!("../../tests/fixtures/y1/hgsvc_hprc_trv_13_alt.vcf");
+const HGSVC_COLLISION_FIXTURE: &str =
+    include_str!("../../tests/fixtures/y1/hgsvc_hprc_collision_suffix.vcf");
+const AOU_FIXTURE: &str = include_str!("../../tests/fixtures/y1/aou_summary_only_ins.vcf");
+
+fn record_lines(fixture: &str) -> Vec<&str> {
+    fixture
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
+fn one_record(fixture: &str) -> &str {
+    let records = record_lines(fixture);
+    assert_eq!(records.len(), 1);
+    records[0]
+}
+
+#[test]
+fn validates_cohort_specific_header_shapes() {
+    let hgsvc = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    assert_eq!(hgsvc.reference_genome, ReferenceGenome::Grch38);
+    assert_eq!(hgsvc.sample_names.len(), 292);
+    assert_eq!(hgsvc.frequency_divisions.len(), 20);
+    assert!(hgsvc.frequency_divisions.contains(&"asj".to_string()));
+    assert!(hgsvc.frequency_divisions.contains(&"sas_XY".to_string()));
+
+    let aou = Y1Header::parse(AOU_FIXTURE, Cohort::Aou).unwrap();
+    assert_eq!(aou.reference_genome, ReferenceGenome::Grch38);
+    assert!(aou.sample_names.is_empty());
+    assert_eq!(
+        aou.frequency_divisions
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "XX".to_string(),
+            "XY".to_string(),
+            "afr".to_string(),
+            "afr_XX".to_string(),
+            "afr_XY".to_string(),
+        ])
+    );
+
+    assert_eq!(
+        Y1Header::parse(AOU_FIXTURE, Cohort::HgsvcHprc)
+            .unwrap_err()
+            .code,
+        RejectCode::HeaderShape
+    );
+    assert_eq!(
+        Y1Header::parse(HGSVC_FIXTURE, Cohort::Aou)
+            .unwrap_err()
+            .code,
+        RejectCode::HeaderShape
+    );
+}
+
+#[test]
+fn transforms_source_derived_hgsvc_trv_without_losing_alt_or_phase_semantics() {
+    let header = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let transformed = transform_record(&header, one_record(HGSVC_FIXTURE)).unwrap();
+    let summary = &transformed.summary;
+
+    assert_eq!(summary.identity.release, Release::Y1);
+    assert_eq!(summary.identity.cohort, Cohort::HgsvcHprc);
+    assert_eq!(summary.identity.source_variant_id, "chr22-20004491-TRV-21");
+    assert_eq!(summary.reference_genome, ReferenceGenome::Grch38);
+    assert_eq!(summary.alts.len(), 13);
+    assert_eq!(summary.ac, vec![1, 5, 1, 1, 1, 12, 1, 2, 184, 2, 1, 2, 1]);
+    assert_eq!(summary.af.len(), summary.alts.len());
+    assert_eq!(summary.allele_lengths.len(), summary.alts.len());
+    assert!(summary
+        .allele_lengths
+        .iter()
+        .all(|length| length.provenance == LengthProvenance::SequenceDerived));
+    for (alt, length) in summary.alts.iter().zip(&summary.allele_lengths) {
+        assert_eq!(
+            length.value,
+            alt.len() as i32 - summary.ref_allele.len() as i32
+        );
+    }
+    assert_eq!(summary.source_allele_length, None);
+    assert_eq!(summary.source_svlen, None);
+    assert_eq!(
+        summary.source_info.get("TRID").and_then(Option::as_deref),
+        Some("22-20004502-20004512-A")
+    );
+
+    assert_eq!(transformed.stats.genotype_calls, 292);
+    assert_eq!(transformed.stats.missing_genotypes, 0);
+    assert_eq!(transformed.stats.reference_genotypes, 125);
+    assert_eq!(transformed.carriers.len(), 214);
+    assert!(transformed
+        .carriers
+        .iter()
+        .all(|carrier| !carrier.gt_phased));
+
+    let mut reconstructed_ac = vec![0u32; summary.alts.len()];
+    for carrier in &transformed.carriers {
+        reconstructed_ac[carrier.alt_index as usize - 1] += 1;
+        assert_eq!(carrier.alt, summary.alts[carrier.alt_index as usize - 1]);
+    }
+    assert_eq!(reconstructed_ac, summary.ac);
+
+    let hg00097 = transformed
+        .carriers
+        .iter()
+        .find(|carrier| carrier.sample_id == "HG00097")
+        .unwrap();
+    assert_eq!(hg00097.alt_index, 3);
+    assert_eq!(hg00097.genotype_position, 1);
+    assert_eq!(hg00097.gt_alleles, vec![0, 3]);
+    assert_eq!(
+        hg00097.position_fields.get("AL").and_then(Option::as_deref),
+        Some("20")
+    );
+    assert_eq!(
+        hg00097.position_fields.get("AP").and_then(Option::as_deref),
+        Some("0.9")
+    );
+}
+
+#[test]
+fn transforms_aou_as_summary_only_without_fabricated_populations() {
+    let header = Y1Header::parse(AOU_FIXTURE, Cohort::Aou).unwrap();
+    let transformed = transform_record(&header, one_record(AOU_FIXTURE)).unwrap();
+    let summary = transformed.summary;
+
+    assert_eq!(summary.identity.source_variant_id, "chr22-20001505-INS-486");
+    assert_eq!(summary.identity.cohort, Cohort::Aou);
+    assert_eq!(summary.alts.len(), 1);
+    assert_eq!(summary.ac, vec![1]);
+    assert_eq!(summary.an, 2052);
+    assert_eq!(summary.source_allele_length, Some(486));
+    assert_eq!(summary.source_svlen, Some(vec![486]));
+    assert_eq!(summary.allele_lengths[0].value, 486);
+    assert_eq!(
+        summary.allele_lengths[0].provenance,
+        LengthProvenance::InfoAlleleLength
+    );
+    assert_eq!(summary.filters, vec!["SINGLE_READ_SUPPORT"]);
+    assert!(transformed.carriers.is_empty());
+
+    let divisions: BTreeSet<&str> = summary
+        .frequencies
+        .iter()
+        .map(|frequency| frequency.division.as_str())
+        .collect();
+    assert_eq!(
+        divisions,
+        BTreeSet::from(["all", "XX", "XY", "afr", "afr_XX", "afr_XY"])
+    );
+    for unavailable in ["amr", "asj", "eas", "nfe", "sas"] {
+        assert!(!divisions.contains(unavailable));
+    }
+}
+
+#[test]
+fn preserves_source_derived_collision_suffixes_byte_for_byte() {
+    let header = Y1Header::parse(HGSVC_COLLISION_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let transformed = transform_record(&header, one_record(HGSVC_COLLISION_FIXTURE)).unwrap();
+
+    assert_eq!(
+        transformed.summary.identity.source_variant_id,
+        "chr22-20147573-INS-2_2"
+    );
+    assert_eq!(transformed.summary.ref_allele, "T");
+    assert_eq!(transformed.summary.alts, vec!["TTG"]);
+}
+
+#[test]
+fn supports_alt_indices_above_u8_capacity() {
+    let header = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let alts: Vec<String> = (0..256).map(unique_dna_alt).collect();
+    let mut ac = vec!["0"; 256];
+    ac[255] = "1";
+    let mut af = vec!["0"; 256];
+    af[255] = "0.0017123287671232876";
+    let info = format!(
+        "AC={};AN=584;AF={};allele_type=trv",
+        ac.join(","),
+        af.join(",")
+    );
+    let mut columns = vec![
+        "chr22".to_string(),
+        "20009999".to_string(),
+        "chr22-20009999-TRV-u16".to_string(),
+        "A".to_string(),
+        alts.join(","),
+        ".".to_string(),
+        "PASS".to_string(),
+        info,
+        "GT".to_string(),
+    ];
+    columns.extend((0..292).map(|index| {
+        if index == 0 {
+            "0/256".to_string()
+        } else {
+            "0/0".to_string()
+        }
+    }));
+
+    let transformed = transform_record(&header, &columns.join("\t")).unwrap();
+    assert_eq!(transformed.summary.alts.len(), 256);
+    assert_eq!(transformed.carriers.len(), 1);
+    assert_eq!(transformed.carriers[0].alt_index, 256);
+    assert_eq!(transformed.carriers[0].gt_alleles, vec![0, 256]);
+}
+
+#[test]
+fn rejects_array_mismatches_and_reports_every_source_record() {
+    let header = Y1Header::parse(AOU_FIXTURE, Cohort::Aou).unwrap();
+    let valid = one_record(AOU_FIXTURE);
+    let invalid = valid.replacen("AC=1;", "AC=1,2;", 1);
+    let batch = transform_records(&header, [valid, invalid.as_str()]);
+
+    assert_eq!(batch.report.source_records, 2);
+    assert_eq!(batch.report.summary_rows, 1);
+    assert_eq!(batch.report.rejected_records, 1);
+    assert_eq!(batch.report.rejects.len(), 1);
+    assert_eq!(batch.report.rejects[0].record_number, Some(2));
+    assert_eq!(
+        batch.report.rejects[0].code,
+        RejectCode::CardinalityMismatch
+    );
+}
+
+#[test]
+fn source_record_can_define_an_actual_task_boundary() {
+    let header = Y1Header::parse(AOU_FIXTURE, Cohort::Aou).unwrap();
+    let summary = transform_record(&header, one_record(AOU_FIXTURE))
+        .unwrap()
+        .summary;
+    assert_eq!(summary.position, 20_001_505);
+
+    let left_task = 20_000_000..=20_001_504;
+    let right_task = 20_001_505..=20_010_000;
+    assert!(!left_task.contains(&summary.position));
+    assert!(right_task.contains(&summary.position));
+}
+
+fn unique_dna_alt(index: usize) -> String {
+    let mut value = index;
+    let mut suffix = ['A'; 8];
+    for base in suffix.iter_mut().rev() {
+        *base = match value & 0b11 {
+            0 => 'A',
+            1 => 'C',
+            2 => 'G',
+            _ => 'T',
+        };
+        value >>= 2;
+    }
+    format!("T{}", suffix.iter().collect::<String>())
+}
