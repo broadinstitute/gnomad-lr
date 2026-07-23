@@ -30,11 +30,10 @@ impl VcfStream {
         let bgzf_reader = bgzf::Reader::new(reader);
         let buf_reader = BufReader::new(bgzf_reader);
 
-        let mut sample_names = Vec::new();
         let mut lines_iter = buf_reader.lines();
 
         // Read header
-        loop {
+        let sample_names = loop {
             match lines_iter.next() {
                 Some(Ok(line)) => {
                     if line.starts_with("##") {
@@ -42,15 +41,15 @@ impl VcfStream {
                     }
                     if line.starts_with("#CHROM") {
                         let parts: Vec<&str> = line.split('\t').collect();
-                        sample_names = parts[9..].iter().map(|s| s.to_string()).collect();
-                        info!("Found {} samples in VCF header", sample_names.len());
-                        break;
+                        let names: Vec<String> = parts[9..].iter().map(|s| s.to_string()).collect();
+                        info!("Found {} samples in VCF header", names.len());
+                        break names;
                     }
                 }
                 Some(Err(e)) => return Err(e.into()),
                 None => anyhow::bail!("VCF header not found"),
             }
-        }
+        };
 
         let streaming_iter = lines_iter.filter_map(|r| r.ok());
 
@@ -233,14 +232,6 @@ pub fn info_first(info: &HashMap<&str, Option<&str>>, key: &str) -> String {
             v.split(',').next().unwrap_or("").to_string()
         })
         .unwrap_or_default()
-}
-
-/// Get an info string value, returning empty string for flags or missing.
-pub fn info_str(info: &HashMap<&str, Option<&str>>, key: &str) -> String {
-    match info.get(key) {
-        Some(Some(v)) if *v != "." => v.to_string(),
-        _ => String::new(),
-    }
 }
 
 /// Check if an INFO flag is present.

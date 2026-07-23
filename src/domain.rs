@@ -98,9 +98,6 @@ pub static OMIT_CONSEQUENCE_TERMS: &[&str] = &[
     "downstream_gene_variant",
 ];
 
-/// Population IDs for frequency fields
-pub static POPULATIONS: &[&str] = &["afr", "amr", "asj", "eas", "nfe", "sas"];
-
 /// Compute chromosome number for xpos calculation
 pub fn compute_chrom_number(chrom: &str) -> u64 {
     let c = chrom.strip_prefix("chr").unwrap_or(chrom);
