@@ -1,6 +1,7 @@
 //! STR histogram loader — streams TSV from GCS into lr_str_histograms.
 
 use crate::clickhouse::ClickHouseInserter;
+use crate::loader::RegionFilter;
 use crate::models::StrHistogramRow;
 use genohype_core::io::get_reader;
 use std::collections::HashMap;
@@ -10,9 +11,18 @@ use tracing::info;
 /// Load STR allele frequency histograms from a TSV on GCS into ClickHouse.
 ///
 /// The TSV has a header line. LocusId format: `{chrom_num}-{start}-{end}-{motif}`.
-/// Population histogram columns start at index 15.
-pub fn load_str_histograms(ch_url: &str, gcs_path: &str) -> anyhow::Result<usize> {
-    info!("Loading STR histograms from {}", gcs_path);
+/// Population histogram columns start at index 15. `region` and `limit` provide
+/// deterministic, bounded reads for development smoke tests.
+pub fn load_str_histograms(
+    ch_url: &str,
+    gcs_path: &str,
+    region: Option<&RegionFilter>,
+    limit: Option<usize>,
+) -> anyhow::Result<usize> {
+    info!(
+        "Loading STR histograms from {} (region={:?}, limit={:?})",
+        gcs_path, region, limit
+    );
 
     let raw_reader = get_reader(gcs_path)?;
     let reader = BufReader::new(raw_reader);
@@ -22,6 +32,10 @@ pub fn load_str_histograms(ch_url: &str, gcs_path: &str) -> anyhow::Result<usize
     let mut header_cols: Option<Vec<String>> = None;
 
     for line_result in reader.lines() {
+        if limit.is_some_and(|max| count >= max) {
+            break;
+        }
+
         let line = line_result?;
         if line.is_empty() {
             continue;
@@ -39,6 +53,10 @@ pub fn load_str_histograms(ch_url: &str, gcs_path: &str) -> anyhow::Result<usize
         let Some(row) = parse_histogram_row(&parts, header_cols.as_ref().unwrap()) else {
             continue;
         };
+
+        if region.is_some_and(|filter| !filter.contains(&row.chrom, row.position)) {
+            continue;
+        }
 
         inserter.insert(&row)?;
         count += 1;

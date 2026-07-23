@@ -3,8 +3,8 @@ use genohype_pool::{TaskHandler, TaskResult};
 use serde_json::Value;
 use tracing::info;
 
-use crate::{domain, loader};
 use crate::loader::vcf_reader::VcfStream;
+use crate::{domain, loader};
 
 pub struct LrTaskHandler;
 
@@ -27,6 +27,21 @@ impl TaskHandler for LrTaskHandler {
             "load" | _ => handle_load_tasks(payload, tasks).await,
         }
     }
+}
+
+fn task_region(payload: &Value) -> anyhow::Result<Option<loader::RegionFilter>> {
+    if let Some(region) = payload["region"].as_str() {
+        let (chrom, start, stop) = crate::cli::parse_region(region)?;
+        return Ok(Some(loader::RegionFilter::new(chrom, start, stop)));
+    }
+
+    Ok(payload["chrom"].as_str().map(|chrom| {
+        loader::RegionFilter::new(
+            chrom.to_string(),
+            payload["start"].as_u64().unwrap_or(0) as u32,
+            payload["stop"].as_u64().unwrap_or(u32::MAX as u64) as u32,
+        )
+    }))
 }
 
 /// Phase-4 `gcs-cache` build: each task carries a chunk of `gene_id`s; the worker
@@ -62,7 +77,11 @@ async fn handle_build_cache_tasks(
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
 
-        info!("Task {}: building cache for {} genes", task.id, gene_ids.len());
+        info!(
+            "Task {}: building cache for {} genes",
+            task.id,
+            gene_ids.len()
+        );
 
         let genes_path = genes_path.clone();
         let variants_path = variants_path.clone();
@@ -145,6 +164,10 @@ async fn handle_load_tasks(
 
         let start = task.payload["start"].as_u64().unwrap_or(0) as u32;
         let stop = task.payload["stop"].as_u64().unwrap_or(u32::MAX as u64) as u32;
+        let limit = task.payload["limit"]
+            .as_u64()
+            .or_else(|| payload["limit"].as_u64())
+            .map(|value| value as usize);
         let task_id = task.id.clone();
 
         info!(
@@ -158,19 +181,46 @@ async fn handle_load_tasks(
             let task_start = std::time::Instant::now();
 
             // Read the VCF region once into memory
-            info!("Reading VCF region into memory: {}:{}-{}", chrom, start, stop);
+            info!(
+                "Reading VCF region into memory: {}:{}-{}",
+                chrom, start, stop
+            );
             let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
             let sample_names = stream.sample_names.clone();
-            let records: Vec<String> = stream.records().collect();
-            info!("Buffered {} records, {} samples", records.len(), sample_names.len());
+            let records: Vec<String> = stream.records().take(limit.unwrap_or(usize::MAX)).collect();
+            info!(
+                "Buffered {} records, {} samples",
+                records.len(),
+                sample_names.len()
+            );
 
-            loader::variants::load_variants(&ch_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
-            loader::haplotypes::load_haplotypes(&ch_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
+            loader::variants::load_variants(
+                &ch_url,
+                &records,
+                &sample_names,
+                &chrom,
+                start,
+                stop,
+                &mut metrics,
+            )?;
+            loader::haplotypes::load_haplotypes(
+                &ch_url,
+                &records,
+                &sample_names,
+                &chrom,
+                start,
+                stop,
+                &mut metrics,
+            )?;
 
             metrics.total_ms = task_start.elapsed().as_millis() as u64;
-            info!("Task {} complete ({}ms total, {}ms CH insert, {} rows)", task_id, metrics.total_ms, metrics.ch_insert_ms, metrics.ch_rows_inserted);
+            info!(
+                "Task {} complete ({}ms total, {}ms CH insert, {} rows)",
+                task_id, metrics.total_ms, metrics.ch_insert_ms, metrics.ch_rows_inserted
+            );
             Ok::<_, anyhow::Error>(metrics)
-        }).await??;
+        })
+        .await??;
 
         total_rows += metrics.ch_rows_inserted;
         combined_metrics.prescan_ms += metrics.prescan_ms;
@@ -201,11 +251,13 @@ async fn handle_coverage_tasks(
             .unwrap_or("gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.coverage.tsv.gz")
             .to_string();
         let downsample = task.payload["downsample"].as_u64().unwrap_or(1) as u32;
+        let region = task_region(&task.payload)?;
+        let limit = task.payload["limit"].as_u64().map(|value| value as usize);
         let ch_url = ch_url.clone();
 
         info!("Task {}: loading coverage from {}", task.id, gcs_path);
         let rows = tokio::task::spawn_blocking(move || {
-            loader::coverage::load_coverage(&ch_url, &gcs_path, downsample)
+            loader::coverage::load_coverage(&ch_url, &gcs_path, downsample, region.as_ref(), limit)
         })
         .await??;
         total_rows += rows;
@@ -230,11 +282,12 @@ async fn handle_metadata_tasks(
             .as_str()
             .unwrap_or(loader::metadata::HPRC_METADATA_URL)
             .to_string();
+        let limit = task.payload["limit"].as_u64().map(|value| value as usize);
         let ch_url = ch_url.clone();
 
         info!("Task {}: loading sample metadata from {}", task.id, csv_url);
         let rows = tokio::task::spawn_blocking(move || {
-            loader::metadata::load_sample_metadata(&ch_url, &csv_url)
+            loader::metadata::load_sample_metadata(&ch_url, &csv_url, limit)
         })
         .await??;
         total_rows += rows;
@@ -259,11 +312,13 @@ async fn handle_histograms_tasks(
             .as_str()
             .unwrap_or("gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.af_histograms.tsv")
             .to_string();
+        let region = task_region(&task.payload)?;
+        let limit = task.payload["limit"].as_u64().map(|value| value as usize);
         let ch_url = ch_url.clone();
 
         info!("Task {}: loading STR histograms from {}", task.id, gcs_path);
         let rows = tokio::task::spawn_blocking(move || {
-            loader::histograms::load_str_histograms(&ch_url, &gcs_path)
+            loader::histograms::load_str_histograms(&ch_url, &gcs_path, region.as_ref(), limit)
         })
         .await??;
         total_rows += rows;
@@ -298,6 +353,7 @@ async fn handle_methylation_tasks(
             .to_string();
         let start = task.payload["start"].as_u64().unwrap_or(0) as u32;
         let stop = task.payload["stop"].as_u64().unwrap_or(400_000_000) as u32;
+        let limit = task.payload["limit"].as_u64().map(|value| value as usize);
         let ch_url = ch_url.clone();
 
         info!(
@@ -305,7 +361,9 @@ async fn handle_methylation_tasks(
             task.id, sample_id, chrom, start, stop
         );
         let rows = tokio::task::spawn_blocking(move || {
-            loader::methylation::load_methylation(&ch_url, &bed_path, &sample_id, &chrom, start, stop)
+            loader::methylation::load_methylation(
+                &ch_url, &bed_path, &sample_id, &chrom, start, stop, limit,
+            )
         })
         .await??;
         total_rows += rows;

@@ -1,6 +1,7 @@
 //! Coverage loader — streams gzipped TSV from GCS into lr_coverage.
 
 use crate::clickhouse::ClickHouseInserter;
+use crate::loader::RegionFilter;
 use crate::models::CoverageRow;
 use flate2::read::MultiGzDecoder;
 use genohype_core::io::get_reader;
@@ -14,9 +15,20 @@ use tracing::info;
 /// over_15, over_20, over_25, over_30, over_50, over_100
 ///
 /// `downsample` controls the minimum base-pair spacing between retained rows.
-/// Set to 1 to keep all rows.
-pub fn load_coverage(ch_url: &str, gcs_path: &str, downsample: u32) -> anyhow::Result<usize> {
-    info!("Loading coverage from {} (downsample={})", gcs_path, downsample);
+/// Set to 1 to keep all rows. `region` and `limit` provide deterministic,
+/// bounded reads for development smoke tests.
+pub fn load_coverage(
+    ch_url: &str,
+    gcs_path: &str,
+    downsample: u32,
+    region: Option<&RegionFilter>,
+    limit: Option<usize>,
+) -> anyhow::Result<usize> {
+    let downsample = downsample.max(1);
+    info!(
+        "Loading coverage from {} (downsample={}, region={:?}, limit={:?})",
+        gcs_path, downsample, region, limit
+    );
 
     let raw_reader = get_reader(gcs_path)?;
     let gz_decoder = MultiGzDecoder::new(raw_reader);
@@ -28,10 +40,11 @@ pub fn load_coverage(ch_url: &str, gcs_path: &str, downsample: u32) -> anyhow::R
     let mut last_chrom = String::new();
 
     for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        if limit.is_some_and(|max| count >= max) {
+            break;
+        }
+
+        let line = line_result?;
         if line.is_empty() {
             continue;
         }
@@ -46,6 +59,10 @@ pub fn load_coverage(ch_url: &str, gcs_path: &str, downsample: u32) -> anyhow::R
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        if region.is_some_and(|filter| !filter.contains(chrom, pos)) {
+            continue;
+        }
 
         // Reset downsample tracking on chromosome change
         if chrom != last_chrom {

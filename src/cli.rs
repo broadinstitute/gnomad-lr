@@ -137,7 +137,10 @@ pub enum LoadTarget {
 #[derive(Args, Clone)]
 pub struct CoverageArgs {
     /// GCS path to coverage TSV.gz
-    #[arg(long, default_value = "gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.coverage.tsv.gz")]
+    #[arg(
+        long,
+        default_value = "gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.coverage.tsv.gz"
+    )]
     pub gcs_path: String,
 
     /// ClickHouse HTTP URL
@@ -147,28 +150,54 @@ pub struct CoverageArgs {
     /// Downsample step (minimum bp spacing between retained rows)
     #[arg(long, default_value = "1")]
     pub downsample: u32,
+
+    /// Optional genomic region to retain (for example chr22:20000000-21000000)
+    #[arg(long)]
+    pub region: Option<String>,
+
+    /// Stop after inserting this many source rows (intended for smoke tests)
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Args, Clone)]
 pub struct MetadataArgs {
     /// URL for the HPRC sample metadata CSV
-    #[arg(long, default_value = "https://raw.githubusercontent.com/human-pangenomics/hprc_intermediate_assembly/main/data_tables/sample/hprc_release2_sample_metadata.csv")]
+    #[arg(
+        long,
+        default_value = "https://raw.githubusercontent.com/human-pangenomics/hprc_intermediate_assembly/main/data_tables/sample/hprc_release2_sample_metadata.csv"
+    )]
     pub csv_url: String,
 
     /// ClickHouse HTTP URL
     #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
+
+    /// Stop after inserting this many metadata rows (intended for smoke tests)
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Args, Clone)]
 pub struct HistogramsArgs {
     /// GCS path to STR histograms TSV
-    #[arg(long, default_value = "gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.af_histograms.tsv")]
+    #[arg(
+        long,
+        default_value = "gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.af_histograms.tsv"
+    )]
     pub gcs_path: String,
 
     /// ClickHouse HTTP URL
     #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
+
+    /// Optional genomic region to retain (for example chr22:20000000-21000000)
+    #[arg(long)]
+    pub region: Option<String>,
+
+    /// Stop after inserting this many source rows (intended for smoke tests)
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Args, Clone)]
@@ -196,6 +225,10 @@ pub struct MethylationArgs {
     /// ClickHouse HTTP URL
     #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
+
+    /// Stop after inserting this many BED rows (intended for smoke tests)
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Args, Clone)]
@@ -211,6 +244,10 @@ pub struct LoadArgs {
     /// ClickHouse HTTP URL
     #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
+
+    /// Stop after reading this many VCF records (intended for smoke tests)
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 /// Parse a region string like "chr22:20000000-21000000" into (chrom, start, stop).
@@ -238,5 +275,30 @@ pub fn parse_region(region: &str) -> anyhow::Result<(String, u32, u32)> {
         .replace("M", "000000")
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid stop position: {}", e))?;
+    if start > stop {
+        anyhow::bail!(
+            "Invalid region: start ({}) is greater than stop ({})",
+            start,
+            stop
+        );
+    }
     Ok((chrom, start, stop))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_region;
+
+    #[test]
+    fn parses_and_normalizes_region() {
+        assert_eq!(
+            parse_region("22:20,000,000-21,000,000").unwrap(),
+            ("chr22".to_string(), 20_000_000, 21_000_000)
+        );
+    }
+
+    #[test]
+    fn rejects_reversed_region() {
+        assert!(parse_region("chr22:21-20").is_err());
+    }
 }

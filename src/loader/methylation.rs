@@ -24,6 +24,7 @@ pub fn load_methylation(
     chrom: &str,
     start: u32,
     stop: u32,
+    limit: Option<usize>,
 ) -> anyhow::Result<usize> {
     info!(
         "Loading methylation for sample {} region {}:{}-{} from {}",
@@ -35,6 +36,10 @@ pub fn load_methylation(
     let mut count = 0usize;
 
     for line in stream.lines() {
+        if limit.is_some_and(|max| count >= max) {
+            break;
+        }
+
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 6 {
             continue;

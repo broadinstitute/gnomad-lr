@@ -14,8 +14,15 @@ pub const HPRC_METADATA_URL: &str = "https://raw.githubusercontent.com/human-pan
 ///
 /// Only loads metadata for samples that already exist in lr_haplotypes. If
 /// lr_haplotypes is empty or unreachable, loads all samples from the CSV.
-pub fn load_sample_metadata(ch_url: &str, csv_url: &str) -> anyhow::Result<usize> {
-    info!("Loading sample metadata from {}", csv_url);
+pub fn load_sample_metadata(
+    ch_url: &str,
+    csv_url: &str,
+    limit: Option<usize>,
+) -> anyhow::Result<usize> {
+    info!(
+        "Loading sample metadata from {} (limit={:?})",
+        csv_url, limit
+    );
 
     let client = reqwest::blocking::Client::new();
 
@@ -46,7 +53,7 @@ pub fn load_sample_metadata(ch_url: &str, csv_url: &str) -> anyhow::Result<usize
         anyhow::bail!("Failed to fetch metadata CSV: {}", resp.status());
     }
     let content = resp.text()?;
-    let rows = parse_metadata_rows(&content, our_samples.as_ref())?;
+    let rows = parse_metadata_rows(&content, our_samples.as_ref(), limit)?;
 
     let mut inserter = ClickHouseInserter::new(ch_url, "lr_sample_metadata", 50_000);
     for row in &rows {
@@ -61,6 +68,7 @@ pub fn load_sample_metadata(ch_url: &str, csv_url: &str) -> anyhow::Result<usize
 fn parse_metadata_rows(
     content: &str,
     our_samples: Option<&HashSet<String>>,
+    limit: Option<usize>,
 ) -> anyhow::Result<Vec<SampleMetadataRow>> {
     let mut reader = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
@@ -75,6 +83,10 @@ fn parse_metadata_rows(
 
     let mut rows = Vec::new();
     for record_result in reader.records() {
+        if limit.is_some_and(|max| rows.len() >= max) {
+            break;
+        }
+
         // Unlike the previous split(',') implementation, csv::Reader handles quoted
         // population descriptors such as "St. Louis, Missouri" without shifting fields.
         let record = record_result?;
@@ -133,7 +145,7 @@ mod tests {
             "HG06807,\"African Americans living in St. Louis, Missouri\",ASL,female,HPRC\n",
         );
 
-        let rows = parse_metadata_rows(csv, None).unwrap();
+        let rows = parse_metadata_rows(csv, None, None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].sample_id, "HG06807");
         assert_eq!(
@@ -147,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_to_loaded_samples() {
+    fn filters_to_loaded_samples_before_applying_limit() {
         let csv = concat!(
             "sample_id,population_descriptor,population_abbreviation,sex,collection\n",
             "A,one,GBR,male,HPRC\n",
@@ -155,7 +167,7 @@ mod tests {
         );
         let samples = HashSet::from(["B".to_string()]);
 
-        let rows = parse_metadata_rows(csv, Some(&samples)).unwrap();
+        let rows = parse_metadata_rows(csv, Some(&samples), Some(1)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].sample_id, "B");
         assert_eq!(rows[0].superpopulation, "EAS");

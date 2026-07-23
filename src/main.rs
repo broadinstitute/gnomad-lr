@@ -10,7 +10,7 @@ mod pool;
 compile_error!("gnomad-lr requires the default `clickhouse` feature");
 
 use clap::Parser;
-use cli::{Cli, Commands, LoadTarget, ServiceAction, parse_region};
+use cli::{parse_region, Cli, Commands, LoadTarget, ServiceAction};
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
 use tracing::info;
@@ -64,65 +64,140 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_load(target: LoadTarget) -> anyhow::Result<()> {
-    use loader::vcf_reader::VcfStream;
+fn read_vcf_records(
+    vcf_path: &str,
+    chrom: &str,
+    start: u32,
+    stop: u32,
+    limit: Option<usize>,
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    let stream = loader::vcf_reader::VcfStream::open_region(vcf_path, chrom, start, stop)?;
+    let sample_names = stream.sample_names.clone();
+    let records = stream.records().take(limit.unwrap_or(usize::MAX)).collect();
+    Ok((sample_names, records))
+}
 
+fn parse_optional_region(region: Option<&str>) -> anyhow::Result<Option<loader::RegionFilter>> {
+    region.map(parse_region).transpose().map(|parsed| {
+        parsed.map(|(chrom, start, stop)| loader::RegionFilter::new(chrom, start, stop))
+    })
+}
+
+fn run_load(target: LoadTarget) -> anyhow::Result<()> {
     let mut metrics = loader::IngestMetrics::default();
     let task_start = std::time::Instant::now();
 
     match target {
         LoadTarget::Haplotypes(args) => {
             let (chrom, start, stop) = parse_region(&args.region)?;
-            let vcf_path = args.vcf_path.or_else(|| domain::resolve_vcf_path(&chrom));
-            let vcf_path = vcf_path.ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
-            info!("Loading haplotypes from {} for {}:{}-{}", vcf_path, chrom, start, stop);
-            let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
-            let sample_names = stream.sample_names.clone();
-            let records: Vec<String> = stream.records().collect();
+            let vcf_path = args
+                .vcf_path
+                .or_else(|| domain::resolve_vcf_path(&chrom))
+                .ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
+            info!(
+                "Loading haplotypes from {} for {}:{}-{}",
+                vcf_path, chrom, start, stop
+            );
+            let (sample_names, records) =
+                read_vcf_records(&vcf_path, &chrom, start, stop, args.limit)?;
             info!("Buffered {} records", records.len());
-            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
+            loader::haplotypes::load_haplotypes(
+                &args.clickhouse_url,
+                &records,
+                &sample_names,
+                &chrom,
+                start,
+                stop,
+                &mut metrics,
+            )?;
         }
         LoadTarget::Variants(args) => {
             let (chrom, start, stop) = parse_region(&args.region)?;
-            let vcf_path = args.vcf_path.or_else(|| domain::resolve_vcf_path(&chrom));
-            let vcf_path = vcf_path.ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
-            info!("Loading variants from {} for {}:{}-{}", vcf_path, chrom, start, stop);
-            let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
-            let sample_names = stream.sample_names.clone();
-            let records: Vec<String> = stream.records().collect();
+            let vcf_path = args
+                .vcf_path
+                .or_else(|| domain::resolve_vcf_path(&chrom))
+                .ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
+            info!(
+                "Loading variants from {} for {}:{}-{}",
+                vcf_path, chrom, start, stop
+            );
+            let (sample_names, records) =
+                read_vcf_records(&vcf_path, &chrom, start, stop, args.limit)?;
             info!("Buffered {} records", records.len());
-            loader::variants::load_variants(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
+            loader::variants::load_variants(
+                &args.clickhouse_url,
+                &records,
+                &sample_names,
+                &chrom,
+                start,
+                stop,
+                &mut metrics,
+            )?;
         }
         LoadTarget::All(args) => {
             let (chrom, start, stop) = parse_region(&args.region)?;
-            let vcf_path = args.vcf_path.or_else(|| domain::resolve_vcf_path(&chrom));
-            let vcf_path = vcf_path.ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
-            info!("Loading all from {} for {}:{}-{}", vcf_path, chrom, start, stop);
+            let vcf_path = args
+                .vcf_path
+                .or_else(|| domain::resolve_vcf_path(&chrom))
+                .ok_or_else(|| anyhow::anyhow!("No VCF path for {}", chrom))?;
+            info!(
+                "Loading all from {} for {}:{}-{}",
+                vcf_path, chrom, start, stop
+            );
 
-            // Read VCF region once into memory
-            let stream = VcfStream::open_region(&vcf_path, &chrom, start, stop)?;
-            let sample_names = stream.sample_names.clone();
-            let records: Vec<String> = stream.records().collect();
+            // Read the bounded VCF region once into memory.
+            let (sample_names, records) =
+                read_vcf_records(&vcf_path, &chrom, start, stop, args.limit)?;
             info!("Buffered {} records", records.len());
 
-            // Load variants first (includes prescan)
-            loader::variants::load_variants(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
-
-            // Load haplotypes
-            loader::haplotypes::load_haplotypes(&args.clickhouse_url, &records, &sample_names, &chrom, start, stop, &mut metrics)?;
+            loader::variants::load_variants(
+                &args.clickhouse_url,
+                &records,
+                &sample_names,
+                &chrom,
+                start,
+                stop,
+                &mut metrics,
+            )?;
+            loader::haplotypes::load_haplotypes(
+                &args.clickhouse_url,
+                &records,
+                &sample_names,
+                &chrom,
+                start,
+                stop,
+                &mut metrics,
+            )?;
         }
         LoadTarget::Coverage(args) => {
-            let count = loader::coverage::load_coverage(&args.clickhouse_url, &args.gcs_path, args.downsample)?;
+            let region = parse_optional_region(args.region.as_deref())?;
+            let count = loader::coverage::load_coverage(
+                &args.clickhouse_url,
+                &args.gcs_path,
+                args.downsample,
+                region.as_ref(),
+                args.limit,
+            )?;
             info!("Coverage: {} rows loaded", count);
             return Ok(());
         }
         LoadTarget::Metadata(args) => {
-            let count = loader::metadata::load_sample_metadata(&args.clickhouse_url, &args.csv_url)?;
+            let count = loader::metadata::load_sample_metadata(
+                &args.clickhouse_url,
+                &args.csv_url,
+                args.limit,
+            )?;
             info!("Metadata: {} rows loaded", count);
             return Ok(());
         }
         LoadTarget::Histograms(args) => {
-            let count = loader::histograms::load_str_histograms(&args.clickhouse_url, &args.gcs_path)?;
+            let region = parse_optional_region(args.region.as_deref())?;
+            let count = loader::histograms::load_str_histograms(
+                &args.clickhouse_url,
+                &args.gcs_path,
+                region.as_ref(),
+                args.limit,
+            )?;
             info!("Histograms: {} rows loaded", count);
             return Ok(());
         }
@@ -134,6 +209,7 @@ fn run_load(target: LoadTarget) -> anyhow::Result<()> {
                 &args.chrom,
                 args.start,
                 args.stop,
+                args.limit,
             )?;
             info!("Methylation: {} rows loaded", count);
             return Ok(());
@@ -141,8 +217,14 @@ fn run_load(target: LoadTarget) -> anyhow::Result<()> {
     }
 
     metrics.total_ms = task_start.elapsed().as_millis() as u64;
-    info!("Load complete: {}ms total, {}ms prescan, {}ms CH insert ({} flushes), {} rows",
-        metrics.total_ms, metrics.prescan_ms, metrics.ch_insert_ms, metrics.ch_insert_count, metrics.ch_rows_inserted);
+    info!(
+        "Load complete: {}ms total, {}ms prescan, {}ms CH insert ({} flushes), {} rows",
+        metrics.total_ms,
+        metrics.prescan_ms,
+        metrics.ch_insert_ms,
+        metrics.ch_insert_count,
+        metrics.ch_rows_inserted
+    );
 
     Ok(())
 }
