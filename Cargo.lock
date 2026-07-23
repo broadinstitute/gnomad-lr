@@ -1026,6 +1026,7 @@ dependencies = [
 [[package]]
 name = "genohype-core"
 version = "0.1.0"
+source = "git+https://github.com/broadinstitute/genohype.git?rev=15ea8c387d53b150449cf109ab0005a7d8d655ca#15ea8c387d53b150449cf109ab0005a7d8d655ca"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1046,6 +1047,7 @@ dependencies = [
  "parquet",
  "rand 0.8.6",
  "rayon",
+ "reqwest 0.11.27",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1059,6 +1061,7 @@ dependencies = [
 [[package]]
 name = "genohype-pool"
 version = "0.1.0"
+source = "git+https://github.com/broadinstitute/genohype.git?rev=15ea8c387d53b150449cf109ab0005a7d8d655ca#15ea8c387d53b150449cf109ab0005a7d8d655ca"
 dependencies = [
  "anyhow",
  "async-trait",

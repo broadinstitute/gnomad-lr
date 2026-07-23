@@ -6,6 +6,9 @@ mod models;
 mod orchestrate;
 mod pool;
 
+#[cfg(not(feature = "clickhouse"))]
+compile_error!("gnomad-lr requires the default `clickhouse` feature");
+
 use clap::Parser;
 use cli::{Cli, Commands, LoadTarget, ServiceAction, parse_region};
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};

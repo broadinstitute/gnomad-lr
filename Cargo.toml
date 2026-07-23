@@ -4,15 +4,24 @@ version = "0.1.0"
 edition = "2021"
 description = "gnomAD Long Read VCF loader for ClickHouse"
 
+[features]
+# This project is a ClickHouse loader, so every supported build includes the
+# genohype ClickHouse integration. The Makefile also passes this explicitly for
+# worker builds to prevent feature drift in deployment tooling.
+default = ["clickhouse"]
+clickhouse = ["genohype-core/clickhouse"]
+
 [dependencies]
-genohype-core = { path = "../genohype/core", features = ["genomic", "gcp"] }
+# Keep the reusable data and pool layers on the same immutable public revision.
+# Update both entries together and regenerate Cargo.lock.
+genohype-core = { git = "https://github.com/broadinstitute/genohype.git", rev = "15ea8c387d53b150449cf109ab0005a7d8d655ca", features = ["genomic", "gcp"] }
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
-genohype-pool = { path = "../genohype/pool" }
+genohype-pool = { git = "https://github.com/broadinstitute/genohype.git", rev = "15ea8c387d53b150449cf109ab0005a7d8d655ca" }
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

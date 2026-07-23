@@ -1,0 +1,4 @@
+# Use the Git CLI for immutable public Git dependencies. This respects normal
+# credential helpers and behaves consistently in clean checkouts and CI.
+[net]
+git-fetch-with-cli = true

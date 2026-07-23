@@ -73,6 +73,7 @@ async fn handle_build_cache_tasks(
                 &variants_path,
                 &output_prefix,
                 Some(&gene_ids),
+                None,
             )
         })
         .await??;
