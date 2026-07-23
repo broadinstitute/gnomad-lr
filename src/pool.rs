@@ -143,6 +143,13 @@ async fn handle_load_tasks(
         .unwrap_or("http://localhost:8123")
         .to_string();
 
+    // Reject a mixed task list before any task can write partial legacy output.
+    for task in &tasks {
+        if let Some(vcf_path) = task.payload["vcf_path"].as_str() {
+            domain::ensure_legacy_vcf_compatible(vcf_path)?;
+        }
+    }
+
     // Process tasks sequentially to limit memory usage.
     // Each region buffers all records in memory (~300MB for dense 5MB regions),
     // so running multiple in parallel OOMs 7.5GB VMs.
@@ -161,6 +168,7 @@ async fn handle_load_tasks(
             .map(|s| s.to_string())
             .or_else(|| domain::resolve_vcf_path(&chrom))
             .ok_or_else(|| anyhow::anyhow!("no VCF path for {}", chrom))?;
+        domain::ensure_legacy_vcf_compatible(&vcf_path)?;
 
         let start = task.payload["start"].as_u64().unwrap_or(0) as u32;
         let stop = task.payload["stop"].as_u64().unwrap_or(u32::MAX as u64) as u32;

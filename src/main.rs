@@ -71,6 +71,7 @@ fn read_vcf_records(
     stop: u32,
     limit: Option<usize>,
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    domain::ensure_legacy_vcf_compatible(vcf_path)?;
     let stream = loader::vcf_reader::VcfStream::open_region(vcf_path, chrom, start, stop)?;
     let sample_names = stream.sample_names.clone();
     let records = stream.records().take(limit.unwrap_or(usize::MAX)).collect();

@@ -2,6 +2,12 @@
 
 Rust loaders that transform gnomAD long-read VCF, coverage, methylation, STR histogram, and sample metadata sources into the ClickHouse tables consumed by the gnomAD browser.
 
+## Y1 status
+
+The current primary VCF loader and `sql/lr_{variants,haplotypes}.sql` implement the legacy browser contract. They are **not compatible with the cohort-aware Y1 HGSVC/HPRC and AoU sources**: the legacy shape loses multiallelic arrays, lacks release/cohort identity, and cannot represent AoU's summary-only records safely.
+
+Do not point the current VCF load commands at Y1 objects or initialize `gnomad_lr_y1_pilot` with the legacy primary DDL. The source survey and detailed v2 reconciliation are planning artifacts, not runtime configuration in this repository.
+
 ## Reproducible build
 
 `genohype-core` and `genohype-pool` are fetched from the public Genohype repository at one immutable revision (recorded in both `Cargo.toml` and `Cargo.lock`). A sibling `../genohype` checkout is **not** required.
@@ -23,7 +29,7 @@ make install-genohype
 
 ## ClickHouse environments
 
-The authoritative DDL for both primary and ancillary tables lives in `sql/` and is embedded in the binary's `init` command. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. All HTTP requests preserve a URL's `database` query parameter:
+The repository-owned DDL for the current legacy browser contract lives in `sql/` and is embedded in the binary's `init` command. The two primary definitions require a v2 replacement before Y1. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. All HTTP requests preserve a URL's `database` query parameter:
 
 ```text
 http://127.0.0.1:8123/?database=gnomad_lr_smoke
@@ -52,7 +58,7 @@ The project uses a pinned ClickHouse LTS image, a project-scoped Compose volume,
 
 ```bash
 make clickhouse-up
-make init                   # initialize all seven tables in CLICKHOUSE_URL
+make init                   # initialize all seven legacy-contract objects in CLICKHOUSE_URL
 make clickhouse-down
 make clickhouse-reset       # destructive: removes only the local Compose volume
 ```
@@ -64,9 +70,9 @@ CLICKHOUSE_HTTP_PORT=8124 CLICKHOUSE_NATIVE_PORT=9001 \
   CLICKHOUSE_URL=http://127.0.0.1:8124 make smoke
 ```
 
-## Source-backed smoke test
+## Legacy source-backed plumbing smoke
 
-`development/smoke.toml` is the checked-in smoke manifest. It pins:
+`development/smoke.toml` is the checked-in `legacy_v1_plumbing` manifest. It validates bounded source access, parser execution, and isolated writes; passing it is not Y1 acceptance. It pins:
 
 - one indexed chr22 VCF interval, capped by VCF record count;
 - one indexed methylation BED/sample over the same interval, capped by row count;
@@ -82,12 +88,13 @@ make smoke
 
 The runner:
 
-1. refuses a non-loopback host unless `--allow-remote` is present;
-2. permits only databases named `gnomad_lr_smoke` or `gnomad_lr_smoke_*`;
-3. recreates that isolated database by default;
-4. initializes the complete schema;
-5. invokes every loader with `--region` and/or `--limit` bounds;
-6. fails if any expected table (including the methylation materialized view) is empty.
+1. accepts only the explicit `legacy_v1_plumbing` profile and labels its output as non-Y1;
+2. refuses a non-loopback host unless `--allow-remote` is present;
+3. permits only databases named `gnomad_lr_smoke` or `gnomad_lr_smoke_*`;
+4. recreates that isolated database by default;
+5. initializes the legacy-contract schema;
+6. invokes every loader with `--region` and/or `--limit` bounds;
+7. fails if any expected table (including the methylation materialized view) is empty.
 
 Useful variants:
 
@@ -110,7 +117,7 @@ python3 scripts/smoke.py \
   --allow-remote
 ```
 
-Each direct loader also exposes bounded controls, for example:
+Each direct legacy loader also exposes bounded controls. These examples use the legacy mirrored source and must not be adapted to Y1 until the v2 contract is implemented:
 
 ```bash
 target/debug/gnomad-lr load all \
@@ -147,4 +154,4 @@ gnomad-lr run --chroms chr22 --skip-index \
   --clickhouse-url 'http://192.168.0.6:8123/?database=gnomad_lr_smoke_pool'
 ```
 
-Promote to the production `default` database only after local and dev smoke checks pass and row-count/key validation has been reviewed.
+Do not promote Y1 data to the production `default` database through this legacy path. Y1 promotion requires a reviewed v2 schema, dual-cohort 10 kb acceptance, retry-safe staging/publication, metadata/ancillary gates, and browser contract changes.

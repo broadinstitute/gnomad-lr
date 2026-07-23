@@ -23,9 +23,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Initialize the complete gnomAD-LR ClickHouse schema
+    /// Initialize the current legacy-contract schema (not the Y1 v2 schema)
     Init(InitArgs),
-    /// Run the full distributed pipeline (index → load) on a pool
+    /// Run the legacy distributed VCF pipeline (not compatible with Y1 inputs)
     Run(RunArgs),
 }
 
@@ -118,11 +118,11 @@ pub enum ServiceAction {
 
 #[derive(Subcommand)]
 pub enum LoadTarget {
-    /// Load per-sample haplotype rows from VCF
+    /// Load legacy per-sample haplotype rows (not compatible with Y1 inputs)
     Haplotypes(LoadArgs),
-    /// Load site-level variant rows from VCF
+    /// Load legacy site-level variant rows (not compatible with Y1 inputs)
     Variants(LoadArgs),
-    /// Load both haplotypes and variants
+    /// Load both legacy primary tables (not compatible with Y1 inputs)
     All(LoadArgs),
     /// Load coverage data from GCS TSV.gz
     Coverage(CoverageArgs),

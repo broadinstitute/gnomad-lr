@@ -1,7 +1,8 @@
-# Bounded, source-backed loader smoke profile. The sequential coverage and
-# histogram files stop after `row_limit`; indexed VCF/BED inputs use `region`.
+# Bounded legacy-v1 plumbing smoke. This profile proves source access, parser
+# execution, and isolated ClickHouse writes; it is NOT a Y1 semantic test.
 [smoke]
-database = "gnomad_lr_smoke"
+profile = "legacy_v1_plumbing"
+database = "gnomad_lr_smoke_legacy_v1"
 region = "chr22:20000000-21000000"
 vcf_record_limit = 100
 row_limit = 1000

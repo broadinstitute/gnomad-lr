@@ -68,6 +68,16 @@ pub fn resolve_vcf_path(chrom: &str) -> Option<String> {
     GCS_VCF_V3_PATHS.get(chrom).cloned()
 }
 
+/// Refuse known Y1 objects until the cohort-aware v2 contract is implemented.
+///
+/// This filename guard is not a substitute for a future header/schema preflight.
+pub fn ensure_legacy_vcf_compatible(vcf_path: &str) -> anyhow::Result<()> {
+    if vcf_path.contains("gnomAD_LR_Y1.") || vcf_path.contains("/gnomAD_LR_vcfs/") {
+        anyhow::bail!("Y1 VCFs are not compatible with the legacy loader");
+    }
+    Ok(())
+}
+
 /// Consequence terms ranked by severity (lower index = more severe)
 pub static CONSEQUENCE_TERMS: &[&str] = &[
     "transcript_ablation", "splice_acceptor_variant", "splice_donor_variant",
@@ -106,5 +116,30 @@ pub fn compute_chrom_number(chrom: &str) -> u64 {
         "Y" => 24,
         "M" | "MT" => 25,
         _ => c.parse::<u64>().unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_legacy_vcf_compatible;
+
+    #[test]
+    fn rejects_surveyed_y1_vcfs() {
+        for cohort in ["hgsvc_hprc", "aou"] {
+            let path = format!("gs://bucket/{cohort}/gnomAD_LR_Y1.{cohort}.chr22.vcf.gz");
+            assert!(ensure_legacy_vcf_compatible(&path).is_err());
+        }
+        assert!(ensure_legacy_vcf_compatible(
+            "gs://bucket/gnomAD_LR_vcfs/hgsvc_hprc/vcfs/chr22.renamed.vcf.gz"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn permits_legacy_vcf_path() {
+        assert!(ensure_legacy_vcf_compatible(
+            "gs://gnomad-lr-data/vcf/v3/chr22.renamed.vcf.gz"
+        )
+        .is_ok());
     }
 }

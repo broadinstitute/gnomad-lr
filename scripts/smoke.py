@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = ROOT / "development" / "smoke.toml"
 SAFE_DATABASE = re.compile(r"^gnomad_lr_smoke(?:_[A-Za-z0-9_]+)?$")
+LEGACY_PROFILE = "legacy_v1_plumbing"
 ALL_DATASETS = {"vcf", "coverage", "histograms", "methylation", "metadata"}
 TABLES = {
     "vcf": ("lr_variants", "lr_haplotypes"),
@@ -234,8 +235,13 @@ def main() -> int:
     args = parse_args()
     config = load_config(args.config)
     datasets = selected_datasets(args.only)
+    profile = str(config["smoke"].get("profile", ""))
     database = args.database or str(config["smoke"]["database"])
 
+    if profile != LEGACY_PROFILE:
+        raise ValueError(
+            f"unsupported smoke profile {profile!r}; the Y1 loader contract is not implemented"
+        )
     if not SAFE_DATABASE.fullmatch(database):
         raise ValueError(
             "smoke database must match gnomad_lr_smoke[_suffix]; refusing a potentially destructive target"
@@ -251,6 +257,7 @@ def main() -> int:
     target_url = with_params(args.clickhouse_url, database=database)
 
     print("gnomad-lr source-backed smoke plan")
+    print(f"  Profile:    {profile} (not Y1 acceptance)")
     print(f"  ClickHouse: {redact_url(args.clickhouse_url)}")
     print(f"  Database:   {database}")
     print(f"  Datasets:   {', '.join(sorted(datasets))}")

@@ -46,7 +46,7 @@ clickhouse-reset:
 init:
 	cargo run --locked --features $(CARGO_FEATURES) -- init --clickhouse-url "$(CLICKHOUSE_URL)"
 
-# Starts local ClickHouse and runs all loaders against bounded source subsets.
+# Runs the bounded legacy-v1 plumbing profile; this is not Y1 acceptance.
 smoke: clickhouse-up
 	python3 scripts/smoke.py --clickhouse-url "$(CLICKHOUSE_URL)"
 

@@ -1,3 +1,4 @@
+-- Legacy browser-contract schema. Do not use for cohort-aware Y1 data.
 CREATE TABLE IF NOT EXISTS lr_haplotypes (
     chrom LowCardinality(String),
     position UInt32,
