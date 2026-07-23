@@ -1,0 +1,15 @@
+# Bounded, source-backed loader smoke profile. The sequential coverage and
+# histogram files stop after `row_limit`; indexed VCF/BED inputs use `region`.
+[smoke]
+database = "gnomad_lr_smoke"
+region = "chr22:20000000-21000000"
+vcf_record_limit = 100
+row_limit = 1000
+
+[inputs]
+vcf = "gs://gnomad-lr-data/vcf/v3/chr22.renamed.vcf.gz"
+coverage = "gs://gnomad-lr-data/ancillary/hgsvc_hprc.coverage.tsv.gz"
+histograms = "gs://gnomad-lr-data/ancillary/hgsvc_hprc.af_histograms.tsv"
+metadata = "https://raw.githubusercontent.com/human-pangenomics/hprc_intermediate_assembly/main/data_tables/sample/hprc_release2_sample_metadata.csv"
+methylation_bed = "gs://gnomad-lr-data/ancillary/methylation/methylation/HG00097.model.pbmm2.combined.bed.gz"
+methylation_sample = "HG00097"

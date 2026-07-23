@@ -1,10 +1,12 @@
-# gnomad-lr build targets
+# gnomad-lr build and development targets
 
 CARGO_FEATURES ?= clickhouse
+CLICKHOUSE_URL ?= http://127.0.0.1:8123
 GENOHYPE_GIT := https://github.com/broadinstitute/genohype.git
 GENOHYPE_REV := 15ea8c387d53b150449cf109ab0005a7d8d655ca
 
-.PHONY: all release worker test install-genohype clean
+.PHONY: all release worker test install-genohype clickhouse-up clickhouse-down \
+	clickhouse-reset init smoke clean
 
 # Default: build the host CLI and Linux worker with ClickHouse enabled.
 all: release worker
@@ -28,6 +30,22 @@ test:
 install-genohype:
 	cargo install --locked --force --git $(GENOHYPE_GIT) --rev $(GENOHYPE_REV) \
 		--features clickhouse genohype-cli
+
+clickhouse-up:
+	./scripts/clickhouse-local.sh up
+
+clickhouse-down:
+	./scripts/clickhouse-local.sh down
+
+clickhouse-reset:
+	./scripts/clickhouse-local.sh reset
+
+init:
+	cargo run --locked --features $(CARGO_FEATURES) -- init --clickhouse-url "$(CLICKHOUSE_URL)"
+
+# Starts local ClickHouse and runs all loaders against bounded source subsets.
+smoke: clickhouse-up
+	python3 scripts/smoke.py --clickhouse-url "$(CLICKHOUSE_URL)"
 
 clean:
 	cargo clean

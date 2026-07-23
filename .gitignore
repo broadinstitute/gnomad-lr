@@ -1,2 +1,5 @@
 /target
 .DS_Store
+.genohype-env
+__pycache__/
+*.pyc
