@@ -5,7 +5,7 @@ CLICKHOUSE_URL ?= http://127.0.0.1:8123
 GENOHYPE_GIT := https://github.com/broadinstitute/genohype.git
 GENOHYPE_REV := 15ea8c387d53b150449cf109ab0005a7d8d655ca
 
-.PHONY: all release worker test install-genohype clickhouse-up clickhouse-down \
+.PHONY: all release worker test verify install-genohype clickhouse-up clickhouse-down \
 	clickhouse-reset init smoke clean
 
 # Default: build the host CLI and Linux worker with ClickHouse enabled.
@@ -25,6 +25,9 @@ worker:
 
 test:
 	cargo test --locked --features $(CARGO_FEATURES)
+
+verify:
+	./scripts/verify.sh
 
 # Install the pool/orchestration CLI at the same revision as the Rust libraries.
 install-genohype:

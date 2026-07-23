@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8.14.39@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b
+        env:
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify clean checkout
+        run: ./scripts/verify.sh
+
+      - name: Smoke complete ClickHouse schema
+        run: |
+          curl --fail --silent --show-error \
+            --data-binary 'CREATE DATABASE gnomad_lr_ci' \
+            http://127.0.0.1:8123/
+          target/debug/gnomad-lr init \
+            --clickhouse-url 'http://127.0.0.1:8123/?database=gnomad_lr_ci'
+
+          for table in \
+            lr_variants lr_haplotypes lr_coverage lr_sample_metadata \
+            lr_str_histograms lr_methylation lr_methylation_summary_mv
+          do
+            curl --fail --silent --show-error \
+              --data-binary "EXISTS TABLE ${table}" \
+              'http://127.0.0.1:8123/?database=gnomad_lr_ci' | grep -qx 1
+          done
