@@ -3,6 +3,7 @@
 use crate::clickhouse::ClickHouseInserter;
 use crate::domain::SUBPOP_TO_SUPERPOP;
 use crate::models::SampleMetadataRow;
+use csv::StringRecord;
 use std::collections::HashSet;
 use tracing::info;
 
@@ -11,15 +12,15 @@ pub const HPRC_METADATA_URL: &str = "https://raw.githubusercontent.com/human-pan
 
 /// Load sample metadata from the HPRC CSV into ClickHouse.
 ///
-/// Only loads metadata for samples that already exist in lr_haplotypes.
-/// If lr_haplotypes is empty or unreachable, loads all samples from the CSV.
+/// Only loads metadata for samples that already exist in lr_haplotypes. If
+/// lr_haplotypes is empty or unreachable, loads all samples from the CSV.
 pub fn load_sample_metadata(ch_url: &str, csv_url: &str) -> anyhow::Result<usize> {
     info!("Loading sample metadata from {}", csv_url);
 
     let client = reqwest::blocking::Client::new();
 
     // Query ClickHouse for existing sample IDs in lr_haplotypes. Use RequestBuilder::query
-    // so an existing `database=...` URL parameter remains intact for isolated databases.
+    // so an existing `database=...` URL parameter remains intact for isolated smoke DBs.
     let our_samples: Option<HashSet<String>> = {
         let query = "SELECT DISTINCT sample_id FROM lr_haplotypes FORMAT TabSeparated";
         match client.get(ch_url).query(&[("query", query)]).send() {
@@ -27,15 +28,11 @@ pub fn load_sample_metadata(ch_url: &str, csv_url: &str) -> anyhow::Result<usize
                 let body = resp.text().unwrap_or_default();
                 let samples: HashSet<String> = body
                     .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|l| l.to_string())
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
                     .collect();
                 info!("Found {} samples in lr_haplotypes", samples.len());
-                if samples.is_empty() {
-                    None
-                } else {
-                    Some(samples)
-                }
+                (!samples.is_empty()).then_some(samples)
             }
             _ => {
                 info!("Could not query lr_haplotypes, will load all HPRC samples");
@@ -44,97 +41,123 @@ pub fn load_sample_metadata(ch_url: &str, csv_url: &str) -> anyhow::Result<usize
         }
     };
 
-    // Fetch the CSV
     let resp = client.get(csv_url).send()?;
     if !resp.status().is_success() {
         anyhow::bail!("Failed to fetch metadata CSV: {}", resp.status());
     }
     let content = resp.text()?;
+    let rows = parse_metadata_rows(&content, our_samples.as_ref())?;
 
     let mut inserter = ClickHouseInserter::new(ch_url, "lr_sample_metadata", 50_000);
-    let mut count = 0usize;
+    for row in &rows {
+        inserter.insert(row)?;
+    }
+    inserter.finish()?;
 
-    let mut lines = content.lines();
-    let header_line = lines.next().ok_or_else(|| anyhow::anyhow!("Empty CSV"))?;
+    info!("Sample metadata load complete: {} rows", rows.len());
+    Ok(rows.len())
+}
 
-    // Parse header to find column indices
-    let headers: Vec<&str> = header_line.split(',').collect();
-    let idx_sample_id = headers.iter().position(|&h| h == "sample_id")
-        .ok_or_else(|| anyhow::anyhow!("Missing sample_id column in CSV"))?;
-    let idx_pop_abbr = headers.iter().position(|&h| h == "population_abbreviation");
-    let idx_pop_desc = headers.iter().position(|&h| h == "population_descriptor");
-    let idx_sex = headers.iter().position(|&h| h == "sex");
-    let idx_collection = headers.iter().position(|&h| h == "collection");
+fn parse_metadata_rows(
+    content: &str,
+    our_samples: Option<&HashSet<String>>,
+) -> anyhow::Result<Vec<SampleMetadataRow>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(content.as_bytes());
+    let headers = reader.headers()?.clone();
 
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() <= idx_sample_id {
-            continue;
-        }
+    let sample_id_idx = required_column(&headers, "sample_id")?;
+    let pop_abbr_idx = optional_column(&headers, "population_abbreviation");
+    let pop_desc_idx = optional_column(&headers, "population_descriptor");
+    let sex_idx = optional_column(&headers, "sex");
+    let collection_idx = optional_column(&headers, "collection");
 
-        let sample_id = parts[idx_sample_id].trim().to_string();
+    let mut rows = Vec::new();
+    for record_result in reader.records() {
+        // Unlike the previous split(',') implementation, csv::Reader handles quoted
+        // population descriptors such as "St. Louis, Missouri" without shifting fields.
+        let record = record_result?;
+        let sample_id = field(&record, Some(sample_id_idx), "");
         if sample_id.is_empty() {
             continue;
         }
-
-        // Filter to only samples in our haplotype table
-        if let Some(ref samples) = our_samples {
-            if !samples.contains(&sample_id) {
-                continue;
-            }
+        if our_samples.is_some_and(|samples| !samples.contains(sample_id)) {
+            continue;
         }
 
-        let subpop = idx_pop_abbr
-            .and_then(|i| parts.get(i))
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("N/A")
-            .to_string();
-
-        let superpop = SUBPOP_TO_SUPERPOP
-            .get(subpop.as_str())
+        let subpopulation = field(&record, pop_abbr_idx, "N/A").to_string();
+        let superpopulation = SUBPOP_TO_SUPERPOP
+            .get(subpopulation.as_str())
             .copied()
             .unwrap_or("N/A")
             .to_string();
 
-        let pop_desc = idx_pop_desc
-            .and_then(|i| parts.get(i))
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("N/A")
-            .to_string();
-
-        let sex = idx_sex
-            .and_then(|i| parts.get(i))
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("N/A")
-            .to_string();
-
-        let collection = idx_collection
-            .and_then(|i| parts.get(i))
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("N/A")
-            .to_string();
-
-        let row = SampleMetadataRow {
-            sample_id,
-            subpopulation: subpop,
-            superpopulation: superpop,
-            population_descriptor: pop_desc,
-            sex,
-            collection,
-        };
-
-        inserter.insert(&row)?;
-        count += 1;
+        rows.push(SampleMetadataRow {
+            sample_id: sample_id.to_string(),
+            subpopulation,
+            superpopulation,
+            population_descriptor: field(&record, pop_desc_idx, "N/A").to_string(),
+            sex: field(&record, sex_idx, "N/A").to_string(),
+            collection: field(&record, collection_idx, "N/A").to_string(),
+        });
     }
 
-    inserter.finish()?;
-    info!("Sample metadata load complete: {} rows", count);
-    Ok(count)
+    Ok(rows)
+}
+
+fn required_column(headers: &StringRecord, name: &str) -> anyhow::Result<usize> {
+    optional_column(headers, name)
+        .ok_or_else(|| anyhow::anyhow!("Missing {} column in metadata CSV", name))
+}
+
+fn optional_column(headers: &StringRecord, name: &str) -> Option<usize> {
+    headers.iter().position(|header| header == name)
+}
+
+fn field<'a>(record: &'a StringRecord, index: Option<usize>, fallback: &'a str) -> &'a str {
+    index
+        .and_then(|i| record.get(i))
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_quoted_commas_without_shifting_columns() {
+        let csv = concat!(
+            "sample_id,population_descriptor,population_abbreviation,sex,collection\n",
+            "HG06807,\"African Americans living in St. Louis, Missouri\",ASL,female,HPRC\n",
+        );
+
+        let rows = parse_metadata_rows(csv, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sample_id, "HG06807");
+        assert_eq!(
+            rows[0].population_descriptor,
+            "African Americans living in St. Louis, Missouri"
+        );
+        assert_eq!(rows[0].subpopulation, "ASL");
+        assert_eq!(rows[0].superpopulation, "AFR");
+        assert_eq!(rows[0].sex, "female");
+        assert_eq!(rows[0].collection, "HPRC");
+    }
+
+    #[test]
+    fn filters_to_loaded_samples() {
+        let csv = concat!(
+            "sample_id,population_descriptor,population_abbreviation,sex,collection\n",
+            "A,one,GBR,male,HPRC\n",
+            "B,two,JPT,female,HPRC\n",
+        );
+        let samples = HashSet::from(["B".to_string()]);
+
+        let rows = parse_metadata_rows(csv, Some(&samples)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sample_id, "B");
+        assert_eq!(rows[0].superpopulation, "EAS");
+    }
 }

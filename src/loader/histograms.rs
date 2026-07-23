@@ -20,13 +20,9 @@ pub fn load_str_histograms(ch_url: &str, gcs_path: &str) -> anyhow::Result<usize
     let mut inserter = ClickHouseInserter::new(ch_url, "lr_str_histograms", 50_000);
     let mut count = 0usize;
     let mut header_cols: Option<Vec<String>> = None;
-    let pop_start_idx: usize = 15;
 
     for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        let line = line_result?;
         if line.is_empty() {
             continue;
         }
@@ -40,58 +36,8 @@ pub fn load_str_histograms(ch_url: &str, gcs_path: &str) -> anyhow::Result<usize
             continue;
         }
 
-        if parts.len() < 15 {
+        let Some(row) = parse_histogram_row(&parts, header_cols.as_ref().unwrap()) else {
             continue;
-        }
-
-        // Parse LocusId: {chrom_num}-{start}-{end}-{motif}
-        let locus_id = parts[0];
-        let locus_parts: Vec<&str> = locus_id.splitn(4, '-').collect();
-        if locus_parts.len() < 4 {
-            continue;
-        }
-
-        let chrom = format!("chr{}", locus_parts[0]);
-        let position: u32 = match locus_parts[1].parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let end_position: u32 = match locus_parts[2].parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let motif = locus_parts[3].to_string();
-
-        // Build populations map from dynamic columns
-        let mut populations = HashMap::new();
-        if let Some(ref headers) = header_cols {
-            for col_idx in pop_start_idx..parts.len() {
-                if col_idx < headers.len() {
-                    let pop_val = parts[col_idx];
-                    if !pop_val.is_empty() && pop_val != "." {
-                        populations.insert(headers[col_idx].clone(), pop_val.to_string());
-                    }
-                }
-            }
-        }
-
-        let row = StrHistogramRow {
-            chrom,
-            position,
-            end_position,
-            motif,
-            allele_size_histogram: parts.get(1).unwrap_or(&"").to_string(),
-            biallelic_histogram: parts.get(2).unwrap_or(&"").to_string(),
-            min_repeats: safe_float(parts.get(3).unwrap_or(&"")),
-            mode_repeats: safe_float(parts.get(4).unwrap_or(&"")),
-            mean_repeats: safe_float(parts.get(5).unwrap_or(&"")),
-            stdev_repeats: safe_float(parts.get(6).unwrap_or(&"")),
-            median_repeats: safe_float(parts.get(7).unwrap_or(&"")),
-            p99_repeats: safe_float(parts.get(8).unwrap_or(&"")),
-            max_repeats: safe_float(parts.get(9).unwrap_or(&"")),
-            unique_allele_lengths: safe_u32(parts.get(10).unwrap_or(&"")),
-            num_called_alleles: safe_u32(parts.get(11).unwrap_or(&"")),
-            populations,
         };
 
         inserter.insert(&row)?;
@@ -107,6 +53,48 @@ pub fn load_str_histograms(ch_url: &str, gcs_path: &str) -> anyhow::Result<usize
     Ok(count)
 }
 
+fn parse_histogram_row(parts: &[&str], headers: &[String]) -> Option<StrHistogramRow> {
+    if parts.len() < 15 {
+        return None;
+    }
+
+    // Parse LocusId: {chrom_num}-{start}-{end}-{motif}.
+    let locus_parts: Vec<&str> = parts[0].splitn(4, '-').collect();
+    if locus_parts.len() < 4 {
+        return None;
+    }
+
+    let mut populations = HashMap::new();
+    for col_idx in 15..parts.len().min(headers.len()) {
+        let value = parts[col_idx];
+        if !value.is_empty() && value != "." {
+            populations.insert(headers[col_idx].clone(), value.to_string());
+        }
+    }
+
+    Some(StrHistogramRow {
+        chrom: format!("chr{}", locus_parts[0]),
+        position: locus_parts[1].parse().ok()?,
+        end_position: locus_parts[2].parse().ok()?,
+        motif: locus_parts[3].to_string(),
+        // Column 1 is the source Motif column. The canonical motif is also
+        // encoded in LocusId, so histogram values begin at column 2.
+        allele_size_histogram: parts[2].to_string(),
+        biallelic_histogram: parts[3].to_string(),
+        min_repeats: safe_float(parts[4]),
+        mode_repeats: safe_float(parts[5]),
+        mean_repeats: safe_float(parts[6]),
+        stdev_repeats: safe_float(parts[7]),
+        median_repeats: safe_float(parts[8]),
+        p99_repeats: safe_float(parts[9]),
+        max_repeats: safe_float(parts[10]),
+        // Columns 11 and 12 are short-allele summaries not represented in CH.
+        unique_allele_lengths: safe_u32(parts[13]),
+        num_called_alleles: safe_u32(parts[14]),
+        populations,
+    })
+}
+
 fn safe_float(val: &str) -> f32 {
     if val.is_empty() || val == "." {
         return 0.0;
@@ -119,4 +107,34 @@ fn safe_u32(val: &str) -> u32 {
         return 0;
     }
     val.parse().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_histogram_row;
+
+    #[test]
+    fn maps_current_source_columns_without_off_by_one_shift() {
+        let header = "LocusId\tMotif\tAlleleSizeHistogram\tBiallelicHistogram\tMin\tMode\tMean\tStdev\tMedian\t99thPercentile\tMax\tShortAllele99thPercentile\tShortAlleleMax\tUniqueAlleleLengths\tNumCalledAlleles\tAlleleSizeHistogram:afr:female";
+        let headers: Vec<String> = header.split('\t').map(str::to_string).collect();
+        let line = "1-16712-16744-GTG\tGTG\t2x:11,3x:573\t2/3:11,3/3:281\t2\t3\t2.98\t0.14\t3\t3\t3\t3\t3\t2\t584\t2x:3,3x:111";
+        let parts: Vec<&str> = line.split('\t').collect();
+
+        let row = parse_histogram_row(&parts, &headers).unwrap();
+        assert_eq!(row.chrom, "chr1");
+        assert_eq!(row.position, 16_712);
+        assert_eq!(row.motif, "GTG");
+        assert_eq!(row.allele_size_histogram, "2x:11,3x:573");
+        assert_eq!(row.biallelic_histogram, "2/3:11,3/3:281");
+        assert_eq!(row.min_repeats, 2.0);
+        assert_eq!(row.mean_repeats, 2.98);
+        assert_eq!(row.unique_allele_lengths, 2);
+        assert_eq!(row.num_called_alleles, 584);
+        assert_eq!(
+            row.populations
+                .get("AlleleSizeHistogram:afr:female")
+                .map(String::as_str),
+            Some("2x:3,3x:111")
+        );
+    }
 }
