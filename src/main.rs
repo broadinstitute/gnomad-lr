@@ -30,6 +30,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Load { target } => {
             tokio::task::spawn_blocking(move || run_load(target)).await??;
         }
+        Commands::Init(args) => {
+            tokio::task::spawn_blocking(move || clickhouse::init_tables(&args.clickhouse_url))
+                .await??;
+        }
         Commands::Run(args) => {
             orchestrate::run(&args)?;
         }

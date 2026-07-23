@@ -18,11 +18,11 @@ pub fn load_sample_metadata(ch_url: &str, csv_url: &str) -> anyhow::Result<usize
 
     let client = reqwest::blocking::Client::new();
 
-    // Query ClickHouse for existing sample IDs in lr_haplotypes
+    // Query ClickHouse for existing sample IDs in lr_haplotypes. Use RequestBuilder::query
+    // so an existing `database=...` URL parameter remains intact for isolated databases.
     let our_samples: Option<HashSet<String>> = {
         let query = "SELECT DISTINCT sample_id FROM lr_haplotypes FORMAT TabSeparated";
-        let url = format!("{}/?query={}", ch_url, urlencoding::encode(query));
-        match client.get(&url).send() {
+        match client.get(ch_url).query(&[("query", query)]).send() {
             Ok(resp) if resp.status().is_success() => {
                 let body = resp.text().unwrap_or_default();
                 let samples: HashSet<String> = body

@@ -17,7 +17,11 @@ pub fn execute_ddl(ch_url: &str, query: &str) -> anyhow::Result<()> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        anyhow::bail!("ClickHouse DDL failed ({}): {}", status, &body[..body.len().min(500)]);
+        anyhow::bail!(
+            "ClickHouse DDL failed ({}): {}",
+            status,
+            &body[..body.len().min(500)]
+        );
     }
     Ok(())
 }
@@ -25,11 +29,22 @@ pub fn execute_ddl(ch_url: &str, query: &str) -> anyhow::Result<()> {
 /// Initialize all gnomAD-LR tables in ClickHouse by executing embedded SQL files.
 pub fn init_tables(ch_url: &str) -> anyhow::Result<()> {
     let schemas: &[(&str, &str)] = &[
+        ("lr_variants", include_str!("../sql/lr_variants.sql")),
+        ("lr_haplotypes", include_str!("../sql/lr_haplotypes.sql")),
         ("lr_coverage", include_str!("../sql/lr_coverage.sql")),
-        ("lr_sample_metadata", include_str!("../sql/lr_sample_metadata.sql")),
-        ("lr_str_histograms", include_str!("../sql/lr_str_histograms.sql")),
+        (
+            "lr_sample_metadata",
+            include_str!("../sql/lr_sample_metadata.sql"),
+        ),
+        (
+            "lr_str_histograms",
+            include_str!("../sql/lr_str_histograms.sql"),
+        ),
         ("lr_methylation", include_str!("../sql/lr_methylation.sql")),
-        ("lr_methylation_summary_mv", include_str!("../sql/lr_methylation_summary_mv.sql")),
+        (
+            "lr_methylation_summary_mv",
+            include_str!("../sql/lr_methylation_summary_mv.sql"),
+        ),
     ];
 
     for (name, ddl) in schemas {
@@ -97,12 +112,12 @@ impl ClickHouseInserter {
         let rows_in_batch = self.buffer.len();
 
         let query = format!("INSERT INTO {} FORMAT JSONEachRow", self.table);
-        let url = format!("{}/?query={}", self.url, urlencoding::encode(&query));
 
         let post_start = std::time::Instant::now();
         let resp = self
             .client
-            .post(&url)
+            .post(&self.url)
+            .query(&[("query", query.as_str())])
             .header("Content-Type", "application/x-ndjson")
             .body(body)
             .send()?;
@@ -123,7 +138,10 @@ impl ClickHouseInserter {
         self.total_rows += rows_in_batch;
         self.buffer.clear();
 
-        info!("Inserted {} rows ({} total)", rows_in_batch, self.total_rows);
+        info!(
+            "Inserted {} rows ({} total)",
+            rows_in_batch, self.total_rows
+        );
         Ok(())
     }
 
@@ -139,5 +157,21 @@ impl ClickHouseInserter {
 
     pub fn total_rows(&self) -> usize {
         self.total_rows
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn request_query_preserves_selected_database() {
+        let request = reqwest::blocking::Client::new()
+            .post("http://127.0.0.1:8123/?database=gnomad_lr_smoke")
+            .query(&[("query", "SELECT 1")])
+            .build()
+            .unwrap();
+        let params: std::collections::HashMap<_, _> = request.url().query_pairs().collect();
+
+        assert_eq!(params.get("database").unwrap(), "gnomad_lr_smoke");
+        assert_eq!(params.get("query").unwrap(), "SELECT 1");
     }
 }

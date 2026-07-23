@@ -23,14 +23,23 @@ pub enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Initialize the complete gnomAD-LR ClickHouse schema
+    Init(InitArgs),
     /// Run the full distributed pipeline (index → load) on a pool
     Run(RunArgs),
 }
 
 #[derive(Args, Clone)]
+pub struct InitArgs {
+    /// ClickHouse HTTP URL. A `database` query parameter selects an isolated database.
+    #[arg(long, default_value = "http://127.0.0.1:8123")]
+    pub clickhouse_url: String,
+}
+
+#[derive(Args, Clone)]
 pub struct RunArgs {
-    /// ClickHouse HTTP URL
-    #[arg(long, default_value = "http://192.168.0.6:8123")]
+    /// ClickHouse HTTP URL reachable from pool workers (must be explicit)
+    #[arg(long)]
     pub clickhouse_url: String,
 
     /// Pool name
@@ -132,7 +141,7 @@ pub struct CoverageArgs {
     pub gcs_path: String,
 
     /// ClickHouse HTTP URL
-    #[arg(long, default_value = "http://localhost:8123")]
+    #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
 
     /// Downsample step (minimum bp spacing between retained rows)
@@ -147,7 +156,7 @@ pub struct MetadataArgs {
     pub csv_url: String,
 
     /// ClickHouse HTTP URL
-    #[arg(long, default_value = "http://localhost:8123")]
+    #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
 }
 
@@ -158,7 +167,7 @@ pub struct HistogramsArgs {
     pub gcs_path: String,
 
     /// ClickHouse HTTP URL
-    #[arg(long, default_value = "http://localhost:8123")]
+    #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
 }
 
@@ -185,7 +194,7 @@ pub struct MethylationArgs {
     pub stop: u32,
 
     /// ClickHouse HTTP URL
-    #[arg(long, default_value = "http://localhost:8123")]
+    #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
 }
 
@@ -200,7 +209,7 @@ pub struct LoadArgs {
     pub vcf_path: Option<String>,
 
     /// ClickHouse HTTP URL
-    #[arg(long, default_value = "http://localhost:8123")]
+    #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
 }
 
