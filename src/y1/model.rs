@@ -7,6 +7,14 @@ pub enum Release {
     Y1,
 }
 
+impl Release {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Y1 => "y1",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cohort {
@@ -14,10 +22,27 @@ pub enum Cohort {
     Aou,
 }
 
+impl Cohort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HgsvcHprc => "hgsvc_hprc",
+            Self::Aou => "aou",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum ReferenceGenome {
     #[serde(rename = "GRCh38")]
     Grch38,
+}
+
+impl ReferenceGenome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Grch38 => "GRCh38",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -42,6 +67,16 @@ pub enum LengthProvenance {
     InfoAlleleLength,
     InfoSvlen,
     SequenceDerived,
+}
+
+impl LengthProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InfoAlleleLength => "info_allele_length",
+            Self::InfoSvlen => "info_svlen",
+            Self::SequenceDerived => "sequence_derived",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -124,6 +159,26 @@ pub enum RejectCode {
     AltIndexOutOfRange,
     AlleleCountMismatch,
     Io,
+}
+
+impl RejectCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HeaderShape => "header_shape",
+            Self::MalformedColumns => "malformed_columns",
+            Self::MissingSourceId => "missing_source_id",
+            Self::InvalidPosition => "invalid_position",
+            Self::InvalidValue => "invalid_value",
+            Self::MissingInfo => "missing_info",
+            Self::CardinalityMismatch => "cardinality_mismatch",
+            Self::FrequencyMismatch => "frequency_mismatch",
+            Self::SampleCountMismatch => "sample_count_mismatch",
+            Self::InvalidGenotype => "invalid_genotype",
+            Self::AltIndexOutOfRange => "alt_index_out_of_range",
+            Self::AlleleCountMismatch => "allele_count_mismatch",
+            Self::Io => "io",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

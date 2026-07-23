@@ -14,6 +14,31 @@ cargo build --locked --features clickhouse
 target/debug/gnomad-lr --version
 target/debug/gnomad-lr --help >/dev/null
 target/debug/gnomad-lr init --help >/dev/null
+target/debug/gnomad-lr init-y1 --help >/dev/null
+if target/debug/gnomad-lr init-y1 \
+    --endpoint http://127.0.0.1:8123 \
+    --database default \
+    --target-kind scratch \
+    --auth-source none >/dev/null 2>&1; then
+  echo "Y1 target safety check accepted the default database" >&2
+  exit 1
+fi
+if target/debug/gnomad-lr init-y1 \
+    --endpoint 'http://127.0.0.1:8123/?database=gnomad_lr_y1_scratch_bad' \
+    --database gnomad_lr_y1_scratch_bad \
+    --target-kind scratch \
+    --auth-source none >/dev/null 2>&1; then
+  echo "Y1 target safety check accepted a database embedded in the endpoint" >&2
+  exit 1
+fi
+if target/debug/gnomad-lr init-y1 \
+    --endpoint http://192.0.2.1:8123 \
+    --database gnomad_lr_y1_scratch_bad \
+    --target-kind scratch \
+    --auth-source none >/dev/null 2>&1; then
+  echo "Y1 target safety check accepted an unauthenticated remote endpoint" >&2
+  exit 1
+fi
 python3 scripts/smoke.py --no-build --dry-run >/dev/null
 if python3 scripts/smoke.py --no-build --dry-run --database default >/dev/null 2>&1; then
   echo "smoke safety check accepted the default database" >&2

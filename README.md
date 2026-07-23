@@ -4,9 +4,9 @@ Rust loaders that transform gnomAD long-read VCF, coverage, methylation, STR his
 
 ## Y1 status
 
-The current primary VCF loader and `sql/lr_{variants,haplotypes}.sql` implement the legacy browser contract. They are **not compatible with the cohort-aware Y1 HGSVC/HPRC and AoU sources**: the legacy shape loses multiallelic arrays, lacks release/cohort identity, and cannot represent AoU's summary-only records safely.
+The existing `load`/`run` paths and `sql/lr_{variants,haplotypes}.sql` still implement the legacy browser contract. They are **not compatible with the cohort-aware Y1 HGSVC/HPRC and AoU sources**: the legacy shape loses multiallelic arrays, lacks release/cohort identity, and cannot represent AoU's summary-only records safely.
 
-Do not point the current VCF load commands at Y1 objects or initialize `gnomad_lr_y1_pilot` with the legacy primary DDL. The source survey and detailed v2 reconciliation are planning artifacts, not runtime configuration in this repository.
+Y1 development now has a separate pure transformation layer plus repository-owned `sql/y1/` staging, canonical-summary, ALT-expanded, frequency, carrier, ledger, and active-partition tables. This is an isolated v2 development path, not a completed source loader or browser cutover. Do not point the legacy commands at Y1 objects, initialize `gnomad_lr_y1_pilot` with legacy DDL, or write surveyed Y1 data to remote ClickHouse yet.
 
 ## Reproducible build
 
@@ -29,15 +29,27 @@ make install-genohype
 
 ## ClickHouse environments
 
-The repository-owned DDL for the current legacy browser contract lives in `sql/` and is embedded in the binary's `init` command. The two primary definitions require a v2 replacement before Y1. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. All HTTP requests preserve a URL's `database` query parameter:
+The repository-owned DDL for the current legacy browser contract lives at the top of `sql/` and is embedded in the binary's `init` command. Y1 v2 DDL lives separately in `sql/y1/` and is initialized only by `init-y1`. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. Legacy HTTP requests preserve a URL's `database` query parameter:
 
 ```text
 http://127.0.0.1:8123/?database=gnomad_lr_smoke
 ```
 
+The Y1 target contract is stricter: endpoint, database, target kind, and auth source are separate values. It rejects `default`, credentials or `database=...` embedded in the endpoint, unsafe database names, unauthenticated remote endpoints, and serving targets without an additional acknowledgement. For example, after an administrator creates the database:
+
+```bash
+target/debug/gnomad-lr init-y1 \
+  --endpoint http://127.0.0.1:8123 \
+  --database gnomad_lr_y1_scratch_local \
+  --target-kind scratch \
+  --auth-source none
+```
+
+Remote targets require `--allow-remote --auth-source environment`; credentials are read from `Y1_CLICKHOUSE_USER` and `Y1_CLICKHOUSE_PASSWORD` by default. Serving-class schema operations additionally require `--allow-serving`. These acknowledgements do not make surveyed Y1 writes acceptable before the remaining acceptance gates pass.
+
 Recommended promotion path:
 
-1. **Local Docker/Colima** for schema, parser, and bounded source smoke tests.
+1. **Local Docker/Colima** for schema, parser, synthetic retry/publication, and bounded source smoke tests.
 2. **Dedicated GCP dev ClickHouse** only when testing distributed pool networking or realistic write concurrency.
 3. **Production ClickHouse** only for an explicit final check, using the smoke runner's `gnomad_lr_smoke_*` database guard. Direct remote endpoints additionally require `--allow-remote`. Never smoke-test in `default`.
 
@@ -154,4 +166,4 @@ gnomad-lr run --chroms chr22 --skip-index \
   --clickhouse-url 'http://192.168.0.6:8123/?database=gnomad_lr_smoke_pool'
 ```
 
-Do not promote Y1 data to the production `default` database through this legacy path. Y1 promotion requires a reviewed v2 schema, dual-cohort 10 kb acceptance, retry-safe staging/publication, metadata/ancillary gates, and browser contract changes.
+Do not promote Y1 data to the production `default` database through this legacy path. The v2 development tables preserve canonical arrays and derive ALT-expanded/frequency/carrier query shapes. Task attempts are immutable; only one accepted attempt per task is materialized, repeat materialization replaces the inactive run partition, and an active pointer is separate. Activation is restricted to immutable, independently counted full-chromosome serving runs. Y1 promotion still requires dual-cohort 10 kb acceptance, metadata/ancillary gates, and cohort-aware browser/API changes.

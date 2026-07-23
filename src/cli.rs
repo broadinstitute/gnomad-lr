@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -25,6 +25,8 @@ pub enum Commands {
     },
     /// Initialize the current legacy-contract schema (not the Y1 v2 schema)
     Init(InitArgs),
+    /// Initialize isolated cohort-aware Y1 v2 tables
+    InitY1(Y1InitArgs),
     /// Run the legacy distributed VCF pipeline (not compatible with Y1 inputs)
     Run(RunArgs),
 }
@@ -34,6 +36,53 @@ pub struct InitArgs {
     /// ClickHouse HTTP URL. A `database` query parameter selects an isolated database.
     #[arg(long, default_value = "http://127.0.0.1:8123")]
     pub clickhouse_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Y1TargetKindArg {
+    Scratch,
+    Serving,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Y1AuthSourceArg {
+    None,
+    Environment,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1InitArgs {
+    /// ClickHouse HTTP endpoint without credentials, path, or query parameters
+    #[arg(long)]
+    pub endpoint: String,
+
+    /// Explicit isolated Y1 database (never `default`)
+    #[arg(long)]
+    pub database: String,
+
+    /// Safety class for database-name validation
+    #[arg(long, value_enum)]
+    pub target_kind: Y1TargetKindArg,
+
+    /// Credential source; environment credentials are resolved only per request
+    #[arg(long, value_enum)]
+    pub auth_source: Y1AuthSourceArg,
+
+    /// Environment variable containing the ClickHouse username
+    #[arg(long, default_value = "Y1_CLICKHOUSE_USER")]
+    pub username_env: String,
+
+    /// Environment variable containing the ClickHouse password
+    #[arg(long, default_value = "Y1_CLICKHOUSE_PASSWORD")]
+    pub password_env: String,
+
+    /// Acknowledge that the endpoint is not loopback
+    #[arg(long)]
+    pub allow_remote: bool,
+
+    /// Acknowledge schema operations against a serving-class Y1 database
+    #[arg(long)]
+    pub allow_serving: bool,
 }
 
 #[derive(Args, Clone)]

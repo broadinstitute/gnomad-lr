@@ -11,7 +11,10 @@ pub mod y1;
 compile_error!("gnomad-lr requires the default `clickhouse` feature");
 
 use clap::Parser;
-use cli::{parse_region, Cli, Commands, LoadTarget, ServiceAction};
+use cli::{
+    parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1InitArgs,
+    Y1TargetKindArg,
+};
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
 use tracing::info;
@@ -34,6 +37,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::Init(args) => {
             tokio::task::spawn_blocking(move || clickhouse::init_tables(&args.clickhouse_url))
                 .await??;
+        }
+        Commands::InitY1(args) => {
+            tokio::task::spawn_blocking(move || {
+                let target = y1_target(&args)?;
+                info!("Initializing Y1 schema in {}", target.display_name());
+                y1::init_schema(&target)
+            })
+            .await??;
         }
         Commands::Run(args) => {
             orchestrate::run(&args)?;
@@ -63,6 +74,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn y1_target(args: &Y1InitArgs) -> anyhow::Result<y1::ClickHouseTarget> {
+    let kind = match args.target_kind {
+        Y1TargetKindArg::Scratch => y1::TargetKind::Scratch,
+        Y1TargetKindArg::Serving => y1::TargetKind::Serving,
+    };
+    let auth = match args.auth_source {
+        Y1AuthSourceArg::None => y1::AuthSource::None,
+        Y1AuthSourceArg::Environment => y1::AuthSource::Environment {
+            username_variable: args.username_env.clone(),
+            password_variable: args.password_env.clone(),
+        },
+    };
+    y1::ClickHouseTarget::new(
+        &args.endpoint,
+        &args.database,
+        kind,
+        auth,
+        args.allow_remote,
+        args.allow_serving,
+    )
 }
 
 fn read_vcf_records(

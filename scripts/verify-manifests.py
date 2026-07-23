@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the checked-in legacy smoke safety boundary."""
+"""Validate legacy isolation and the repository-owned Y1 schema inventory."""
 
 from pathlib import Path
 import tomllib
@@ -20,4 +20,34 @@ assert "/gnomAD_LR_vcfs/" not in smoke["inputs"]["vcf"], (
     "the legacy smoke must not point at the Y1 source tree"
 )
 
-print("Manifest verified: legacy smoke is isolated from Y1 sources")
+y1_tables = {
+    "lr_y1_load_runs",
+    "lr_y1_task_attempts",
+    "lr_y1_active_partitions",
+    "lr_y1_rejects_staging",
+    "lr_y1_summaries_staging",
+    "lr_y1_alleles_staging",
+    "lr_y1_frequencies_staging",
+    "lr_y1_carriers_staging",
+    "lr_y1_summaries",
+    "lr_y1_alleles",
+    "lr_y1_frequencies",
+    "lr_y1_carriers",
+}
+y1_sql_dir = ROOT / "sql" / "y1"
+actual_y1_files = {path.stem for path in y1_sql_dir.glob("*.sql")}
+assert actual_y1_files == y1_tables, (
+    f"Y1 DDL inventory mismatch: missing={sorted(y1_tables - actual_y1_files)}, "
+    f"unexpected={sorted(actual_y1_files - y1_tables)}"
+)
+for table in sorted(y1_tables):
+    ddl = (y1_sql_dir / f"{table}.sql").read_text()
+    assert f"CREATE TABLE IF NOT EXISTS {table}" in ddl
+    assert "CREATE TABLE IF NOT EXISTS lr_variants" not in ddl
+    assert "CREATE TABLE IF NOT EXISTS lr_haplotypes" not in ddl
+
+for table in ["lr_y1_summaries", "lr_y1_alleles", "lr_y1_frequencies", "lr_y1_carriers"]:
+    ddl = (y1_sql_dir / f"{table}.sql").read_text()
+    assert "PARTITION BY (release, cohort, reference_genome, chrom, run_id)" in ddl
+
+print("Manifests verified: legacy smoke is isolated and Y1 DDL is versioned separately")

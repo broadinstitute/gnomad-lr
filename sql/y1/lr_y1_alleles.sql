@@ -1,0 +1,25 @@
+CREATE TABLE IF NOT EXISTS lr_y1_alleles (
+    run_id String,
+    release LowCardinality(String),
+    cohort LowCardinality(String),
+    reference_genome LowCardinality(String),
+    chrom LowCardinality(String),
+    position UInt32,
+    reference_end UInt32,
+    xpos UInt64,
+    source_variant_id String,
+    alt_index UInt16,
+    ref_allele String,
+    alt String,
+    allele_type Nullable(String),
+    qual Nullable(Float64),
+    filters Array(String),
+    ac UInt32,
+    an UInt32,
+    af Float64,
+    allele_length Int32,
+    length_provenance LowCardinality(String),
+    source_info_json String
+) ENGINE = MergeTree()
+PARTITION BY (release, cohort, reference_genome, chrom, run_id)
+ORDER BY (release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, run_id);
