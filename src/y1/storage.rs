@@ -216,7 +216,7 @@ impl AttemptContext {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct StagedCounts {
     pub source_records: u64,
     pub summaries: u64,
@@ -698,20 +698,70 @@ impl StageRows {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct InsertStats {
+    pub rows: u64,
+    /// Bytes in the acknowledged JSONEachRow request bodies (including newlines).
+    pub bytes: u64,
+    pub requests: u64,
+}
+
 pub fn stage_attempt(
     target: &ClickHouseTarget,
     context: &AttemptContext,
     batch: &TransformationBatch,
 ) -> anyhow::Result<StagedCounts> {
+    stage_attempt_tracked(target, context, batch, &mut InsertStats::default())
+}
+
+pub fn stage_attempt_tracked(
+    target: &ClickHouseTarget,
+    context: &AttemptContext,
+    batch: &TransformationBatch,
+    inserted: &mut InsertStats,
+) -> anyhow::Result<StagedCounts> {
     let rows = StageRows::from_batch(context, batch)?;
     let counts = rows.counts(batch.report.source_records)?;
 
-    target.insert_json_each_row("lr_y1_summaries_staging", &rows.summaries)?;
-    target.insert_json_each_row("lr_y1_alleles_staging", &rows.alleles)?;
-    target.insert_json_each_row("lr_y1_frequencies_staging", &rows.frequencies)?;
-    target.insert_json_each_row("lr_y1_carriers_staging", &rows.carriers)?;
-    target.insert_json_each_row("lr_y1_rejects_staging", &rows.rejects)?;
+    insert_tracked(target, "lr_y1_summaries_staging", &rows.summaries, inserted)?;
+    insert_tracked(target, "lr_y1_alleles_staging", &rows.alleles, inserted)?;
+    insert_tracked(
+        target,
+        "lr_y1_frequencies_staging",
+        &rows.frequencies,
+        inserted,
+    )?;
+    insert_tracked(target, "lr_y1_carriers_staging", &rows.carriers, inserted)?;
+    insert_tracked(target, "lr_y1_rejects_staging", &rows.rejects, inserted)?;
     Ok(counts)
+}
+
+fn insert_tracked<T: Serialize>(
+    target: &ClickHouseTarget,
+    table: &str,
+    rows: &[T],
+    inserted: &mut InsertStats,
+) -> anyhow::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let bytes = rows.iter().try_fold(0u64, |total, row| {
+        let row_bytes = u64::try_from(serde_json::to_vec(row)?.len())?;
+        total
+            .checked_add(row_bytes + 1)
+            .context("insert byte count overflow")
+    })?;
+    target.insert_json_each_row(table, rows)?;
+    inserted.rows = inserted
+        .rows
+        .checked_add(u64::try_from(rows.len())?)
+        .context("insert row count overflow")?;
+    inserted.bytes = inserted
+        .bytes
+        .checked_add(bytes)
+        .context("insert byte count overflow")?;
+    inserted.requests += 1;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

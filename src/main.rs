@@ -50,6 +50,24 @@ async fn main() -> anyhow::Result<()> {
         Commands::LoadY1Interval(args) => {
             tokio::task::spawn_blocking(move || run_y1_interval(args)).await??;
         }
+        Commands::FinalizeY1Chr22(args) => {
+            tokio::task::spawn_blocking(move || {
+                let target = y1_target(&args.target)?;
+                let report = y1::finalizer::finalize_chr22_run(
+                    &target,
+                    &args.manifest,
+                    &args.independent_counts,
+                    &args.operator_identity,
+                )?;
+                if let Some(parent) = args.report.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&args.report, serde_json::to_vec_pretty(&report)?)?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+        }
         Commands::ReconcileY1Metadata(args) => {
             tokio::task::spawn_blocking(move || {
                 let target = y1_target(&args.target)?;
@@ -123,6 +141,7 @@ fn y1_target(args: &Y1InitArgs) -> anyhow::Result<y1::ClickHouseTarget> {
     };
     let auth = match args.auth_source {
         Y1AuthSourceArg::None => y1::AuthSource::None,
+        Y1AuthSourceArg::PrivateNetwork => y1::AuthSource::PrivateNetwork,
         Y1AuthSourceArg::Environment => y1::AuthSource::Environment {
             username_variable: args.username_env.clone(),
             password_variable: args.password_env.clone(),

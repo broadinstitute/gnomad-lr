@@ -29,6 +29,8 @@ pub enum Commands {
     InitY1(Y1InitArgs),
     /// Strict bounded Y1 source load into an isolated scratch database
     LoadY1Interval(Y1IntervalArgs),
+    /// Guardedly finalize a complete staged Y1 chr22 candidate
+    FinalizeY1Chr22(Y1FinalizeArgs),
     /// Reconcile and publish an immutable HGSVC/HPRC Y1 metadata candidate
     ReconcileY1Metadata(Y1MetadataArgs),
     /// Activate an accepted Y1 metadata run on a serving target
@@ -55,6 +57,7 @@ pub enum Y1TargetKindArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Y1AuthSourceArg {
     None,
+    PrivateNetwork,
     Environment,
 }
 
@@ -141,6 +144,28 @@ pub struct Y1IntervalArgs {
     /// Machine-readable validation report destination
     #[arg(long)]
     pub report_path: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1FinalizeArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    /// Checked, deterministic full-chr22 Genohype task manifest
+    #[arg(long)]
+    pub manifest: std::path::PathBuf,
+
+    /// Independently derived expected-count JSON (not loader output)
+    #[arg(long)]
+    pub independent_counts: std::path::PathBuf,
+
+    /// Human or service identity recorded in the immutable run ledger
+    #[arg(long)]
+    pub operator_identity: String,
+
+    /// Machine-readable finalization report destination
+    #[arg(long)]
+    pub report: std::path::PathBuf,
 }
 
 #[derive(Args, Clone)]

@@ -1,6 +1,6 @@
 use super::{
-    record_task_attempt, stage_attempt, AttemptContext, AttemptState, ClickHouseTarget, Cohort,
-    StagedCounts, TaskAttemptLedgerRow, TransformationReport, Y1Header,
+    record_task_attempt, stage_attempt_tracked, AttemptContext, AttemptState, ClickHouseTarget,
+    Cohort, InsertStats, StagedCounts, TaskAttemptLedgerRow, TransformationReport, Y1Header,
 };
 use crate::loader::vcf_reader::{read_header_text, VcfStream};
 use anyhow::{bail, Context};
@@ -46,6 +46,26 @@ pub struct PoolY1TaskSpec {
     pub source_index_generation: String,
     pub source_index_checksum_algorithm: String,
     pub source_index_checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controlled_fail_once: Option<ControlledFailOnce>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlledFailOnce {
+    pub mode: String,
+    pub evidence_token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StructuredAttemptFailure {
+    pub code: String,
+    pub phase: String,
+    pub message: String,
+    pub controlled: bool,
+    pub evidence_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,12 +82,17 @@ pub struct PoolY1AttemptReport {
     pub source_size_bytes: u64,
     pub counts: StagedCounts,
     pub transformation: TransformationReport,
+    pub inserted: InsertStats,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
     pub elapsed_ms: u128,
     pub parse_transform_insert_ms: u128,
     pub linux_peak_rss_bytes: Option<u64>,
     pub worker_identity: String,
     pub worker_build_version: String,
     pub backend_revision: String,
+    pub state: String,
+    pub failure: Option<StructuredAttemptFailure>,
     pub published: bool,
 }
 
@@ -127,6 +152,20 @@ impl PoolY1TaskSpec {
         {
             bail!("only checked md5_base64 source identities are accepted");
         }
+        match (&self.controlled_fail_once, &self.retry_attempt_id) {
+            (Some(injection), Some(retry_id)) => {
+                if injection.mode != "after_first_staged_batch"
+                    || injection.evidence_token.trim().is_empty()
+                {
+                    bail!("controlled fail-once requires mode after_first_staged_batch and a non-empty evidence token");
+                }
+                if retry_id.is_empty() || retry_id == &self.attempt_id {
+                    bail!("controlled fail-once requires a distinct non-empty retry_attempt_id");
+                }
+            }
+            (None, None) => {}
+            _ => bail!("controlled_fail_once and retry_attempt_id must be supplied together"),
+        }
         Ok(())
     }
 }
@@ -143,24 +182,20 @@ pub fn run_pool_interval_attempt(
     if target.kind() != super::TargetKind::Scratch {
         bail!("pool interval attempts may write only to a scratch target");
     }
+    if batch_records == 0 {
+        bail!("batch_records must be greater than zero");
+    }
 
-    let started = Instant::now();
+    let (attempt_id, inject_failure) = select_attempt(target, task)?;
     let cohort = match task.cohort.as_str() {
         "hgsvc_hprc" => Cohort::HgsvcHprc,
         "aou" => Cohort::Aou,
         _ => bail!("unsupported Y1 cohort"),
     };
-    let header_text =
-        read_header_text(&task.source_uri).context("failed to read pinned Y1 header")?;
-    let header = Y1Header::parse(&header_text, cohort)?;
-    if header.reference_genome.as_str() != task.reference_genome {
-        bail!("source header reference does not match manifest reference_genome");
-    }
-
     let context = AttemptContext {
         run_id: task.run_id.clone(),
         task_id: task.task_id.clone(),
-        attempt_id: task.attempt_id.clone(),
+        attempt_id,
         cohort,
         chrom: task.chrom.clone(),
         interval_start: task.start,
@@ -168,22 +203,54 @@ pub fn run_pool_interval_attempt(
     };
     context.validate()?;
 
+    let started_at_revision = revision_now()?;
+    let started = Instant::now();
     let phase_started = Instant::now();
     let mut total_counts = StagedCounts::default();
     let mut total_report = TransformationReport::default();
-    let mut record_offset = 0usize;
-    let mut record_batch = Vec::with_capacity(batch_records);
-    let records = VcfStream::open_region_required_index(
-        &task.source_uri,
-        &task.chrom,
-        task.start,
-        task.stop,
-    )?
-    .records();
+    let mut inserted = InsertStats::default();
+    let mut injected = false;
 
-    for record in records {
-        record_batch.push(record?);
-        if record_batch.len() == batch_records {
+    let execution = (|| -> anyhow::Result<()> {
+        let header_text =
+            read_header_text(&task.source_uri).context("failed to read pinned Y1 header")?;
+        let header = Y1Header::parse(&header_text, cohort)?;
+        if header.reference_genome.as_str() != task.reference_genome {
+            bail!("source header reference does not match manifest reference_genome");
+        }
+
+        let mut record_offset = 0usize;
+        let mut record_batch = Vec::with_capacity(batch_records);
+        let records = VcfStream::open_region_required_index(
+            &task.source_uri,
+            &task.chrom,
+            task.start,
+            task.stop,
+        )?
+        .records();
+        let mut staged_batches = 0usize;
+
+        for record in records {
+            record_batch.push(record?);
+            if record_batch.len() == batch_records {
+                stage_batch(
+                    target,
+                    &context,
+                    &header,
+                    &mut record_batch,
+                    &mut record_offset,
+                    &mut total_counts,
+                    &mut total_report,
+                    &mut inserted,
+                )?;
+                staged_batches += 1;
+                if inject_failure && staged_batches == 1 {
+                    injected = true;
+                    bail!("controlled fail-once after first acknowledged ClickHouse staging batch");
+                }
+            }
+        }
+        if !record_batch.is_empty() {
             stage_batch(
                 target,
                 &context,
@@ -192,48 +259,52 @@ pub fn run_pool_interval_attempt(
                 &mut record_offset,
                 &mut total_counts,
                 &mut total_report,
+                &mut inserted,
             )?;
+            if inject_failure {
+                injected = true;
+                bail!("controlled fail-once after first acknowledged ClickHouse staging batch");
+            }
         }
-    }
-    if !record_batch.is_empty() {
-        stage_batch(
-            target,
-            &context,
-            &header,
-            &mut record_batch,
-            &mut record_offset,
-            &mut total_counts,
-            &mut total_report,
-        )?;
-    }
+        if inject_failure {
+            bail!("controlled fail-once task contained no source records; injection was not exercised");
+        }
+        if total_counts.rejects != 0 || total_counts.summaries != total_counts.source_records {
+            bail!("transformation validation failed");
+        }
+        Ok(())
+    })();
 
-    let accepted =
-        total_counts.rejects == 0 && total_counts.summaries == total_counts.source_records;
-    let ledger = TaskAttemptLedgerRow::new(
-        &context,
-        revision_now()?,
-        if accepted {
-            AttemptState::Accepted
-        } else {
-            AttemptState::Failed
-        },
-        total_counts,
-        &total_report,
-        if accepted {
-            ""
-        } else {
-            "transformation validation failed"
-        },
-    )?;
-    record_task_attempt(target, &ledger)?;
-    if !accepted {
-        bail!("Y1 pool attempt failed transformation validation");
-    }
-
-    Ok(PoolY1AttemptReport {
+    let failure = execution
+        .as_ref()
+        .err()
+        .map(|error| StructuredAttemptFailure {
+            code: if injected {
+                "controlled_fail_once".to_string()
+            } else {
+                "attempt_execution_failed".to_string()
+            },
+            phase: if inserted.requests == 0 {
+                "source_or_transform".to_string()
+            } else {
+                "parse_transform_insert".to_string()
+            },
+            message: format!("{error:#}"),
+            controlled: injected,
+            evidence_token: injected.then(|| {
+                task.controlled_fail_once
+                    .as_ref()
+                    .unwrap()
+                    .evidence_token
+                    .clone()
+            }),
+        });
+    let accepted = failure.is_none();
+    let finished_revision = revision_now()?;
+    let report = PoolY1AttemptReport {
         run_id: task.run_id.clone(),
         task_id: task.task_id.clone(),
-        attempt_id: task.attempt_id.clone(),
+        attempt_id: context.attempt_id.clone(),
         cohort,
         chrom: task.chrom.clone(),
         start: task.start,
@@ -242,15 +313,97 @@ pub fn run_pool_interval_attempt(
         source_generation: task.source_generation.clone(),
         source_size_bytes: task.source_size_bytes,
         counts: total_counts,
-        transformation: total_report,
+        transformation: total_report.clone(),
+        inserted,
+        started_at_ms: started_at_revision / 1_000_000,
+        finished_at_ms: finished_revision / 1_000_000,
         elapsed_ms: started.elapsed().as_millis(),
         parse_transform_insert_ms: phase_started.elapsed().as_millis(),
         linux_peak_rss_bytes: linux_peak_rss_bytes(),
         worker_identity: worker_identity.to_string(),
         worker_build_version: worker_build_version.to_string(),
         backend_revision: backend_revision.to_string(),
+        state: if accepted { "accepted" } else { "failed" }.to_string(),
+        failure,
         published: false,
-    })
+    };
+    let error_text = report
+        .failure
+        .as_ref()
+        .map(|failure| failure.message.as_str())
+        .unwrap_or("");
+    let mut ledger = TaskAttemptLedgerRow::new(
+        &context,
+        finished_revision,
+        if accepted {
+            AttemptState::Accepted
+        } else {
+            AttemptState::Failed
+        },
+        total_counts,
+        &total_report,
+        error_text,
+    )?;
+    ledger.started_at_ms = report.started_at_ms;
+    ledger.updated_at_ms = report.finished_at_ms;
+    ledger.report_json = serde_json::to_string(&report)?;
+    record_task_attempt(target, &ledger)
+        .context("failed to durably record complete Y1 attempt result")?;
+    if let Err(error) = execution {
+        return Err(error.context(format!(
+            "Y1 attempt {} failed after its immutable result was recorded",
+            context.attempt_id
+        )));
+    }
+    Ok(report)
+}
+
+fn select_attempt(
+    target: &ClickHouseTarget,
+    task: &PoolY1TaskSpec,
+) -> anyhow::Result<(String, bool)> {
+    let Some(retry_id) = &task.retry_attempt_id else {
+        if latest_attempt_state(target, &task.run_id, &task.task_id, &task.attempt_id)?.is_some() {
+            bail!("attempt {} already has an immutable ledger result; retry requires a new attempt ID", task.attempt_id);
+        }
+        return Ok((task.attempt_id.clone(), false));
+    };
+    match latest_attempt_state(target, &task.run_id, &task.task_id, &task.attempt_id)?.as_deref() {
+        None => Ok((task.attempt_id.clone(), true)),
+        Some("failed") => {
+            if latest_attempt_state(target, &task.run_id, &task.task_id, retry_id)?.is_some() {
+                bail!("controlled retry attempt {retry_id} already has an immutable ledger result");
+            }
+            Ok((retry_id.clone(), false))
+        }
+        Some(state) => {
+            bail!("controlled initial attempt already ended in state {state:?}; refusing retry")
+        }
+    }
+}
+
+fn latest_attempt_state(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    task_id: &str,
+    attempt_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let query = r#"
+SELECT argMax(state, revision)
+FROM lr_y1_task_attempts
+WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+HAVING count() > 0
+FORMAT TabSeparated
+"#;
+    let body = target.query_text(
+        query,
+        &[
+            ("run_id", run_id),
+            ("task_id", task_id),
+            ("attempt_id", attempt_id),
+        ],
+    )?;
+    Ok((!body.trim().is_empty()).then(|| body.trim().to_string()))
 }
 
 fn stage_batch(
@@ -261,6 +414,7 @@ fn stage_batch(
     record_offset: &mut usize,
     total_counts: &mut StagedCounts,
     total_report: &mut TransformationReport,
+    inserted: &mut InsertStats,
 ) -> anyhow::Result<()> {
     let mut batch = super::transform_records(header, records.iter().map(String::as_str));
     for reject in &mut batch.report.rejects {
@@ -268,7 +422,7 @@ fn stage_batch(
             *record_number += *record_offset;
         }
     }
-    let counts = stage_attempt(target, context, &batch)?;
+    let counts = stage_attempt_tracked(target, context, &batch, inserted)?;
     total_counts.source_records += counts.source_records;
     total_counts.summaries += counts.summaries;
     total_counts.alleles += counts.alleles;
@@ -341,6 +495,8 @@ mod tests {
             source_index_generation: "2".into(),
             source_index_checksum_algorithm: "md5_base64".into(),
             source_index_checksum: "def".into(),
+            retry_attempt_id: None,
+            controlled_fail_once: None,
         }
     }
 
@@ -356,5 +512,17 @@ mod tests {
     #[test]
     fn descriptor_must_match_stable_task_id() {
         assert!(valid_task().validate("coordinator-renamed-task").is_err());
+    }
+
+    #[test]
+    fn controlled_failure_requires_a_distinct_retry_identity() {
+        let mut task = valid_task();
+        task.controlled_fail_once = Some(ControlledFailOnce {
+            mode: "after_first_staged_batch".into(),
+            evidence_token: "exercise-1".into(),
+        });
+        assert!(task.validate(&task.coordinator_task_id).is_err());
+        task.retry_attempt_id = Some("attempt-2".into());
+        task.validate(&task.coordinator_task_id).unwrap();
     }
 }
