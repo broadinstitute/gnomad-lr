@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "manifest_id": "hgsvc-hprc-y1-metadata-v1",
+  "release": "y1",
+  "cohort": "hgsvc_hprc",
+  "reference_genome": "GRCh38",
+  "sources": {
+    "roster": {
+      "id": "hgsvc-hprc-y1-chr22-roster-v1",
+      "uri": "hgsvc_hprc_y1_chr22.roster.txt",
+      "immutable_version": "derived-from-gcs-generation-1785158335564090",
+      "byte_size": 2332,
+      "checksum": { "algorithm": "sha256", "value": "297ed617dda7aaff9f9d920d41a8a340244fd315b5e212f16eff111787b264d8" },
+      "acquired_on": "2026-07-27",
+      "license": "gnomAD data terms of use",
+      "provenance": "Ordered sample columns extracted verbatim from the #CHROM header of the pinned mirrored HGSVC/HPRC Y1 chr22 VCF.",
+      "intended_use": "Authoritative ordered Y1 HGSVC/HPRC metadata roster.",
+      "derived_from_vcf": {
+        "id": "hgsvc-hprc-y1-chr22-vcf",
+        "uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr22.vcf.gz",
+        "immutable_version": "gcs-generation-1785158335564090; source-generation-1784223795164521",
+        "byte_size": 1481939898,
+        "checksum": { "algorithm": "md5_base64", "value": "3Aq7gHWQSTEvet7Pci4OFA==" },
+        "acquired_on": "2026-07-27",
+        "license": "gnomAD data terms of use",
+        "provenance": "HGSVC/HPRC gnomAD Long Read Y1 chr22 VCF mirrored from Broad workspace bucket fc-fd42e80c-b41e-4e60-a9cf-b7c0ade168c4; identity recorded by gnomad-browser commit 510f8ea18.",
+        "intended_use": "Source of the ordered sample roster only. Carrier-derived sample discovery is forbidden."
+      }
+    },
+    "primary_hprc": {
+      "id": "hprc-release2-sample-metadata-568298a3",
+      "uri": "hprc_release2_sample_metadata.csv",
+      "immutable_version": "github-commit-568298a358c35dc9930be71519e472f33aebc1e6",
+      "byte_size": 25939,
+      "checksum": { "algorithm": "sha256", "value": "16503c78a616e34e1b1e529baa0d44460c4735020569725c30ebdc5897f68112" },
+      "acquired_on": "2026-07-27",
+      "license": "HPRC data use and repository terms; see upstream repository",
+      "provenance": "Immutable mirror of https://raw.githubusercontent.com/human-pangenomics/hprc_intermediate_assembly/568298a358c35dc9930be71519e472f33aebc1e6/data_tables/sample/hprc_release2_sample_metadata.csv, maintained by the Human Pangenome Reference Consortium.",
+      "intended_use": "Primary sample metadata and fine-grained population assignment."
+    },
+    "supplemental_ancestry": {
+      "id": "hgsvc-hprc-ancestry-label-64de6d2e8",
+      "uri": "ancestry_label.HGSVC_HPRC.tsv",
+      "immutable_version": "gnomad-browser-commit-64de6d2e81f3a06b4382f78f6e732e595b44d638",
+      "byte_size": 7128,
+      "checksum": { "algorithm": "sha256", "value": "da634c8954eea4f611194d76bccdf830460f585dc78a256da4fc7bf300c39856" },
+      "acquired_on": "2026-07-27",
+      "license": "MIT license of the pinned gnomad-browser repository revision",
+      "provenance": "HGSVC/HPRC continental ancestry labels imported to gnomad-browser by Matthew Solomonson in commit 64de6d2e81f3a06b4382f78f6e732e595b44d638. Scientific labels are consumed as provided; Population and color are documented placeholders and are ignored.",
+      "intended_use": "Supplement only missing or unrecognized primary superpopulation assignments; never supply subpopulation, color, sex, collection, or descriptor."
+    }
+  },
+  "expected": {
+    "roster_rows": 292,
+    "primary_source_rows": 234,
+    "primary_roster_overlap": 232,
+    "primary_absent_from_roster": 60,
+    "supplemental_source_rows": 297,
+    "supplemental_unique_samples": 293,
+    "supplemental_assignments": 62,
+    "primary_retained_conflicts": 2,
+    "exact_supplemental_duplicates": 4,
+    "distribution": { "AFR": 97, "AMR": 52, "ASJ": 1, "EAS": 61, "EUR": 37, "SAS": 44 }
+  }
+}

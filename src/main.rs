@@ -50,6 +50,42 @@ async fn main() -> anyhow::Result<()> {
         Commands::LoadY1Interval(args) => {
             tokio::task::spawn_blocking(move || run_y1_interval(args)).await??;
         }
+        Commands::ReconcileY1Metadata(args) => {
+            tokio::task::spawn_blocking(move || {
+                let target = y1_target(&args.target)?;
+                let joins = y1::metadata::reconcile_and_publish(
+                    &target,
+                    &args.metadata_run_id,
+                    &args.source_manifest,
+                    &args.report,
+                    &args.publisher_identity,
+                    &args.carrier_run_id,
+                )?;
+                info!(
+                    "accepted metadata run {} with {} carrier join validations",
+                    args.metadata_run_id,
+                    joins.len()
+                );
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+        }
+        Commands::ActivateY1Metadata(args) | Commands::RollbackY1Metadata(args) => {
+            tokio::task::spawn_blocking(move || {
+                let target = y1_target(&args.target)?;
+                let previous = y1::metadata::activate_metadata(
+                    &target,
+                    &args.metadata_run_id,
+                    &args.activated_by,
+                )?;
+                info!(
+                    "active metadata run is {}; previous run was {}",
+                    args.metadata_run_id, previous
+                );
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+        }
         Commands::Run(args) => {
             orchestrate::run(&args)?;
         }

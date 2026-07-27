@@ -1,3 +1,4 @@
+pub mod metadata;
 mod model;
 mod parser;
 mod storage;

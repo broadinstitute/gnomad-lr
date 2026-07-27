@@ -29,6 +29,12 @@ pub enum Commands {
     InitY1(Y1InitArgs),
     /// Strict bounded Y1 source load into an isolated scratch database
     LoadY1Interval(Y1IntervalArgs),
+    /// Reconcile and publish an immutable HGSVC/HPRC Y1 metadata candidate
+    ReconcileY1Metadata(Y1MetadataArgs),
+    /// Activate an accepted Y1 metadata run on a serving target
+    ActivateY1Metadata(Y1MetadataPointerArgs),
+    /// Roll back the active pointer to a previously accepted Y1 metadata run
+    RollbackY1Metadata(Y1MetadataPointerArgs),
     /// Run the legacy distributed VCF pipeline (not compatible with Y1 inputs)
     Run(RunArgs),
 }
@@ -135,6 +141,44 @@ pub struct Y1IntervalArgs {
     /// Machine-readable validation report destination
     #[arg(long)]
     pub report_path: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1MetadataArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    #[arg(long)]
+    pub metadata_run_id: String,
+
+    /// Checked JSON manifest containing all immutable source identities and checksums
+    #[arg(long)]
+    pub source_manifest: std::path::PathBuf,
+
+    /// Full stable JSON report path; compact JSON and audit JSONL are written alongside it
+    #[arg(long)]
+    pub report: std::path::PathBuf,
+
+    /// Human or service identity recorded in the immutable run ledger
+    #[arg(long)]
+    pub publisher_identity: String,
+
+    /// Accepted carrier run IDs to validate; repeat for 10 kb, 1 Mb, and chr22 runs
+    #[arg(long)]
+    pub carrier_run_id: Vec<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1MetadataPointerArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    /// Accepted metadata run to make active (for rollback, the prior run ID)
+    #[arg(long)]
+    pub metadata_run_id: String,
+
+    #[arg(long)]
+    pub activated_by: String,
 }
 
 #[derive(Args, Clone)]

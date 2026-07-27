@@ -39,6 +39,30 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
             include_str!("../../sql/y1/lr_y1_active_partitions.sql"),
         ),
         (
+            "lr_y1_metadata_runs",
+            include_str!("../../sql/y1/lr_y1_metadata_runs.sql"),
+        ),
+        (
+            "lr_y1_active_metadata",
+            include_str!("../../sql/y1/lr_y1_active_metadata.sql"),
+        ),
+        (
+            "lr_y1_sample_metadata_staging",
+            include_str!("../../sql/y1/lr_y1_sample_metadata_staging.sql"),
+        ),
+        (
+            "lr_y1_metadata_audit_staging",
+            include_str!("../../sql/y1/lr_y1_metadata_audit_staging.sql"),
+        ),
+        (
+            "lr_y1_sample_metadata",
+            include_str!("../../sql/y1/lr_y1_sample_metadata.sql"),
+        ),
+        (
+            "lr_y1_metadata_audit",
+            include_str!("../../sql/y1/lr_y1_metadata_audit.sql"),
+        ),
+        (
             "lr_y1_rejects_staging",
             include_str!("../../sql/y1/lr_y1_rejects_staging.sql"),
         ),
