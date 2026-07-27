@@ -113,7 +113,7 @@ fn transforms_source_derived_hgsvc_trv_without_losing_alt_or_phase_semantics() {
         .unwrap();
     assert_eq!(hg00097.alt_index, 3);
     assert_eq!(hg00097.genotype_position, 1);
-    assert_eq!(hg00097.gt_alleles, vec![0, 3]);
+    assert_eq!(hg00097.gt_alleles, vec![Some(0), Some(3)]);
     assert_eq!(
         hg00097.position_fields.get("AL").and_then(Option::as_deref),
         Some("20")
@@ -208,7 +208,105 @@ fn supports_alt_indices_above_u8_capacity() {
     assert_eq!(transformed.summary.alts.len(), 256);
     assert_eq!(transformed.carriers.len(), 1);
     assert_eq!(transformed.carriers[0].alt_index, 256);
-    assert_eq!(transformed.carriers[0].gt_alleles, vec![0, 256]);
+    assert_eq!(transformed.carriers[0].gt_alleles, vec![Some(0), Some(256)]);
+}
+
+#[test]
+fn preserves_partial_genotype_positions_and_counts_only_called_alleles() {
+    let header = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let mut columns = vec![
+        "chr22".to_string(),
+        "20005794".to_string(),
+        "chr22-20005794-INS-1".to_string(),
+        "T".to_string(),
+        "TA".to_string(),
+        "53".to_string(),
+        "PASS".to_string(),
+        "allele_length=1;allele_type=ins;AC=1;AN=1;AF=1".to_string(),
+        "GT:DP:GQ".to_string(),
+    ];
+    columns.extend((0..292).map(|index| {
+        if index == 0 {
+            "./1:22:0".to_string()
+        } else {
+            "./.:.:.".to_string()
+        }
+    }));
+
+    let transformed = transform_record(&header, &columns.join("\t")).unwrap();
+    assert_eq!(transformed.stats.genotype_calls, 292);
+    assert_eq!(transformed.stats.missing_genotypes, 291);
+    assert_eq!(transformed.stats.partially_called_genotypes, 1);
+    assert_eq!(transformed.stats.reference_genotypes, 0);
+    assert_eq!(transformed.carriers.len(), 1);
+
+    let carrier = &transformed.carriers[0];
+    assert_eq!(carrier.sample_id, header.sample_names[0]);
+    assert_eq!(carrier.alt_index, 1);
+    assert_eq!(carrier.genotype_position, 1);
+    assert_eq!(carrier.gt_alleles, vec![None, Some(1)]);
+}
+
+#[test]
+fn counts_partial_reference_without_emitting_a_carrier() {
+    let header = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let mut columns = vec![
+        "chr22".to_string(),
+        "20005794".to_string(),
+        "chr22-20005794-T-A".to_string(),
+        "T".to_string(),
+        "A".to_string(),
+        "53".to_string(),
+        "PASS".to_string(),
+        "allele_length=0;allele_type=snv;AC=0;AN=1;AF=0".to_string(),
+        "GT".to_string(),
+    ];
+    columns.extend((0..292).map(|index| {
+        if index == 0 {
+            "./0".to_string()
+        } else {
+            "./.".to_string()
+        }
+    }));
+
+    let transformed = transform_record(&header, &columns.join("\t")).unwrap();
+    assert_eq!(transformed.stats.missing_genotypes, 291);
+    assert_eq!(transformed.stats.partially_called_genotypes, 1);
+    assert_eq!(transformed.stats.reference_genotypes, 0);
+    assert!(transformed.carriers.is_empty());
+}
+
+#[test]
+fn accepts_scalar_al_as_a_genotype_level_sv_field() {
+    let header = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let mut columns = vec![
+        "chr22".to_string(),
+        "20006981".to_string(),
+        "chr22-20006981-DEL-146".to_string(),
+        "CA".to_string(),
+        "C".to_string(),
+        "1".to_string(),
+        "PASS".to_string(),
+        "allele_length=-1;allele_type=del;AC=1;AN=584;AF=0.0017123287671232876".to_string(),
+        "GT:AL".to_string(),
+    ];
+    columns.extend((0..292).map(|index| {
+        if index == 0 {
+            "0|1:145".to_string()
+        } else {
+            "0/0:.".to_string()
+        }
+    }));
+
+    let transformed = transform_record(&header, &columns.join("\t")).unwrap();
+    assert_eq!(transformed.carriers.len(), 1);
+    let carrier = &transformed.carriers[0];
+    assert_eq!(carrier.gt_alleles, vec![Some(0), Some(1)]);
+    assert_eq!(
+        carrier.genotype_fields.get("AL").and_then(Option::as_deref),
+        Some("145")
+    );
+    assert!(!carrier.position_fields.contains_key("AL"));
 }
 
 #[test]

@@ -215,6 +215,8 @@ where
                 batch.report.carrier_rows += transformed.carriers.len();
                 batch.report.genotype_calls += transformed.stats.genotype_calls;
                 batch.report.missing_genotypes += transformed.stats.missing_genotypes;
+                batch.report.partially_called_genotypes +=
+                    transformed.stats.partially_called_genotypes;
                 batch.report.reference_genotypes += transformed.stats.reference_genotypes;
                 batch.summaries.push(transformed.summary);
                 batch.carriers.extend(transformed.carriers);
@@ -441,16 +443,20 @@ fn parse_carriers(
             stats.missing_genotypes += 1;
             continue;
         };
+        let called_alleles = gt_alleles.iter().flatten().count();
+        if called_alleles < gt_alleles.len() {
+            stats.partially_called_genotypes += 1;
+        }
         observed_an = observed_an
-            .checked_add(u32::try_from(gt_alleles.len()).map_err(|_| {
+            .checked_add(u32::try_from(called_alleles).map_err(|_| {
                 TransformReject::new(
                     RejectCode::InvalidGenotype,
-                    "genotype ploidy exceeds UInt32",
+                    "called allele count exceeds UInt32",
                 )
             })?)
             .ok_or_else(|| TransformReject::new(RejectCode::InvalidGenotype, "AN overflow"))?;
 
-        for allele in &gt_alleles {
+        for allele in gt_alleles.iter().flatten() {
             if *allele as usize > context.alts.len() {
                 return Err(TransformReject::new(
                     RejectCode::AltIndexOutOfRange,
@@ -465,7 +471,7 @@ fn parse_carriers(
             }
         }
 
-        if gt_alleles.iter().all(|allele| *allele == 0) {
+        if gt_alleles.iter().all(|allele| matches!(allele, Some(0))) {
             stats.reference_genotypes += 1;
             continue;
         }
@@ -474,6 +480,9 @@ fn parse_carriers(
             parse_format_fields(&format_keys, &values, gt_alleles.len(), sample_id)?;
 
         for (gt_position, alt_index) in gt_alleles.iter().copied().enumerate() {
+            let Some(alt_index) = alt_index else {
+                continue;
+            };
             if alt_index == 0 {
                 continue;
             }
@@ -540,7 +549,16 @@ fn parse_format_fields(
         if POSITION_FORMAT_FIELDS.contains(key) {
             if let Some(value) = value {
                 let per_position: Vec<&str> = value.split(',').collect();
-                if per_position.len() != ploidy {
+                if per_position.len() == ploidy {
+                    for (position, position_value) in per_position.into_iter().enumerate() {
+                        position_fields[position]
+                            .insert((*key).to_string(), optional_text(position_value));
+                    }
+                } else if *key == "AL" && per_position.len() == 1 {
+                    // Y1 SV records declare FORMAT/AL Number=1 and use it as a
+                    // genotype-level value, while TR records carry one AL per GT position.
+                    genotype_fields.insert((*key).to_string(), optional_text(per_position[0]));
+                } else {
                     return Err(TransformReject::new(
                         RejectCode::CardinalityMismatch,
                         format!(
@@ -548,10 +566,6 @@ fn parse_format_fields(
                             per_position.len()
                         ),
                     ));
-                }
-                for (position, position_value) in per_position.into_iter().enumerate() {
-                    position_fields[position]
-                        .insert((*key).to_string(), optional_text(position_value));
                 }
             } else {
                 for fields in &mut position_fields {
@@ -566,7 +580,10 @@ fn parse_format_fields(
     Ok((genotype_fields, position_fields))
 }
 
-fn parse_genotype(raw: &str, sample_id: &str) -> Result<Option<(Vec<u16>, bool)>, TransformReject> {
+fn parse_genotype(
+    raw: &str,
+    sample_id: &str,
+) -> Result<Option<(Vec<Option<u16>>, bool)>, TransformReject> {
     let has_phased = raw.contains('|');
     let has_unphased = raw.contains('/');
     if has_phased && has_unphased {
@@ -586,22 +603,19 @@ fn parse_genotype(raw: &str, sample_id: &str) -> Result<Option<(Vec<u16>, bool)>
     if fields.iter().all(|field| *field == "." || field.is_empty()) {
         return Ok(None);
     }
-    if fields.iter().any(|field| *field == "." || field.is_empty()) {
-        return Err(TransformReject::new(
-            RejectCode::InvalidGenotype,
-            format!("sample {sample_id} has partially missing GT {raw:?}"),
-        ));
-    }
-
     let alleles = fields
         .iter()
         .map(|field| {
-            field.parse::<u16>().map_err(|error| {
-                TransformReject::new(
-                    RejectCode::InvalidGenotype,
-                    format!("sample {sample_id} has invalid GT allele {field:?}: {error}"),
-                )
-            })
+            if *field == "." || field.is_empty() {
+                Ok(None)
+            } else {
+                field.parse::<u16>().map(Some).map_err(|error| {
+                    TransformReject::new(
+                        RejectCode::InvalidGenotype,
+                        format!("sample {sample_id} has invalid GT allele {field:?}: {error}"),
+                    )
+                })
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some((alleles, has_phased)))

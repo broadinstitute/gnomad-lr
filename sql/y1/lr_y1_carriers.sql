@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS lr_y1_carriers (
     alt String,
     sample_id LowCardinality(String),
     genotype_position UInt16,
-    gt_alleles Array(UInt16),
+    gt_alleles Array(Nullable(UInt16)),
     gt_phased UInt8,
     genotype_fields_json String,
     position_fields_json String

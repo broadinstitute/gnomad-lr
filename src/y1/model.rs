@@ -120,7 +120,8 @@ pub struct CarrierRecord {
     pub sample_id: String,
     /// Zero-based position in the GT call. This does not imply biological phase.
     pub genotype_position: u16,
-    pub gt_alleles: Vec<u16>,
+    /// Alleles in original GT order. `None` preserves a missing allele position.
+    pub gt_alleles: Vec<Option<u16>>,
     pub gt_phased: bool,
     /// Scalar/non-position-specific FORMAT values, excluding GT.
     pub genotype_fields: BTreeMap<String, Option<String>>,
@@ -132,6 +133,7 @@ pub struct CarrierRecord {
 pub struct RecordStats {
     pub genotype_calls: usize,
     pub missing_genotypes: usize,
+    pub partially_called_genotypes: usize,
     pub reference_genotypes: usize,
     pub carrier_rows: usize,
 }
@@ -224,6 +226,7 @@ pub struct TransformationReport {
     pub carrier_rows: usize,
     pub genotype_calls: usize,
     pub missing_genotypes: usize,
+    pub partially_called_genotypes: usize,
     pub reference_genotypes: usize,
     pub rejected_records: usize,
     pub rejects: Vec<TransformReject>,

@@ -231,7 +231,7 @@ struct CarrierStageRow {
     alt: String,
     sample_id: String,
     genotype_position: u16,
-    gt_alleles: Vec<u16>,
+    gt_alleles: Vec<Option<u16>>,
     gt_phased: u8,
     genotype_fields_json: String,
     position_fields_json: String,
