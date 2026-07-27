@@ -26,6 +26,9 @@ impl TargetKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthSource {
     None,
+    /// Unauthenticated ClickHouse access confined to a private RFC1918 endpoint
+    /// and a separately managed VPC firewall, matching the established pool setup.
+    PrivateNetwork,
     Environment {
         username_variable: String,
         password_variable: String,
@@ -105,7 +108,10 @@ impl ClickHouseTarget {
             bail!("remote Y1 ClickHouse endpoints require the explicit --allow-remote acknowledgement");
         }
         if !loopback && matches!(auth, AuthSource::None) {
-            bail!("remote Y1 ClickHouse endpoints require an authenticated credential source");
+            bail!("remote Y1 ClickHouse endpoints require an authenticated or explicit private-network source");
+        }
+        if matches!(auth, AuthSource::PrivateNetwork) && !endpoint_is_private(&endpoint) {
+            bail!("private-network ClickHouse access requires a literal RFC1918 endpoint");
         }
         if let AuthSource::Environment {
             username_variable,
@@ -218,7 +224,7 @@ impl ClickHouseTarget {
 
     fn authorized(&self, request: RequestBuilder) -> anyhow::Result<RequestBuilder> {
         match &self.auth {
-            AuthSource::None => Ok(request),
+            AuthSource::None | AuthSource::PrivateNetwork => Ok(request),
             AuthSource::Environment {
                 username_variable,
                 password_variable,
@@ -236,6 +242,17 @@ impl ClickHouseTarget {
             }
         }
     }
+}
+
+fn endpoint_is_private(endpoint: &Url) -> bool {
+    endpoint
+        .host_str()
+        .and_then(|host| host.parse::<IpAddr>().ok())
+        .map(|address| match address {
+            IpAddr::V4(address) => address.is_private(),
+            IpAddr::V6(address) => address.is_unique_local(),
+        })
+        .unwrap_or(false)
 }
 
 fn endpoint_is_loopback(endpoint: &Url) -> bool {
@@ -339,6 +356,29 @@ mod tests {
             TargetKind::Serving,
             AuthSource::None,
             false,
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn private_network_auth_accepts_only_literal_private_addresses() {
+        let target = ClickHouseTarget::new(
+            "http://192.168.0.15:8123",
+            "gnomad_lr_y1_scratch_unit",
+            TargetKind::Scratch,
+            AuthSource::PrivateNetwork,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(target.endpoint().host_str(), Some("192.168.0.15"));
+        assert!(ClickHouseTarget::new(
+            "https://clickhouse.example.org:8443",
+            "gnomad_lr_y1_scratch_unit",
+            TargetKind::Scratch,
+            AuthSource::PrivateNetwork,
+            true,
             false,
         )
         .is_err());

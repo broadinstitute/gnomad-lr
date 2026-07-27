@@ -1,9 +1,13 @@
+mod interval;
 pub mod metadata;
 mod model;
 mod parser;
 mod storage;
 mod target;
 
+pub use interval::{
+    run_pool_interval_attempt, PoolY1AttemptReport, PoolY1JobSpec, PoolY1TargetSpec, PoolY1TaskSpec,
+};
 pub use model::*;
 pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};
 pub use storage::{

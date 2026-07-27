@@ -19,14 +19,78 @@ impl TaskHandler for LrTaskHandler {
 
         match action {
             "index" => handle_index_tasks(tasks).await,
+            "load_y1_interval" => handle_y1_interval_tasks(payload, tasks).await,
             "load_coverage" => handle_coverage_tasks(payload, tasks).await,
             "load_metadata" => handle_metadata_tasks(payload, tasks).await,
             "load_histograms" => handle_histograms_tasks(payload, tasks).await,
             "load_methylation" => handle_methylation_tasks(payload, tasks).await,
             "build_cache" => handle_build_cache_tasks(payload, tasks).await,
-            "load" | _ => handle_load_tasks(payload, tasks).await,
+            "load" => handle_load_tasks(payload, tasks).await,
+            unknown => {
+                anyhow::bail!("unsupported pool action {unknown:?}; refusing legacy fallback")
+            }
         }
     }
+}
+
+async fn handle_y1_interval_tasks(
+    payload: &Value,
+    tasks: Vec<TaskDescriptor>,
+) -> Result<TaskResult, anyhow::Error> {
+    let job: crate::y1::PoolY1JobSpec = serde_json::from_value(payload.clone())?;
+    job.validate()?;
+    let target = crate::y1::ClickHouseTarget::new(
+        &job.target.endpoint,
+        &job.target.database,
+        crate::y1::TargetKind::Scratch,
+        crate::y1::AuthSource::PrivateNetwork,
+        true,
+        false,
+    )?;
+    let worker_identity = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-worker".into());
+    let build_version = env!("CARGO_PKG_VERSION");
+    let backend_revision = option_env!("GNOMAD_LR_GIT_SHA").unwrap_or("unknown");
+    let batch_records = job.batch_records;
+    let mut reports = Vec::with_capacity(tasks.len());
+    let mut processed = 0usize;
+
+    for descriptor in tasks {
+        if descriptor.task_type != "custom" {
+            anyhow::bail!(
+                "strict Y1 action requires the manifest-backed custom task protocol, got {:?}",
+                descriptor.task_type
+            );
+        }
+        let task: crate::y1::PoolY1TaskSpec = serde_json::from_value(descriptor.payload)?;
+        task.validate(&descriptor.id)?;
+        let report = tokio::task::spawn_blocking({
+            let target = target.clone();
+            let worker_identity = worker_identity.clone();
+            let task = task.clone();
+            move || {
+                crate::y1::run_pool_interval_attempt(
+                    &target,
+                    &task,
+                    batch_records,
+                    &worker_identity,
+                    build_version,
+                    backend_revision,
+                )
+            }
+        })
+        .await??;
+        processed += usize::try_from(report.counts.source_records)?;
+        reports.push(report);
+    }
+
+    Ok(TaskResult::success(
+        processed,
+        Some(serde_json::json!({
+            "action": "load_y1_interval",
+            "published": false,
+            "attempts": reports
+        })),
+    ))
 }
 
 fn task_region(payload: &Value) -> anyhow::Result<Option<loader::RegionFilter>> {
