@@ -27,7 +27,7 @@ pub fn execute_ddl(ch_url: &str, query: &str) -> anyhow::Result<()> {
 }
 
 /// Initialize the current legacy-contract tables by executing embedded SQL files.
-/// The primary DDL is not the cohort-aware Y1 v2 schema.
+/// The primary DDL is not the cohort-aware Y1 v3 schema.
 pub fn init_tables(ch_url: &str) -> anyhow::Result<()> {
     let schemas: &[(&str, &str)] = &[
         ("lr_variants", include_str!("../sql/lr_variants.sql")),

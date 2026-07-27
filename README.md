@@ -29,7 +29,7 @@ make install-genohype
 
 ## ClickHouse environments
 
-The repository-owned DDL for the current legacy browser contract lives at the top of `sql/` and is embedded in the binary's `init` command. Y1 v2 DDL lives separately in `sql/y1/` and is initialized only by `init-y1`. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. Legacy HTTP requests preserve a URL's `database` query parameter:
+The repository-owned DDL for the current legacy browser contract lives at the top of `sql/` and is embedded in the binary's `init` command. Y1 v3 DDL lives separately in `sql/y1/` and is initialized only by `init-y1`. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. Legacy HTTP requests preserve a URL's `database` query parameter:
 
 ```text
 http://127.0.0.1:8123/?database=gnomad_lr_smoke

@@ -20,7 +20,14 @@ CREATE TABLE IF NOT EXISTS lr_y1_alleles_staging (
     an UInt32,
     af Float64,
     allele_length Int32,
-    length_provenance LowCardinality(String)
+    length_provenance LowCardinality(String),
+    rsids Array(String),
+    cadd_phred Nullable(Float64),
+    phylop Nullable(Float64),
+    major_consequence Nullable(String),
+    short_read_match_id Nullable(String),
+    short_read_match_type Nullable(String),
+    short_read_match_source Nullable(String)
 ) ENGINE = MergeTree()
 PARTITION BY run_id
 ORDER BY (run_id, task_id, attempt_id, chrom, position, source_variant_id, alt_index);

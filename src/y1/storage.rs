@@ -4,10 +4,10 @@ use anyhow::{bail, Context};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const Y1_SCHEMA_VERSION: u16 = 2;
+pub const Y1_SCHEMA_VERSION: u16 = 3;
 
 const SUMMARY_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, ref_allele, alts, allele_type, qual, filters, ac, an, af, allele_lengths, length_provenance, source_allele_length, source_svlen, source_svlen_present, frequencies_json, source_info_json";
-const ALLELE_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, reference_end, xpos, source_variant_id, alt_index, ref_allele, alt, allele_type, qual, filters, ac, an, af, allele_length, length_provenance";
+const ALLELE_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, reference_end, xpos, source_variant_id, alt_index, ref_allele, alt, allele_type, qual, filters, ac, an, af, allele_length, length_provenance, rsids, cadd_phred, phylop, major_consequence, short_read_match_id, short_read_match_type, short_read_match_source";
 const FREQUENCY_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, division, ac, an, af, values_available";
 const CARRIER_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, alt, sample_id, genotype_position, gt_alleles, gt_phased, genotype_fields_json, position_fields_json";
 
@@ -80,6 +80,26 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
         target
             .execute(ddl)
             .with_context(|| format!("failed to initialize Y1 table {name}"))?;
+    }
+
+    // CREATE TABLE IF NOT EXISTS does not evolve an existing pilot database.
+    // Keep additive migrations idempotent so schema v3 can be rehearsed in place.
+    for table in ["lr_y1_alleles_staging", "lr_y1_alleles"] {
+        for (column, column_type) in [
+            ("rsids", "Array(String)"),
+            ("cadd_phred", "Nullable(Float64)"),
+            ("phylop", "Nullable(Float64)"),
+            ("major_consequence", "Nullable(String)"),
+            ("short_read_match_id", "Nullable(String)"),
+            ("short_read_match_type", "Nullable(String)"),
+            ("short_read_match_source", "Nullable(String)"),
+        ] {
+            target
+                .execute(&format!(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"
+                ))
+                .with_context(|| format!("failed to add Y1 annotation column {table}.{column}"))?;
+        }
     }
     Ok(())
 }
@@ -194,6 +214,13 @@ struct AlleleStageRow {
     af: f64,
     allele_length: i32,
     length_provenance: String,
+    rsids: Vec<String>,
+    cadd_phred: Option<f64>,
+    phylop: Option<f64>,
+    major_consequence: Option<String>,
+    short_read_match_id: Option<String>,
+    short_read_match_type: Option<String>,
+    short_read_match_source: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -245,6 +272,141 @@ struct RejectStageRow {
     source_variant_id: Option<String>,
     reject_code: String,
     message: String,
+}
+
+const CONSEQUENCE_TERMS: &[&str] = &[
+    "transcript_ablation",
+    "splice_acceptor_variant",
+    "splice_donor_variant",
+    "stop_gained",
+    "frameshift_variant",
+    "stop_lost",
+    "start_lost",
+    "initiator_codon_variant",
+    "transcript_amplification",
+    "inframe_insertion",
+    "inframe_deletion",
+    "missense_variant",
+    "protein_altering_variant",
+    "splice_region_variant",
+    "incomplete_terminal_codon_variant",
+    "start_retained_variant",
+    "stop_retained_variant",
+    "synonymous_variant",
+    "coding_sequence_variant",
+    "mature_miRNA_variant",
+    "5_prime_UTR_variant",
+    "3_prime_UTR_variant",
+    "non_coding_transcript_exon_variant",
+    "non_coding_exon_variant",
+    "intron_variant",
+    "NMD_transcript_variant",
+    "non_coding_transcript_variant",
+    "nc_transcript_variant",
+    "upstream_gene_variant",
+    "downstream_gene_variant",
+    "TFBS_ablation",
+    "TFBS_amplification",
+    "TF_binding_site_variant",
+    "regulatory_region_ablation",
+    "regulatory_region_amplification",
+    "feature_elongation",
+    "regulatory_region_variant",
+    "feature_truncation",
+    "intergenic_variant",
+];
+
+fn alt_info_value(
+    info: &std::collections::BTreeMap<String, Option<String>>,
+    key: &str,
+    alt_index: usize,
+) -> Option<String> {
+    let value = info.get(key)?.as_deref()?;
+    if value.is_empty() || value == "." {
+        return None;
+    }
+    let values: Vec<&str> = value.split(',').collect();
+    let selected = if values.len() == 1 {
+        values[0]
+    } else {
+        *values.get(alt_index.checked_sub(1)?)?
+    };
+    (!selected.is_empty() && selected != ".").then(|| selected.to_string())
+}
+
+fn normalized_vep_allele(ref_allele: &str, alt: &str) -> String {
+    if alt.starts_with('<') {
+        return alt.to_string();
+    }
+    let ref_bytes = ref_allele.as_bytes();
+    let alt_bytes = alt.as_bytes();
+    let mut start = 0;
+    while start < ref_bytes.len() && start < alt_bytes.len() && ref_bytes[start] == alt_bytes[start]
+    {
+        start += 1;
+    }
+    let mut ref_end = ref_bytes.len();
+    let mut alt_end = alt_bytes.len();
+    while ref_end > start && alt_end > start && ref_bytes[ref_end - 1] == alt_bytes[alt_end - 1] {
+        ref_end -= 1;
+        alt_end -= 1;
+    }
+    let value = &alt[start..alt_end];
+    if value.is_empty() {
+        "-".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn major_consequence(
+    info: &std::collections::BTreeMap<String, Option<String>>,
+    ref_allele: &str,
+    alt: &str,
+    alt_index: usize,
+) -> Option<String> {
+    let vep = info.get("vep")?.as_deref()?;
+    let entries: Vec<Vec<&str>> = vep
+        .split(',')
+        .map(|entry| entry.split('|').collect())
+        .filter(|fields: &Vec<&str>| {
+            fields.get(5) == Some(&"Transcript") && fields.get(22) == Some(&"1")
+        })
+        .collect();
+    let normalized = normalized_vep_allele(ref_allele, alt);
+    let mut selected: Vec<&Vec<&str>> = entries
+        .iter()
+        .filter(|fields| {
+            fields.first() == Some(&alt) || fields.first() == Some(&normalized.as_str())
+        })
+        .collect();
+    if selected.is_empty() {
+        let mut distinct = Vec::new();
+        for fields in &entries {
+            if let Some(allele) = fields.first() {
+                if !distinct.contains(allele) {
+                    distinct.push(*allele);
+                }
+            }
+        }
+        if let Some(fallback) = distinct.get(alt_index.saturating_sub(1)) {
+            selected = entries
+                .iter()
+                .filter(|fields| fields.first() == Some(fallback))
+                .collect();
+        }
+    }
+    selected
+        .iter()
+        .flat_map(|fields| fields.get(1).into_iter().flat_map(|value| value.split('&')))
+        .filter(|term| !term.is_empty())
+        .min_by_key(|term| {
+            CONSEQUENCE_TERMS
+                .iter()
+                .position(|candidate| candidate == term)
+                .unwrap_or(usize::MAX)
+        })
+        .map(str::to_string)
 }
 
 #[derive(Debug, Default)]
@@ -348,6 +510,40 @@ impl StageRows {
                     af: *af,
                     allele_length: length.value,
                     length_provenance: length.provenance.as_str().to_string(),
+                    rsids: alt_info_value(&summary.source_info, "dbSNP_ID", index + 1)
+                        .map(|value| {
+                            value
+                                .split('&')
+                                .filter(|id| !id.is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    cadd_phred: alt_info_value(&summary.source_info, "cadd_phred", index + 1)
+                        .and_then(|value| value.parse().ok()),
+                    phylop: alt_info_value(&summary.source_info, "phylop", index + 1)
+                        .and_then(|value| value.parse().ok()),
+                    major_consequence: major_consequence(
+                        &summary.source_info,
+                        &summary.ref_allele,
+                        alt,
+                        index + 1,
+                    ),
+                    short_read_match_id: alt_info_value(
+                        &summary.source_info,
+                        "gnomAD_V4_match_ID",
+                        index + 1,
+                    ),
+                    short_read_match_type: alt_info_value(
+                        &summary.source_info,
+                        "gnomAD_V4_match_type",
+                        index + 1,
+                    ),
+                    short_read_match_source: alt_info_value(
+                        &summary.source_info,
+                        "gnomAD_V4_match_source",
+                        index + 1,
+                    ),
                 });
             }
 
@@ -1367,5 +1563,40 @@ mod tests {
             ]
         );
         assert_eq!(active_run(target, &request).unwrap(), None);
+    }
+
+    #[test]
+    fn materializes_alt_specific_annotations() {
+        let info = std::collections::BTreeMap::from([
+            ("cadd_phred".to_string(), Some("1.25,9.5".to_string())),
+            (
+                "gnomAD_V4_match_ID".to_string(),
+                Some("22-100-A-C,22-100-A-G".to_string()),
+            ),
+        ]);
+        assert_eq!(
+            alt_info_value(&info, "cadd_phred", 2).as_deref(),
+            Some("9.5")
+        );
+        assert_eq!(
+            alt_info_value(&info, "gnomAD_V4_match_ID", 1).as_deref(),
+            Some("22-100-A-C")
+        );
+        assert_eq!(alt_info_value(&info, "phylop", 1), None);
+    }
+
+    #[test]
+    fn ranks_pick_vep_consequences_for_the_selected_alt() {
+        let info = std::collections::BTreeMap::from([(
+            "vep".to_string(),
+            Some([
+                "T|intron_variant|MODIFIER|GENE||Transcript|||||||||||||||||1",
+                "G|synonymous_variant&splice_region_variant|LOW|GENE||Transcript|||||||||||||||||1",
+            ].join(",")),
+        )]);
+        assert_eq!(
+            major_consequence(&info, "C", "G", 2).as_deref(),
+            Some("splice_region_variant")
+        );
     }
 }
