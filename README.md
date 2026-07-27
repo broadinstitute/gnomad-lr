@@ -63,7 +63,7 @@ target/debug/gnomad-lr load-y1-interval \
   --report-path /tmp/aou-10kb.json
 ```
 
-Records are transformed and staged in bounded batches (250 records by default), while validation and fail-closed publication still apply to the complete requested interval. This prevents a 1 Mb genotype-rich interval from being materialized as one multi-gigabyte client-side insert.
+Records are transformed and staged in bounded batches (250 records by default), while validation and fail-closed publication still apply to the complete requested interval. This prevents a 1 Mb genotype-rich interval from being materialized as one multi-gigabyte client-side insert. Complete source INFO JSON is stored once on the source-record summary; ALT-expanded rows reference the same run/cohort/source identity instead of duplicating multi-megabyte record payloads for every ALT.
 
 A rejected attempt remains visible in the ledgers and staging tables but produces no canonical rows. Interval runs cannot activate a serving partition.
 

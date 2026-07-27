@@ -18,8 +18,7 @@ CREATE TABLE IF NOT EXISTS lr_y1_alleles (
     an UInt32,
     af Float64,
     allele_length Int32,
-    length_provenance LowCardinality(String),
-    source_info_json String
+    length_provenance LowCardinality(String)
 ) ENGINE = MergeTree()
 PARTITION BY (release, cohort, reference_genome, chrom, run_id)
 ORDER BY (release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, run_id);

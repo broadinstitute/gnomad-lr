@@ -4,10 +4,10 @@ use anyhow::{bail, Context};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const Y1_SCHEMA_VERSION: u16 = 1;
+pub const Y1_SCHEMA_VERSION: u16 = 2;
 
 const SUMMARY_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, ref_allele, alts, allele_type, qual, filters, ac, an, af, allele_lengths, length_provenance, source_allele_length, source_svlen, source_svlen_present, frequencies_json, source_info_json";
-const ALLELE_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, reference_end, xpos, source_variant_id, alt_index, ref_allele, alt, allele_type, qual, filters, ac, an, af, allele_length, length_provenance, source_info_json";
+const ALLELE_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, reference_end, xpos, source_variant_id, alt_index, ref_allele, alt, allele_type, qual, filters, ac, an, af, allele_length, length_provenance";
 const FREQUENCY_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, division, ac, an, af, values_available";
 const CARRIER_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, alt, sample_id, genotype_position, gt_alleles, gt_phased, genotype_fields_json, position_fields_json";
 
@@ -194,7 +194,6 @@ struct AlleleStageRow {
     af: f64,
     allele_length: i32,
     length_provenance: String,
-    source_info_json: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -349,7 +348,6 @@ impl StageRows {
                     af: *af,
                     allele_length: length.value,
                     length_provenance: length.provenance.as_str().to_string(),
-                    source_info_json: source_info_json.clone(),
                 });
             }
 
