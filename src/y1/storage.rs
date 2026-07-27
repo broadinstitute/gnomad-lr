@@ -47,6 +47,46 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
             include_str!("../../sql/y1/lr_y1_active_metadata.sql"),
         ),
         (
+            "lr_y1_ancillary_runs",
+            include_str!("../../sql/y1/lr_y1_ancillary_runs.sql"),
+        ),
+        (
+            "lr_y1_ancillary_task_attempts",
+            include_str!("../../sql/y1/lr_y1_ancillary_task_attempts.sql"),
+        ),
+        (
+            "lr_y1_active_ancillary",
+            include_str!("../../sql/y1/lr_y1_active_ancillary.sql"),
+        ),
+        (
+            "lr_y1_coverage_staging",
+            include_str!("../../sql/y1/lr_y1_coverage_staging.sql"),
+        ),
+        (
+            "lr_y1_coverage",
+            include_str!("../../sql/y1/lr_y1_coverage.sql"),
+        ),
+        (
+            "lr_y1_methylation_staging",
+            include_str!("../../sql/y1/lr_y1_methylation_staging.sql"),
+        ),
+        (
+            "lr_y1_methylation",
+            include_str!("../../sql/y1/lr_y1_methylation.sql"),
+        ),
+        (
+            "lr_y1_methylation_summary",
+            include_str!("../../sql/y1/lr_y1_methylation_summary.sql"),
+        ),
+        (
+            "lr_y1_str_histograms_staging",
+            include_str!("../../sql/y1/lr_y1_str_histograms_staging.sql"),
+        ),
+        (
+            "lr_y1_str_histograms",
+            include_str!("../../sql/y1/lr_y1_str_histograms.sql"),
+        ),
+        (
             "lr_y1_sample_metadata_staging",
             include_str!("../../sql/y1/lr_y1_sample_metadata_staging.sql"),
         ),

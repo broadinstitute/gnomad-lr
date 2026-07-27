@@ -24,6 +24,22 @@ y1_tables = {
     "lr_y1_load_runs",
     "lr_y1_task_attempts",
     "lr_y1_active_partitions",
+    "lr_y1_metadata_runs",
+    "lr_y1_active_metadata",
+    "lr_y1_sample_metadata_staging",
+    "lr_y1_metadata_audit_staging",
+    "lr_y1_sample_metadata",
+    "lr_y1_metadata_audit",
+    "lr_y1_ancillary_runs",
+    "lr_y1_ancillary_task_attempts",
+    "lr_y1_active_ancillary",
+    "lr_y1_coverage_staging",
+    "lr_y1_coverage",
+    "lr_y1_methylation_staging",
+    "lr_y1_methylation",
+    "lr_y1_methylation_summary",
+    "lr_y1_str_histograms_staging",
+    "lr_y1_str_histograms",
     "lr_y1_rejects_staging",
     "lr_y1_summaries_staging",
     "lr_y1_alleles_staging",
@@ -50,4 +66,19 @@ for table in ["lr_y1_summaries", "lr_y1_alleles", "lr_y1_frequencies", "lr_y1_ca
     ddl = (y1_sql_dir / f"{table}.sql").read_text()
     assert "PARTITION BY (release, cohort, reference_genome, chrom, run_id)" in ddl
 
+for table in [
+    "lr_y1_coverage_staging", "lr_y1_coverage",
+    "lr_y1_methylation_staging", "lr_y1_methylation",
+    "lr_y1_methylation_summary", "lr_y1_str_histograms_staging",
+    "lr_y1_str_histograms",
+]:
+    ddl = (y1_sql_dir / f"{table}.sql").read_text()
+    for identity in ["ancillary_run_id", "release", "cohort", "reference_genome", "modality", "source_version"]:
+        assert identity in ddl, f"{table} lacks ancillary identity {identity}"
+    assert "PARTITION BY (release, cohort, reference_genome, chrom, ancillary_run_id)" in ddl
+
+active_ancillary = (y1_sql_dir / "lr_y1_active_ancillary.sql").read_text()
+assert "ORDER BY (release, cohort, reference_genome, modality)" in active_ancillary
+
+exec((ROOT / "scripts" / "verify-y1-ancillary-manifests.py").read_text(), {"__name__": "__main__", "__file__": str(ROOT / "scripts" / "verify-y1-ancillary-manifests.py")})
 print("Manifests verified: legacy smoke is isolated and Y1 DDL is versioned separately")

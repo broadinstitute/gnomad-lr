@@ -6,7 +6,7 @@ Rust loaders that transform gnomAD long-read VCF, coverage, methylation, STR his
 
 The existing `load`/`run` paths and `sql/lr_{variants,haplotypes}.sql` still implement the legacy browser contract. They are **not compatible with the cohort-aware Y1 HGSVC/HPRC and AoU sources**: the legacy shape loses multiallelic arrays, lacks release/cohort identity, and cannot represent AoU's summary-only records safely.
 
-Y1 development now has a separate pure transformation layer plus repository-owned `sql/y1/` staging, canonical-summary, ALT-expanded, frequency, carrier, ledger, and active-partition tables. This is an isolated v2 development path, not a completed source loader or browser cutover. Do not point the legacy commands at Y1 objects, initialize `gnomad_lr_y1_pilot` with legacy DDL, or write surveyed Y1 data to remote ClickHouse yet.
+Y1 development now has a separate pure transformation layer plus repository-owned `sql/y1/` staging, canonical-summary, ALT-expanded, frequency, carrier, metadata, ancillary-ledger, and active-pointer tables. Ancillary source candidates and the deterministic 232-sample methylation assay-subset manifest are fail-closed; none is yet authorized for Y1 serving. See [`docs/y1-ancillary-inventory.md`](docs/y1-ancillary-inventory.md) and [`docs/y1-ancillary-runbook.md`](docs/y1-ancillary-runbook.md). Do not point the legacy commands at Y1 objects, initialize `gnomad_lr_y1_pilot` with legacy DDL, or write surveyed Y1 data to remote ClickHouse before acceptance.
 
 ## Reproducible build
 
