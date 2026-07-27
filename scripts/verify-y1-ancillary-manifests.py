@@ -45,10 +45,12 @@ required_source_fields = {
     "allowed_serving_mode",
 }
 ids: set[str] = set()
+modalities: set[str] = set()
 for source in ancillary["sources"]:
     require_fields(source, required_source_fields, source.get("id", "source"))
     assert source["id"] not in ids, f"duplicate source id {source['id']}"
     ids.add(source["id"])
+    modalities.update(source["modality"].split(","))
     if source["allowed_serving_mode"] == "accepted_y1":
         assert source["classification"] in {
             "hgsvc_hprc_y1_authoritative", "aou_y1_authoritative",
@@ -58,6 +60,24 @@ for source in ancillary["sources"]:
         assert source["generation"] != "none"
         assert source["byte_size"] > 0
         assert source["checksum"]["algorithm"] != "none"
+
+assert {
+    "sequencing_coverage",
+    "per_sample_methylation",
+    "str_allele_frequency_histograms",
+    "genes_and_transcripts",
+    "recombination_rate",
+    "sample_tracks",
+} <= modalities, f"ancillary modality inventory incomplete: {sorted(modalities)}"
+for source_id in {
+    "shared-grch38-gene-annotations-unresolved",
+    "shared-grch38-recombination-map-unresolved",
+}:
+    source = next(item for item in ancillary["sources"] if item["id"] == source_id)
+    assert source["classification"] == "unresolved_and_blocked_from_serving"
+    assert source["allowed_serving_mode"].startswith("blocked_")
+    assert source["immutable_uri"] == "none"
+    assert source["checksum"] == {"algorithm": "none", "value": "none"}
 
 methylation = load("methylation-sample-manifest.json")
 recorded_hash = methylation.pop("content_sha256")

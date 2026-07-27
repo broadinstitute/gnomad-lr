@@ -10,6 +10,12 @@ only until provenance and acceptance reports change an entry to
 ```bash
 python3 scripts/verify-y1-ancillary-manifests.py
 
+# init-y1 intentionally does not create databases; create the disposable,
+# explicitly named database through the local administrative endpoint first.
+curl --fail --silent --show-error \
+  --data-binary 'CREATE DATABASE IF NOT EXISTS gnomad_lr_y1_scratch_ancillary' \
+  http://127.0.0.1:8123/
+
 gnomad-lr init-y1 \
   --endpoint http://127.0.0.1:8123 \
   --database gnomad_lr_y1_scratch_ancillary \
@@ -18,7 +24,10 @@ gnomad-lr init-y1 \
 
 `init-y1` creates the ancillary ledgers, per-modality staging/canonical tables,
 and pointer table in addition to the primary and metadata Y1 tables. It does not
-alter or initialize the unscoped legacy ancillary tables.
+alter or initialize the unscoped legacy ancillary tables. If any source is
+still blocked, stop here and use
+[`y1-ancillary-blockers.md`](y1-ancillary-blockers.md) to request the missing
+evidence; do not create an ancillary run ID.
 
 ## 2. Candidate identity
 
