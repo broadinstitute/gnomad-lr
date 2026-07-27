@@ -59,8 +59,11 @@ target/debug/gnomad-lr load-y1-interval \
   --source-generation GENERATION --source-checksum MD5_BASE64 \
   --index-generation TBI_GENERATION --index-checksum TBI_MD5_BASE64 \
   --region chr22:20000000-20010000 \
+  --batch-records 250 \
   --report-path /tmp/aou-10kb.json
 ```
+
+Records are transformed and staged in bounded batches (250 records by default), while validation and fail-closed publication still apply to the complete requested interval. This prevents a 1 Mb genotype-rich interval from being materialized as one multi-gigabyte client-side insert.
 
 A rejected attempt remains visible in the ledgers and staging tables but produces no canonical rows. Interval runs cannot activate a serving partition.
 

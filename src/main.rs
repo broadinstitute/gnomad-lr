@@ -104,6 +104,9 @@ fn y1_target(args: &Y1InitArgs) -> anyhow::Result<y1::ClickHouseTarget> {
 
 fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
     let started = Instant::now();
+    if args.batch_records == 0 {
+        anyhow::bail!("--batch-records must be greater than zero");
+    }
     let target = y1_target(&args.target)?;
     if target.kind() != y1::TargetKind::Scratch {
         anyhow::bail!("bounded Y1 source loads are restricted to scratch targets");
@@ -116,11 +119,6 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
     let (chrom, start, stop) = parse_region(&args.region)?;
     let header_text = loader::vcf_reader::read_header_text(&args.vcf)?;
     let header = y1::Y1Header::parse(&header_text, cohort)?;
-    let records =
-        loader::vcf_reader::VcfStream::open_region_required_index(&args.vcf, &chrom, start, stop)?
-            .records()
-            .collect::<anyhow::Result<Vec<_>>>()?;
-    let batch = y1::transform_records(&header, records.iter().map(String::as_str));
 
     let revision = y1_revision()?;
     let run_id = args.run_id.unwrap_or_else(|| {
@@ -142,7 +140,42 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
         interval_start: start,
         interval_end: stop,
     };
-    let counts = y1::stage_attempt(&target, &context, &batch)?;
+
+    let mut total_counts = y1::StagedCounts::default();
+    let mut total_report = y1::TransformationReport::default();
+    let mut record_offset = 0usize;
+    let mut record_batch = Vec::with_capacity(args.batch_records);
+    let records =
+        loader::vcf_reader::VcfStream::open_region_required_index(&args.vcf, &chrom, start, stop)?
+            .records();
+
+    for record in records {
+        record_batch.push(record?);
+        if record_batch.len() == args.batch_records {
+            stage_y1_record_batch(
+                &target,
+                &context,
+                &header,
+                &mut record_batch,
+                &mut record_offset,
+                &mut total_counts,
+                &mut total_report,
+            )?;
+        }
+    }
+    if !record_batch.is_empty() {
+        stage_y1_record_batch(
+            &target,
+            &context,
+            &header,
+            &mut record_batch,
+            &mut record_offset,
+            &mut total_counts,
+            &mut total_report,
+        )?;
+    }
+
+    let counts = total_counts;
     let accepted = counts.rejects == 0 && counts.summaries == counts.source_records;
     let attempt = y1::TaskAttemptLedgerRow::new(
         &context,
@@ -153,7 +186,7 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
             y1::AttemptState::Failed
         },
         counts,
-        &batch.report,
+        &total_report,
         if accepted {
             ""
         } else {
@@ -228,8 +261,9 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
             "index_checksum": args.index_checksum
         },
         "accepted": accepted,
+        "batch_records": args.batch_records,
         "counts": counts,
-        "transformation": batch.report,
+        "transformation": total_report,
         "elapsed_ms": started.elapsed().as_millis()
     });
     std::fs::write(&args.report_path, serde_json::to_vec_pretty(&report)?)?;
@@ -238,6 +272,45 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
     if !accepted {
         anyhow::bail!("Y1 interval rejected; see {}", args.report_path.display());
     }
+    Ok(())
+}
+
+fn stage_y1_record_batch(
+    target: &y1::ClickHouseTarget,
+    context: &y1::AttemptContext,
+    header: &y1::Y1Header,
+    records: &mut Vec<String>,
+    record_offset: &mut usize,
+    total_counts: &mut y1::StagedCounts,
+    total_report: &mut y1::TransformationReport,
+) -> anyhow::Result<()> {
+    let mut batch = y1::transform_records(header, records.iter().map(String::as_str));
+    for reject in &mut batch.report.rejects {
+        if let Some(record_number) = &mut reject.record_number {
+            *record_number += *record_offset;
+        }
+    }
+
+    let batch_counts = y1::stage_attempt(target, context, &batch)?;
+    total_counts.source_records += batch_counts.source_records;
+    total_counts.summaries += batch_counts.summaries;
+    total_counts.alleles += batch_counts.alleles;
+    total_counts.frequencies += batch_counts.frequencies;
+    total_counts.carriers += batch_counts.carriers;
+    total_counts.rejects += batch_counts.rejects;
+
+    total_report.source_records += batch.report.source_records;
+    total_report.summary_rows += batch.report.summary_rows;
+    total_report.carrier_rows += batch.report.carrier_rows;
+    total_report.genotype_calls += batch.report.genotype_calls;
+    total_report.missing_genotypes += batch.report.missing_genotypes;
+    total_report.partially_called_genotypes += batch.report.partially_called_genotypes;
+    total_report.reference_genotypes += batch.report.reference_genotypes;
+    total_report.rejected_records += batch.report.rejected_records;
+    total_report.rejects.append(&mut batch.report.rejects);
+
+    *record_offset += batch.report.source_records;
+    records.clear();
     Ok(())
 }
 

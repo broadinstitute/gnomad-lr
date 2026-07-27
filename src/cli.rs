@@ -124,6 +124,10 @@ pub struct Y1IntervalArgs {
     #[arg(long)]
     pub region: String,
 
+    /// Maximum source records transformed and staged per bounded batch
+    #[arg(long, default_value_t = 250)]
+    pub batch_records: usize,
+
     /// Optional explicit run ID; generated when omitted
     #[arg(long)]
     pub run_id: Option<String>,
