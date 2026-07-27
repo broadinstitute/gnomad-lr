@@ -27,6 +27,8 @@ pub enum Commands {
     Init(InitArgs),
     /// Initialize isolated cohort-aware Y1 v2 tables
     InitY1(Y1InitArgs),
+    /// Strict bounded Y1 source load into an isolated scratch database
+    LoadY1Interval(Y1IntervalArgs),
     /// Run the legacy distributed VCF pipeline (not compatible with Y1 inputs)
     Run(RunArgs),
 }
@@ -83,6 +85,52 @@ pub struct Y1InitArgs {
     /// Acknowledge schema operations against a serving-class Y1 database
     #[arg(long)]
     pub allow_serving: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Y1CohortArg {
+    HgsvcHprc,
+    Aou,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1IntervalArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    /// Source cohort; AoU is enforced as summary-only by the transformer
+    #[arg(long, value_enum)]
+    pub cohort: Y1CohortArg,
+
+    /// Generation-pinned VCF URI with an adjacent .tbi object
+    #[arg(long)]
+    pub vcf: String,
+
+    #[arg(long)]
+    pub source_generation: String,
+
+    /// Base64 MD5 of the source VCF
+    #[arg(long)]
+    pub source_checksum: String,
+
+    #[arg(long)]
+    pub index_generation: String,
+
+    /// Base64 MD5 of the adjacent TBI
+    #[arg(long)]
+    pub index_checksum: String,
+
+    /// Inclusive one-based interval, for example chr22:20000000-20010000
+    #[arg(long)]
+    pub region: String,
+
+    /// Optional explicit run ID; generated when omitted
+    #[arg(long)]
+    pub run_id: Option<String>,
+
+    /// Machine-readable validation report destination
+    #[arg(long)]
+    pub report_path: std::path::PathBuf,
 }
 
 #[derive(Args, Clone)]

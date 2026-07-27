@@ -12,11 +12,12 @@ compile_error!("gnomad-lr requires the default `clickhouse` feature");
 
 use clap::Parser;
 use cli::{
-    parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1InitArgs,
-    Y1TargetKindArg,
+    parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
+    Y1InitArgs, Y1IntervalArgs, Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 #[tokio::main]
@@ -45,6 +46,9 @@ async fn main() -> anyhow::Result<()> {
                 y1::init_schema(&target)
             })
             .await??;
+        }
+        Commands::LoadY1Interval(args) => {
+            tokio::task::spawn_blocking(move || run_y1_interval(args)).await??;
         }
         Commands::Run(args) => {
             orchestrate::run(&args)?;
@@ -96,6 +100,151 @@ fn y1_target(args: &Y1InitArgs) -> anyhow::Result<y1::ClickHouseTarget> {
         args.allow_remote,
         args.allow_serving,
     )
+}
+
+fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let target = y1_target(&args.target)?;
+    if target.kind() != y1::TargetKind::Scratch {
+        anyhow::bail!("bounded Y1 source loads are restricted to scratch targets");
+    }
+
+    let cohort = match args.cohort {
+        Y1CohortArg::HgsvcHprc => y1::Cohort::HgsvcHprc,
+        Y1CohortArg::Aou => y1::Cohort::Aou,
+    };
+    let (chrom, start, stop) = parse_region(&args.region)?;
+    let header_text = loader::vcf_reader::read_header_text(&args.vcf)?;
+    let header = y1::Y1Header::parse(&header_text, cohort)?;
+    let records =
+        loader::vcf_reader::VcfStream::open_region_required_index(&args.vcf, &chrom, start, stop)?
+            .records()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+    let batch = y1::transform_records(&header, records.iter().map(String::as_str));
+
+    let revision = y1_revision()?;
+    let run_id = args.run_id.unwrap_or_else(|| {
+        format!(
+            "y1-{}-{}-{}-{}-{}",
+            cohort.as_str(),
+            chrom,
+            start,
+            stop,
+            revision
+        )
+    });
+    let context = y1::AttemptContext {
+        run_id: run_id.clone(),
+        task_id: format!("{chrom}-{start}-{stop}"),
+        attempt_id: format!("attempt-{revision}"),
+        cohort,
+        chrom: chrom.clone(),
+        interval_start: start,
+        interval_end: stop,
+    };
+    let counts = y1::stage_attempt(&target, &context, &batch)?;
+    let accepted = counts.rejects == 0 && counts.summaries == counts.source_records;
+    let attempt = y1::TaskAttemptLedgerRow::new(
+        &context,
+        revision,
+        if accepted {
+            y1::AttemptState::Accepted
+        } else {
+            y1::AttemptState::Failed
+        },
+        counts,
+        &batch.report,
+        if accepted {
+            ""
+        } else {
+            "transformation validation failed"
+        },
+    )?;
+    y1::record_task_attempt(&target, &attempt)?;
+
+    let run = y1::LoadRunLedgerRow {
+        run_id: run_id.clone(),
+        revision,
+        state: if accepted { "validated" } else { "rejected" }.to_string(),
+        load_scope: y1::LoadScope::Interval.as_str().to_string(),
+        release: y1::Release::Y1.as_str().to_string(),
+        cohort: cohort.as_str().to_string(),
+        reference_genome: header.reference_genome.as_str().to_string(),
+        chrom: chrom.clone(),
+        interval_start: start,
+        interval_end: stop,
+        source_uri: args.vcf.clone(),
+        source_generation: args.source_generation.clone(),
+        source_checksum_algorithm: "md5_base64".to_string(),
+        source_checksum: args.source_checksum.clone(),
+        source_index_uri: format!("{}.tbi", args.vcf),
+        source_index_generation: args.index_generation.clone(),
+        source_index_checksum: args.index_checksum.clone(),
+        schema_version: y1::Y1_SCHEMA_VERSION,
+        loader_version: env!("CARGO_PKG_VERSION").to_string(),
+        expected_tasks: 1,
+        expected_source_records: counts.source_records,
+        summary_rows: counts.summaries,
+        allele_rows: counts.alleles,
+        frequency_rows: counts.frequencies,
+        carrier_rows: counts.carriers,
+        rejected_records: counts.rejects,
+        created_at_ms: revision / 1_000_000,
+        updated_at_ms: revision / 1_000_000,
+        message: "strict bounded scratch load".to_string(),
+    };
+    y1::record_load_run(&target, &run)?;
+
+    if accepted {
+        let request = y1::PublicationRequest {
+            run_id: run_id.clone(),
+            scope: y1::LoadScope::Interval,
+            release: y1::Release::Y1,
+            cohort,
+            reference_genome: header.reference_genome,
+            chrom: chrom.clone(),
+            interval_start: start,
+            interval_end: stop,
+            expected_tasks: 1,
+            expected_counts: counts,
+            source_uri: args.vcf.clone(),
+            source_generation: args.source_generation.clone(),
+            source_checksum: args.source_checksum.clone(),
+        };
+        y1::publish_staged_run(&target, &request)?;
+    }
+
+    let report = serde_json::json!({
+        "run_id": run_id,
+        "database": target.database(),
+        "cohort": cohort,
+        "region": { "chrom": chrom, "start": start, "stop": stop },
+        "source": {
+            "uri": args.vcf,
+            "generation": args.source_generation,
+            "checksum_algorithm": "md5_base64",
+            "checksum": args.source_checksum,
+            "index_generation": args.index_generation,
+            "index_checksum": args.index_checksum
+        },
+        "accepted": accepted,
+        "counts": counts,
+        "transformation": batch.report,
+        "elapsed_ms": started.elapsed().as_millis()
+    });
+    std::fs::write(&args.report_path, serde_json::to_vec_pretty(&report)?)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+
+    if !accepted {
+        anyhow::bail!("Y1 interval rejected; see {}", args.report_path.display());
+    }
+    Ok(())
+}
+
+fn y1_revision() -> anyhow::Result<u64> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+    )?)
 }
 
 fn read_vcf_records(

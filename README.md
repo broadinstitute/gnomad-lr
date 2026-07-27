@@ -47,6 +47,23 @@ target/debug/gnomad-lr init-y1 \
 
 Remote targets require `--allow-remote --auth-source environment`; credentials are read from `Y1_CLICKHOUSE_USER` and `Y1_CLICKHOUSE_PASSWORD` by default. Serving-class schema operations additionally require `--allow-serving`. These acknowledgements do not make surveyed Y1 writes acceptable before the remaining acceptance gates pass.
 
+The bounded source path is scratch-only, requires an adjacent TBI plus immutable source metadata, writes a machine-readable report, and publishes only when every source record produces one summary with zero structured rejects:
+
+```bash
+target/debug/gnomad-lr load-y1-interval \
+  --endpoint http://127.0.0.1:8126 \
+  --database gnomad_lr_y1_scratch_demo \
+  --target-kind scratch --auth-source none \
+  --cohort aou \
+  --vcf gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.chr22.vcf.gz \
+  --source-generation GENERATION --source-checksum MD5_BASE64 \
+  --index-generation TBI_GENERATION --index-checksum TBI_MD5_BASE64 \
+  --region chr22:20000000-20010000 \
+  --report-path /tmp/aou-10kb.json
+```
+
+A rejected attempt remains visible in the ledgers and staging tables but produces no canonical rows. Interval runs cannot activate a serving partition.
+
 Recommended promotion path:
 
 1. **Local Docker/Colima** for schema, parser, synthetic retry/publication, and bounded source smoke tests.

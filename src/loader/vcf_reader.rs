@@ -223,6 +223,28 @@ impl VcfStream {
     }
 }
 
+/// Read and preserve the raw VCF header required by the strict Y1 contract.
+pub fn read_header_text(vcf_path: &str) -> anyhow::Result<String> {
+    let reader = get_reader(vcf_path)?;
+    let bgzf_reader = bgzf::Reader::new(reader);
+    let buf_reader = BufReader::new(bgzf_reader);
+    let mut lines = Vec::new();
+
+    for line in buf_reader.lines() {
+        let line = line?;
+        if !line.starts_with('#') {
+            break;
+        }
+        let is_columns = line.starts_with("#CHROM");
+        lines.push(line);
+        if is_columns {
+            return Ok(lines.join("\n"));
+        }
+    }
+
+    anyhow::bail!("VCF header not found in {vcf_path}")
+}
+
 fn load_tabix_index(tbi_path: &str) -> anyhow::Result<tabix::Index> {
     let reader = get_reader(tbi_path)?;
     let mut tbi_reader = tabix::io::Reader::new(reader);
