@@ -202,6 +202,14 @@ pub fn run_pool_interval_attempt(
         interval_end: task.stop,
     };
     context.validate()?;
+    let claim_revision = claim_attempt(
+        target,
+        task,
+        &context,
+        worker_identity,
+        worker_build_version,
+        backend_revision,
+    )?;
 
     let started_at_revision = revision_now()?;
     let started = Instant::now();
@@ -236,6 +244,7 @@ pub fn run_pool_interval_attempt(
                 stage_batch(
                     target,
                     &context,
+                    claim_revision,
                     &header,
                     &mut record_batch,
                     &mut record_offset,
@@ -254,6 +263,7 @@ pub fn run_pool_interval_attempt(
             stage_batch(
                 target,
                 &context,
+                claim_revision,
                 &header,
                 &mut record_batch,
                 &mut record_offset,
@@ -274,6 +284,11 @@ pub fn run_pool_interval_attempt(
         }
         Ok(())
     })();
+
+    // A concurrent claimant must never be overwritten by this execution's terminal row.
+    // This also fences a worker that resumes after the coordinator has reassigned its task.
+    ensure_attempt_claim(target, &context, claim_revision)
+        .context("Y1 attempt lost its staging claim; refusing to record a terminal result")?;
 
     let failure = execution
         .as_ref()
@@ -300,7 +315,11 @@ pub fn run_pool_interval_attempt(
             }),
         });
     let accepted = failure.is_none();
-    let finished_revision = revision_now()?;
+    let finished_revision = revision_now()?.max(
+        claim_revision
+            .checked_add(1)
+            .context("Y1 attempt claim revision exhausted UInt64")?,
+    );
     let report = PoolY1AttemptReport {
         run_id: task.run_id.clone(),
         task_id: task.task_id.clone(),
@@ -382,18 +401,25 @@ fn select_attempt(
     }
 }
 
-fn latest_attempt_state(
+#[derive(Debug, Deserialize)]
+struct LatestAttempt {
+    state: String,
+    revision: u64,
+}
+
+fn latest_attempt(
     target: &ClickHouseTarget,
     run_id: &str,
     task_id: &str,
     attempt_id: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<LatestAttempt>> {
     let query = r#"
-SELECT argMax(state, revision)
+SELECT state, revision
 FROM lr_y1_task_attempts
 WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
-HAVING count() > 0
-FORMAT TabSeparated
+ORDER BY revision DESC
+LIMIT 1
+FORMAT JSONEachRow
 "#;
     let body = target.query_text(
         query,
@@ -403,12 +429,163 @@ FORMAT TabSeparated
             ("attempt_id", attempt_id),
         ],
     )?;
-    Ok((!body.trim().is_empty()).then(|| body.trim().to_string()))
+    if body.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(
+            serde_json::from_str(body.trim()).context("invalid latest Y1 attempt claim row")?,
+        ))
+    }
+}
+
+fn latest_attempt_state(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    task_id: &str,
+    attempt_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(latest_attempt(target, run_id, task_id, attempt_id)?.map(|row| row.state))
+}
+
+fn staged_attempt_rows(target: &ClickHouseTarget, context: &AttemptContext) -> anyhow::Result<u64> {
+    let query = r#"
+SELECT sum(rows)
+FROM (
+    SELECT count() AS rows FROM lr_y1_summaries_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+    UNION ALL
+    SELECT count() AS rows FROM lr_y1_alleles_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+    UNION ALL
+    SELECT count() AS rows FROM lr_y1_frequencies_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+    UNION ALL
+    SELECT count() AS rows FROM lr_y1_carriers_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+    UNION ALL
+    SELECT count() AS rows FROM lr_y1_rejects_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+)
+FORMAT TabSeparated
+"#;
+    let body = target.query_text(
+        query,
+        &[
+            ("run_id", &context.run_id),
+            ("task_id", &context.task_id),
+            ("attempt_id", &context.attempt_id),
+        ],
+    )?;
+    body.trim()
+        .parse()
+        .context("invalid Y1 staged-attempt row count")
+}
+
+fn claim_attempt(
+    target: &ClickHouseTarget,
+    task: &PoolY1TaskSpec,
+    context: &AttemptContext,
+    worker_identity: &str,
+    worker_build_version: &str,
+    backend_revision: &str,
+) -> anyhow::Result<u64> {
+    if let Some(existing) = latest_attempt(
+        target,
+        &context.run_id,
+        &context.task_id,
+        &context.attempt_id,
+    )? {
+        bail!(
+            "attempt {} already has immutable state {:?}; generic requeue must use a new attempt ID",
+            context.attempt_id,
+            existing.state
+        );
+    }
+    let existing_rows = staged_attempt_rows(target, context)?;
+    if existing_rows != 0 {
+        bail!(
+            "attempt {} has {existing_rows} orphaned staging rows but no ledger claim; refusing a same-ID requeue",
+            context.attempt_id
+        );
+    }
+
+    let revision = revision_now()?;
+    let claim_report = PoolY1AttemptReport {
+        run_id: context.run_id.clone(),
+        task_id: context.task_id.clone(),
+        attempt_id: context.attempt_id.clone(),
+        cohort: context.cohort,
+        chrom: context.chrom.clone(),
+        start: context.interval_start,
+        stop: context.interval_end,
+        source_uri: task.source_uri.clone(),
+        source_generation: task.source_generation.clone(),
+        source_size_bytes: task.source_size_bytes,
+        counts: StagedCounts::default(),
+        transformation: TransformationReport::default(),
+        inserted: InsertStats::default(),
+        started_at_ms: revision / 1_000_000,
+        finished_at_ms: revision / 1_000_000,
+        elapsed_ms: 0,
+        parse_transform_insert_ms: 0,
+        linux_peak_rss_bytes: linux_peak_rss_bytes(),
+        worker_identity: worker_identity.to_string(),
+        worker_build_version: worker_build_version.to_string(),
+        backend_revision: backend_revision.to_string(),
+        state: "running".to_string(),
+        failure: None,
+        published: false,
+    };
+    let mut claim = TaskAttemptLedgerRow::new(
+        context,
+        revision,
+        AttemptState::Running,
+        StagedCounts::default(),
+        &TransformationReport::default(),
+        "attempt claimed before staging",
+    )?;
+    claim.started_at_ms = claim_report.started_at_ms;
+    claim.updated_at_ms = claim_report.finished_at_ms;
+    claim.report_json = serde_json::to_string(&claim_report)?;
+    record_task_attempt(target, &claim).context("failed to claim Y1 attempt before staging")?;
+    ensure_attempt_claim(target, context, revision)?;
+
+    // Close the legacy gap where a pre-claim worker may still publish after our first check.
+    let raced_rows = staged_attempt_rows(target, context)?;
+    if raced_rows != 0 {
+        bail!(
+            "attempt {} acquired a claim but found {raced_rows} concurrently staged rows; refusing to continue",
+            context.attempt_id
+        );
+    }
+    Ok(revision)
+}
+
+fn ensure_attempt_claim(
+    target: &ClickHouseTarget,
+    context: &AttemptContext,
+    claim_revision: u64,
+) -> anyhow::Result<()> {
+    let latest = latest_attempt(
+        target,
+        &context.run_id,
+        &context.task_id,
+        &context.attempt_id,
+    )?
+    .context("Y1 attempt claim disappeared")?;
+    validate_claim_snapshot(&latest, claim_revision)
+}
+
+fn validate_claim_snapshot(latest: &LatestAttempt, claim_revision: u64) -> anyhow::Result<()> {
+    if latest.state != "running" || latest.revision != claim_revision {
+        bail!(
+            "Y1 attempt claim is no longer current (state {:?}, revision {})",
+            latest.state,
+            latest.revision
+        );
+    }
+    Ok(())
 }
 
 fn stage_batch(
     target: &ClickHouseTarget,
     context: &AttemptContext,
+    claim_revision: u64,
     header: &Y1Header,
     records: &mut Vec<String>,
     record_offset: &mut usize,
@@ -416,6 +593,7 @@ fn stage_batch(
     total_report: &mut TransformationReport,
     inserted: &mut InsertStats,
 ) -> anyhow::Result<()> {
+    ensure_attempt_claim(target, context, claim_revision)?;
     let mut batch = super::transform_records(header, records.iter().map(String::as_str));
     for reject in &mut batch.report.rejects {
         if let Some(record_number) = &mut reject.record_number {
@@ -524,5 +702,26 @@ mod tests {
         assert!(task.validate(&task.coordinator_task_id).is_err());
         task.retry_attempt_id = Some("attempt-2".into());
         task.validate(&task.coordinator_task_id).unwrap();
+    }
+
+    #[test]
+    fn only_the_exact_running_claim_can_continue_staging() {
+        let owned = LatestAttempt {
+            state: "running".into(),
+            revision: 42,
+        };
+        assert!(validate_claim_snapshot(&owned, 42).is_ok());
+
+        let superseded = LatestAttempt {
+            state: "running".into(),
+            revision: 43,
+        };
+        assert!(validate_claim_snapshot(&superseded, 42).is_err());
+
+        let terminal = LatestAttempt {
+            state: "accepted".into(),
+            revision: 42,
+        };
+        assert!(validate_claim_snapshot(&terminal, 42).is_err());
     }
 }

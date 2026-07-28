@@ -766,6 +766,7 @@ fn insert_tracked<T: Serialize>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttemptState {
+    Running,
     Failed,
     Accepted,
 }
@@ -773,6 +774,7 @@ pub enum AttemptState {
 impl AttemptState {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Running => "running",
             Self::Failed => "failed",
             Self::Accepted => "accepted",
         }
