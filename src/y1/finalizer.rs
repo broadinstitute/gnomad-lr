@@ -236,6 +236,41 @@ fn validate_manifest(tasks: &[PoolY1TaskSpec]) -> anyhow::Result<PoolY1TaskSpec>
     Ok(first.clone())
 }
 
+fn validate_worker_provenance(report: &serde_json::Value, attempt_id: &str) -> anyhow::Result<()> {
+    let field = |name: &str| {
+        report
+            .get(name)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .with_context(|| format!("attempt {attempt_id} has no {name}"))
+    };
+    let worker_identity = field("worker_identity")?;
+    let build_identity = field("worker_build_version")?;
+    let backend_revision = field("backend_revision")?;
+
+    if matches!(worker_identity, "unknown" | "unknown-worker") {
+        bail!("attempt {attempt_id} has placeholder worker identity");
+    }
+    if matches!(
+        build_identity,
+        "unknown" | "unknown-build" | "unversioned-development-build"
+    ) {
+        bail!("attempt {attempt_id} has placeholder worker build identity");
+    }
+    if !matches!(backend_revision.len(), 40 | 64)
+        || !backend_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("attempt {attempt_id} backend revision is not a full Git object ID");
+    }
+    if !build_identity.contains(backend_revision) {
+        bail!("attempt {attempt_id} worker build identity is not bound to its backend revision");
+    }
+    Ok(())
+}
+
 fn validate_ledger_coverage(
     target: &ClickHouseTarget,
     run_id: &str,
@@ -281,6 +316,7 @@ FORMAT JSONEachRow
         }
         let report: serde_json::Value = serde_json::from_str(&row.report_json)
             .context("invalid durable attempt report JSON")?;
+        validate_worker_provenance(&report, &row.attempt_id)?;
         for (field, expected_value) in [
             ("run_id", run_id),
             ("task_id", row.task_id.as_str()),
@@ -336,19 +372,6 @@ FORMAT JSONEachRow
                 .and_then(|value| value.as_u64())
                 .is_none()
             || report.get("linux_peak_rss_bytes").is_none()
-            || [
-                "worker_identity",
-                "worker_build_version",
-                "backend_revision",
-            ]
-            .iter()
-            .any(|field| {
-                report
-                    .get(field)
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .is_empty()
-            })
         {
             bail!("attempt {} report is incomplete or inconsistent with its immutable ledger/source identity", row.attempt_id);
         }
@@ -519,5 +542,36 @@ mod tests {
         assert!(validate_manifest(&[task(0, 1, CHR22_LENGTH)]).is_ok());
         assert!(validate_manifest(&[task(0, 1, CHR22_LENGTH - 1)]).is_err());
         assert!(validate_manifest(&[task(0, 1, 10), task(1, 12, CHR22_LENGTH)]).is_err());
+    }
+
+    #[test]
+    fn future_finalization_requires_revision_bound_worker_provenance() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let valid = serde_json::json!({
+            "worker_identity": "worker-7",
+            "worker_build_version": format!("gnomad-lr/{revision}/x86_64-linux-release"),
+            "backend_revision": revision,
+        });
+        assert!(validate_worker_provenance(&valid, "attempt-7").is_ok());
+
+        for invalid in [
+            serde_json::json!({
+                "worker_identity": "unknown-worker",
+                "worker_build_version": format!("gnomad-lr/{revision}/x86_64-linux-release"),
+                "backend_revision": revision,
+            }),
+            serde_json::json!({
+                "worker_identity": "worker-7",
+                "worker_build_version": "0.1.0",
+                "backend_revision": "unknown",
+            }),
+            serde_json::json!({
+                "worker_identity": "worker-7",
+                "worker_build_version": "gnomad-lr/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/release",
+                "backend_revision": revision,
+            }),
+        ] {
+            assert!(validate_worker_provenance(&invalid, "attempt-7").is_err());
+        }
     }
 }

@@ -8,6 +8,44 @@ use crate::{domain, loader};
 
 pub struct LrTaskHandler;
 
+const WORKER_BUILD_IDENTITY: &str = match option_env!("GNOMAD_LR_BUILD_IDENTITY") {
+    Some(identity) => identity,
+    None => concat!(
+        "gnomad-lr/",
+        env!("CARGO_PKG_VERSION"),
+        "/development-build"
+    ),
+};
+const BACKEND_REVISION: &str = match option_env!("GNOMAD_LR_GIT_SHA") {
+    Some(revision) => revision,
+    None => "unversioned-development-build",
+};
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn resolve_worker_identity(
+    configured: Option<String>,
+    hostname: Option<String>,
+    build_identity: &str,
+) -> String {
+    non_empty(configured)
+        .or_else(|| non_empty(hostname))
+        .unwrap_or_else(|| format!("build:{build_identity}"))
+}
+
+fn worker_identity() -> String {
+    resolve_worker_identity(
+        std::env::var("GNOMAD_LR_WORKER_ID").ok(),
+        std::env::var("HOSTNAME").ok(),
+        WORKER_BUILD_IDENTITY,
+    )
+}
+
 #[genohype_pool::async_trait]
 impl TaskHandler for LrTaskHandler {
     async fn handle_task(
@@ -47,9 +85,9 @@ async fn handle_y1_interval_tasks(
         true,
         false,
     )?;
-    let worker_identity = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-worker".into());
-    let build_version = env!("CARGO_PKG_VERSION");
-    let backend_revision = option_env!("GNOMAD_LR_GIT_SHA").unwrap_or("unknown");
+    let worker_identity = worker_identity();
+    let build_identity = WORKER_BUILD_IDENTITY;
+    let backend_revision = BACKEND_REVISION;
     let batch_records = job.batch_records;
     let mut reports = Vec::with_capacity(tasks.len());
     let mut processed = 0usize;
@@ -73,7 +111,7 @@ async fn handle_y1_interval_tasks(
                     &task,
                     batch_records,
                     &worker_identity,
-                    build_version,
+                    build_identity,
                     backend_revision,
                 )
             }
@@ -445,4 +483,33 @@ async fn handle_methylation_tasks(
     }
 
     Ok(TaskResult::success(total_rows, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_identity_prefers_explicit_then_hostname() {
+        assert_eq!(
+            resolve_worker_identity(Some(" worker-7 ".into()), Some("host-2".into()), "build"),
+            "worker-7"
+        );
+        assert_eq!(
+            resolve_worker_identity(Some(" ".into()), Some(" host-2 ".into()), "build"),
+            "host-2"
+        );
+    }
+
+    #[test]
+    fn worker_identity_has_deterministic_build_fallback() {
+        assert_eq!(
+            resolve_worker_identity(None, Some("".into()), "gnomad-lr/git-abc"),
+            "build:gnomad-lr/git-abc"
+        );
+        assert_ne!(
+            resolve_worker_identity(None, None, WORKER_BUILD_IDENTITY),
+            "unknown-worker"
+        );
+    }
 }
