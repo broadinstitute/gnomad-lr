@@ -8,6 +8,8 @@ cd "$ROOT_DIR"
 python3 scripts/verify-pins.py
 python3 scripts/verify-manifests.py
 python3 scripts/test-generate-y1-chr22-manifest.py
+python3 scripts/test-convert-y1-full-genome-source-inventory.py
+python3 scripts/test-generate-y1-grch38-contig-manifest.py
 python3 scripts/test-reconcile-y1-chr22-source.py
 python3 scripts/test-verify-y1-chr22-signatures.py
 python3 scripts/test-verify-worker-artifact.py

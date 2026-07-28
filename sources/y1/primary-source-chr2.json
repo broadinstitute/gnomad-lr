@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "contract_type": "y1_per_contig_immutable_source",
+  "release": "Y1",
+  "reference_genome": "GRCh38",
+  "chromosome": "chr2",
+  "mirror_prefix": "gs://gnomad-lr-data/y1/sources",
+  "full_genome_inventory_sha256": "5ce4c4b443ee21985b73246914c3f8ef8a0de4b5c84ff9052635e81f13f82160",
+  "mt_enabled": false,
+  "objects": [
+    {
+      "cohort": "hgsvc_hprc",
+      "name": "gnomAD_LR_Y1.hgsvc_hprc.chr2.vcf.gz",
+      "source_generation": "1784223794979978",
+      "mirror_generation": "1785247759099914",
+      "size": 7211691464,
+      "md5_base64": "hceQ/ItVTcibq/PVa/D8bA=="
+    },
+    {
+      "cohort": "hgsvc_hprc",
+      "name": "gnomAD_LR_Y1.hgsvc_hprc.chr2.vcf.gz.tbi",
+      "source_generation": "1784223794980579",
+      "mirror_generation": "1785247763702142",
+      "size": 239638,
+      "md5_base64": "jc0nm4qiVRV00DjuzNgIUA=="
+    },
+    {
+      "cohort": "aou",
+      "name": "gnomAD_LR_Y1.aou.chr2.vcf.gz",
+      "source_generation": "1784224177913054",
+      "mirror_generation": "1785249930052997",
+      "size": 4289225688,
+      "md5_base64": "AB7dAWjM5OJuIJ7dEzveCw=="
+    },
+    {
+      "cohort": "aou",
+      "name": "gnomAD_LR_Y1.aou.chr2.vcf.gz.tbi",
+      "source_generation": "1784224177905094",
+      "mirror_generation": "1785249933825777",
+      "size": 240869,
+      "md5_base64": "Y/2XAsqYJEuacXUU+5tM1Q=="
+    }
+  ]
+}
