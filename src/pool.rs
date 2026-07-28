@@ -1,12 +1,18 @@
 use genohype_pool::distributed::message::TaskDescriptor;
 use genohype_pool::{TaskHandler, TaskResult};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::loader::vcf_reader::VcfStream;
 use crate::{domain, loader};
 
 pub struct LrTaskHandler;
+
+const MAX_DURABLE_ATTEMPT_ID_LEN: usize = 127;
+const PREFIX_FINGERPRINT_HEX_LEN: usize = 64;
+const ASSIGNMENT_DIGEST_HEX_LEN: usize = 32;
+const MAX_LEASE_TOKEN_LEN: usize = 1024;
 
 const WORKER_BUILD_IDENTITY: &str = match option_env!("GNOMAD_LR_BUILD_IDENTITY") {
     Some(identity) => identity,
@@ -44,6 +50,146 @@ fn worker_identity() -> String {
         std::env::var("HOSTNAME").ok(),
         WORKER_BUILD_IDENTITY,
     )
+}
+
+fn required_custom_lease(descriptor: &TaskDescriptor) -> anyhow::Result<(u64, &str)> {
+    let assignment_attempt = descriptor.assignment_attempt.ok_or_else(|| {
+        anyhow::anyhow!(
+            "custom task {} has no assignment_attempt; refusing an unfenced legacy assignment",
+            descriptor.id
+        )
+    })?;
+    if assignment_attempt == 0 {
+        anyhow::bail!(
+            "custom task {} has stale or invalid assignment_attempt 0",
+            descriptor.id
+        );
+    }
+    let lease_token = descriptor.lease_token.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "custom task {} has no lease_token; refusing an unfenced legacy assignment",
+            descriptor.id
+        )
+    })?;
+    if lease_token.trim().is_empty() || lease_token.len() > MAX_LEASE_TOKEN_LEN {
+        anyhow::bail!(
+            "custom task {} has an empty or oversized lease_token",
+            descriptor.id
+        );
+    }
+    Ok((assignment_attempt, lease_token))
+}
+
+fn manifest_prefix_fingerprint(manifest_prefix: &str) -> String {
+    format!("{:x}", Sha256::digest(manifest_prefix.as_bytes()))
+}
+
+fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// Verify the independently encoded fingerprint of the complete manifest
+/// attempt prefix and the canonical shape of a durable assignment identity.
+/// The assignment digest cannot be recomputed here because its lease token is
+/// deliberately not persisted.
+pub(crate) fn durable_attempt_matches_prefix(id: &str, manifest_prefix: &str) -> bool {
+    if id.len() > MAX_DURABLE_ATTEMPT_ID_LEN {
+        return false;
+    }
+    let Some(remainder) = id.strip_prefix('p') else {
+        return false;
+    };
+    let Some((fingerprint, remainder)) = remainder.split_once("-a") else {
+        return false;
+    };
+    let Some((assignment, assignment_digest)) = remainder.split_once("-d") else {
+        return false;
+    };
+
+    is_lower_hex(fingerprint, PREFIX_FINGERPRINT_HEX_LEN)
+        && fingerprint == manifest_prefix_fingerprint(manifest_prefix)
+        && !assignment.is_empty()
+        && !assignment.starts_with('0')
+        && assignment.bytes().all(|byte| byte.is_ascii_digit())
+        && assignment.parse::<u64>().is_ok_and(|attempt| attempt != 0)
+        && is_lower_hex(assignment_digest, ASSIGNMENT_DIGEST_HEX_LEN)
+}
+
+fn durable_attempt_id(
+    manifest_prefix: &str,
+    coordinator_task_id: &str,
+    assignment_attempt: u64,
+    lease_token: &str,
+) -> anyhow::Result<String> {
+    if manifest_prefix.trim().is_empty() || coordinator_task_id.trim().is_empty() {
+        anyhow::bail!("durable attempt identity requires non-empty manifest and task IDs");
+    }
+    if assignment_attempt == 0 || lease_token.trim().is_empty() {
+        anyhow::bail!("durable attempt identity requires a current non-empty assignment lease");
+    }
+
+    let assignment = assignment_attempt.to_string();
+    let mut digest = Sha256::new();
+    for component in [
+        manifest_prefix.as_bytes(),
+        coordinator_task_id.as_bytes(),
+        assignment.as_bytes(),
+        lease_token.as_bytes(),
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    let assignment_digest = format!("{:x}", digest.finalize());
+    let id = format!(
+        "p{}-a{}-d{}",
+        manifest_prefix_fingerprint(manifest_prefix),
+        assignment,
+        &assignment_digest[..ASSIGNMENT_DIGEST_HEX_LEN]
+    );
+    debug_assert!(id.len() <= MAX_DURABLE_ATTEMPT_ID_LEN);
+    Ok(id)
+}
+
+fn bind_y1_assignment(
+    task: &mut crate::y1::PoolY1TaskSpec,
+    descriptor: &TaskDescriptor,
+) -> anyhow::Result<()> {
+    let (assignment_attempt, lease_token) = required_custom_lease(descriptor)?;
+    let manifest_attempt_prefix = task.attempt_id.clone();
+    let controlled_retry_prefix = task.retry_attempt_id.clone();
+
+    // A controlled fail-once manifest deliberately fails its first coordinator
+    // assignment. A subsequent fenced assignment uses the immutable retry
+    // prefix but no longer injects the failure. Generic requeues continue to use
+    // the original manifest prefix, with uniqueness supplied by the lease.
+    let prefix = if assignment_attempt > 1 && task.controlled_fail_once.is_some() {
+        controlled_retry_prefix.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("controlled retry has no immutable retry attempt prefix")
+        })?
+    } else {
+        manifest_attempt_prefix.as_str()
+    };
+    let current_id = durable_attempt_id(prefix, &descriptor.id, assignment_attempt, lease_token)?;
+
+    if assignment_attempt > 1 && task.controlled_fail_once.is_some() {
+        task.attempt_id = current_id;
+        task.retry_attempt_id = None;
+        task.controlled_fail_once = None;
+    } else {
+        task.attempt_id = current_id;
+        if let Some(retry_prefix) = controlled_retry_prefix {
+            task.retry_attempt_id = Some(durable_attempt_id(
+                &retry_prefix,
+                &descriptor.id,
+                assignment_attempt,
+                lease_token,
+            )?);
+        }
+    }
+    Ok(())
 }
 
 #[genohype_pool::async_trait]
@@ -99,7 +245,10 @@ async fn handle_y1_interval_tasks(
                 descriptor.task_type
             );
         }
-        let task: crate::y1::PoolY1TaskSpec = serde_json::from_value(descriptor.payload)?;
+        let mut task: crate::y1::PoolY1TaskSpec =
+            serde_json::from_value(descriptor.payload.clone())?;
+        task.validate(&descriptor.id)?;
+        bind_y1_assignment(&mut task, &descriptor)?;
         task.validate(&descriptor.id)?;
         let report = tokio::task::spawn_blocking({
             let target = target.clone();
@@ -511,5 +660,148 @@ mod tests {
             resolve_worker_identity(None, None, WORKER_BUILD_IDENTITY),
             "unknown-worker"
         );
+    }
+
+    fn descriptor(attempt: Option<u64>, token: Option<&str>) -> TaskDescriptor {
+        TaskDescriptor {
+            id: "custom_0".into(),
+            task_type: "custom".into(),
+            label: None,
+            index: Some(0),
+            total: Some(1),
+            payload: serde_json::Value::Null,
+            assignment_attempt: attempt,
+            lease_token: token.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn fresh_requeues_get_distinct_durable_attempt_identities() {
+        let first = durable_attempt_id("attempt-1-0000", "custom_0", 1, "lease-one").unwrap();
+        let requeue = durable_attempt_id("attempt-1-0000", "custom_0", 2, "lease-two").unwrap();
+        assert_ne!(first, requeue);
+        assert!(first.contains("-a1-d"));
+        assert!(requeue.contains("-a2-d"));
+        assert!(durable_attempt_matches_prefix(&first, "attempt-1-0000"));
+        assert!(durable_attempt_matches_prefix(&requeue, "attempt-1-0000"));
+    }
+
+    #[test]
+    fn missing_or_invalid_custom_leases_fail_closed() {
+        for invalid in [
+            descriptor(None, Some("token")),
+            descriptor(Some(1), None),
+            descriptor(Some(0), Some("stale-token")),
+            descriptor(Some(1), Some("  ")),
+        ] {
+            assert!(required_custom_lease(&invalid).is_err());
+        }
+        assert!(required_custom_lease(&descriptor(Some(1), Some("token"))).is_ok());
+    }
+
+    #[test]
+    fn durable_attempt_encoding_is_deterministic_safe_and_bounded() {
+        let prefix = format!("unsafe prefix/{}", "x".repeat(500));
+        let first = durable_attempt_id(&prefix, "custom/0", u64::MAX, "capability").unwrap();
+        let second = durable_attempt_id(&prefix, "custom/0", u64::MAX, "capability").unwrap();
+        assert_eq!(first, second);
+        assert!(first.len() <= MAX_DURABLE_ATTEMPT_ID_LEN);
+        assert!(first
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')));
+        assert!(!first.contains("capability"));
+        assert!(durable_attempt_matches_prefix(&first, &prefix));
+        assert!(!durable_attempt_matches_prefix(&first, "other-prefix"));
+    }
+
+    #[test]
+    fn full_prefix_fingerprint_rejects_sanitized_and_truncated_collisions() {
+        let shared = "x".repeat(80);
+        let slash = format!("{shared}/suffix");
+        let question = format!("{shared}?suffix");
+        let changed_tail = format!("{shared}/different");
+        let id = durable_attempt_id(&slash, "custom_0", 7, "lease").unwrap();
+
+        assert!(durable_attempt_matches_prefix(&id, &slash));
+        assert!(!durable_attempt_matches_prefix(&id, &question));
+        assert!(!durable_attempt_matches_prefix(&id, &changed_tail));
+    }
+
+    #[test]
+    fn durable_attempt_matcher_rejects_noncanonical_and_malformed_forms() {
+        let manifest_prefix = "attempt/full-prefix";
+        let valid = durable_attempt_id(manifest_prefix, "custom_0", 7, "lease").unwrap();
+        let (fingerprint, digest) = valid
+            .strip_prefix('p')
+            .unwrap()
+            .split_once("-a7-d")
+            .unwrap();
+
+        let uppercase_fingerprint = format!("p{}-a7-d{digest}", fingerprint.to_uppercase());
+        let uppercase_digest = format!("p{fingerprint}-a7-d{}", digest.to_uppercase());
+        for invalid in [
+            format!("p{fingerprint}-a0-d{digest}"),
+            format!("p{fingerprint}-a07-d{digest}"),
+            format!("p{fingerprint}-a18446744073709551616-d{digest}"),
+            format!("p{fingerprint}-a+7-d{digest}"),
+            format!("p{fingerprint}-a7-d{}", &digest[..digest.len() - 1]),
+            format!("p{fingerprint}-a7-d{}g", &digest[..digest.len() - 1]),
+            format!("{valid}-trailing"),
+            uppercase_fingerprint,
+            uppercase_digest,
+        ] {
+            assert!(
+                !durable_attempt_matches_prefix(&invalid, manifest_prefix),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn bound_attempt_keeps_domain_identity_and_report_compatible_attempt_id() {
+        let manifest = include_str!("../manifests/y1/hgsvc-hprc-chr22-1mb.json");
+        let mut tasks: Vec<crate::y1::PoolY1TaskSpec> = serde_json::from_str(manifest).unwrap();
+        let mut task = tasks.remove(0);
+        let run_id = task.run_id.clone();
+        let task_id = task.task_id.clone();
+        let assignment = descriptor(Some(1), Some("lease-one"));
+
+        bind_y1_assignment(&mut task, &assignment).unwrap();
+
+        assert_eq!(task.run_id, run_id);
+        assert_eq!(task.task_id, task_id);
+        task.validate(&assignment.id).unwrap();
+        let report = serde_json::json!({
+            "run_id": task.run_id,
+            "task_id": task.task_id,
+            "attempt_id": task.attempt_id,
+        });
+        assert_eq!(report["run_id"], run_id);
+        assert_eq!(report["task_id"], task_id);
+        assert_eq!(report["attempt_id"], task.attempt_id);
+    }
+
+    #[test]
+    fn controlled_requeue_uses_retry_prefix_without_reinjecting_failure() {
+        let manifest = include_str!("../manifests/y1/hgsvc-hprc-chr22-1mb.json");
+        let tasks: Vec<crate::y1::PoolY1TaskSpec> = serde_json::from_str(manifest).unwrap();
+        let original = tasks
+            .into_iter()
+            .find(|task| task.controlled_fail_once.is_some())
+            .unwrap();
+        let retry_prefix = original.retry_attempt_id.clone().unwrap();
+        let mut retry = original.clone();
+
+        bind_y1_assignment(&mut retry, &descriptor(Some(2), Some("fresh-requeue"))).unwrap();
+
+        assert!(retry.attempt_id.contains("-a2-d"));
+        assert!(durable_attempt_matches_prefix(
+            &retry.attempt_id,
+            &retry_prefix
+        ));
+        assert!(retry.controlled_fail_once.is_none());
+        assert!(retry.retry_attempt_id.is_none());
+        assert_eq!(retry.run_id, original.run_id);
+        assert_eq!(retry.task_id, original.task_id);
     }
 }
