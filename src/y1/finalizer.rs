@@ -1,7 +1,7 @@
 use super::{
-    publish_staged_run, record_load_run, ClickHouseTarget, Cohort, LoadRunLedgerRow, LoadScope,
-    PoolY1TaskSpec, PublicationRequest, ReferenceGenome, Release, StagedCounts, TargetKind,
-    Y1_SCHEMA_VERSION,
+    contig::grch38_contig_length, publish_staged_run, record_load_run, ClickHouseTarget, Cohort,
+    LoadRunLedgerRow, LoadScope, PoolY1TaskSpec, PublicationRequest, ReferenceGenome, Release,
+    StagedCounts, TargetKind, Y1_SCHEMA_VERSION,
 };
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -9,8 +9,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const CHR22_LENGTH: u32 = 50_818_468;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,14 +80,47 @@ pub struct FinalizationReport {
     pub published: bool,
 }
 
+/// Backward-compatible chr22-only entry point with its original signature.
 pub fn finalize_chr22_run(
     target: &ClickHouseTarget,
     manifest_path: &Path,
     expected_path: &Path,
     operator_identity: &str,
 ) -> anyhow::Result<FinalizationReport> {
+    finalize_contig_run_inner(
+        target,
+        manifest_path,
+        expected_path,
+        operator_identity,
+        Some("chr22"),
+    )
+}
+
+/// Finalize and publish exactly one complete canonical GRCh38 contig.
+pub fn finalize_contig_run(
+    target: &ClickHouseTarget,
+    manifest_path: &Path,
+    expected_path: &Path,
+    operator_identity: &str,
+) -> anyhow::Result<FinalizationReport> {
+    finalize_contig_run_inner(
+        target,
+        manifest_path,
+        expected_path,
+        operator_identity,
+        None,
+    )
+}
+
+fn finalize_contig_run_inner(
+    target: &ClickHouseTarget,
+    manifest_path: &Path,
+    expected_path: &Path,
+    operator_identity: &str,
+    required_chrom: Option<&str>,
+) -> anyhow::Result<FinalizationReport> {
     if target.kind() != TargetKind::Scratch {
-        bail!("chr22 candidate finalization is restricted to an isolated scratch target");
+        bail!("contig candidate finalization is restricted to an isolated scratch target");
     }
     if operator_identity.trim().is_empty() {
         bail!("finalization requires a non-empty operator identity");
@@ -99,6 +130,10 @@ pub fn finalize_chr22_run(
     let tasks: Vec<PoolY1TaskSpec> = serde_json::from_slice(&manifest_bytes)
         .with_context(|| format!("invalid task manifest {}", manifest_path.display()))?;
     let run = validate_manifest(&tasks)?;
+    if required_chrom.is_some_and(|chrom| run.chrom != chrom) {
+        bail!("the legacy chr22 finalizer accepts only chr22 manifests");
+    }
+    let contig_length = grch38_contig_length(&run.chrom)?;
 
     let expected_bytes = std::fs::read(expected_path)
         .with_context(|| format!("failed to read {}", expected_path.display()))?;
@@ -107,7 +142,7 @@ pub fn finalize_chr22_run(
     if expected.contract_version != 1
         || expected.run_id != run.run_id
         || expected.cohort != run.cohort
-        || expected.chrom != "chr22"
+        || expected.chrom != run.chrom
         || expected.source_generation != run.source_generation
         || expected.source_checksum != run.source_checksum
     {
@@ -136,7 +171,7 @@ pub fn finalize_chr22_run(
         bail!("AoU independent counts must contain zero carriers");
     }
 
-    let ledger = validate_ledger_coverage(target, &run.run_id, &tasks)?;
+    let ledger = validate_ledger_coverage(target, &run.run_id, &run.chrom, &tasks)?;
     let cohort = parse_cohort(&run.cohort)?;
     let request = PublicationRequest {
         run_id: run.run_id.clone(),
@@ -144,9 +179,9 @@ pub fn finalize_chr22_run(
         release: Release::Y1,
         cohort,
         reference_genome: ReferenceGenome::Grch38,
-        chrom: "chr22".to_string(),
+        chrom: run.chrom.clone(),
         interval_start: 1,
-        interval_end: CHR22_LENGTH,
+        interval_end: contig_length,
         expected_tasks: u32::try_from(tasks.len())?,
         expected_counts: expected.counts,
         source_uri: run.source_uri.clone(),
@@ -174,7 +209,7 @@ pub fn finalize_chr22_run(
             "finalization_failed",
             &format!("{operator_identity}: {error:#}"),
         );
-        return Err(error.context("guarded full-chr22 publication failed"));
+        return Err(error.context(format!("guarded full-{} publication failed", run.chrom)));
     }
     record_state(
         target,
@@ -189,7 +224,7 @@ pub fn finalize_chr22_run(
     Ok(FinalizationReport {
         run_id: run.run_id,
         cohort: run.cohort,
-        chrom: "chr22".to_string(),
+        chrom: run.chrom,
         operator_identity: operator_identity.to_string(),
         manifest_tasks: tasks.len(),
         manifest_sha256: format!("{:x}", Sha256::digest(&manifest_bytes)),
@@ -206,12 +241,14 @@ fn validate_manifest(tasks: &[PoolY1TaskSpec]) -> anyhow::Result<PoolY1TaskSpec>
     let Some(first) = tasks.first() else {
         bail!("task manifest must not be empty")
     };
+    let contig_length = grch38_contig_length(&first.chrom)?;
     let mut previous_stop = 0;
     let mut task_ids = BTreeSet::new();
     for (index, task) in tasks.iter().enumerate() {
         task.validate(&format!("custom_{index}"))?;
         if task.run_id != first.run_id
             || task.cohort != first.cohort
+            || task.chrom != first.chrom
             || task.source_uri != first.source_uri
             || task.source_generation != first.source_generation
             || task.source_checksum != first.source_checksum
@@ -230,8 +267,11 @@ fn validate_manifest(tasks: &[PoolY1TaskSpec]) -> anyhow::Result<PoolY1TaskSpec>
         }
         previous_stop = task.stop;
     }
-    if previous_stop != CHR22_LENGTH {
-        bail!("task manifest must cover chr22:1-{CHR22_LENGTH} exactly");
+    if previous_stop != contig_length {
+        bail!(
+            "task manifest must cover {}:1-{contig_length} exactly",
+            first.chrom
+        );
     }
     Ok(first.clone())
 }
@@ -274,6 +314,7 @@ fn validate_worker_provenance(report: &serde_json::Value, attempt_id: &str) -> a
 fn validate_ledger_coverage(
     target: &ClickHouseTarget,
     run_id: &str,
+    chrom: &str,
     tasks: &[PoolY1TaskSpec],
 ) -> anyhow::Result<LedgerCoverage> {
     let query = r#"
@@ -308,7 +349,7 @@ FORMAT JSONEachRow
                 row.task_id
             );
         };
-        if row.chrom != "chr22" || (row.interval_start, row.interval_end) != *bounds {
+        if row.chrom != chrom || (row.interval_start, row.interval_end) != *bounds {
             bail!(
                 "attempt {} has bounds inconsistent with its manifest task",
                 row.attempt_id
@@ -317,19 +358,21 @@ FORMAT JSONEachRow
         let report: serde_json::Value = serde_json::from_str(&row.report_json)
             .context("invalid durable attempt report JSON")?;
         validate_worker_provenance(&report, &row.attempt_id)?;
+        let manifest_task = tasks
+            .iter()
+            .find(|task| task.task_id == row.task_id)
+            .expect("task was checked against the manifest above");
         for (field, expected_value) in [
             ("run_id", run_id),
             ("task_id", row.task_id.as_str()),
             ("attempt_id", row.attempt_id.as_str()),
+            ("cohort", manifest_task.cohort.as_str()),
+            ("chrom", chrom),
         ] {
             if report.get(field).and_then(|value| value.as_str()) != Some(expected_value) {
                 bail!("attempt {} report has inconsistent {field}", row.attempt_id);
             }
         }
-        let manifest_task = tasks
-            .iter()
-            .find(|task| task.task_id == row.task_id)
-            .expect("task was checked against the manifest above");
         let ledger_counts = StagedCounts {
             source_records: row.source_records,
             summaries: row.summary_rows,
@@ -356,6 +399,15 @@ FORMAT JSONEachRow
                 .get("source_generation")
                 .and_then(|value| value.as_str())
                 != Some(manifest_task.source_generation.as_str())
+            || report
+                .get("source_size_bytes")
+                .and_then(|value| value.as_u64())
+                != Some(manifest_task.source_size_bytes)
+            || report.get("start").and_then(|value| value.as_u64())
+                != Some(u64::from(manifest_task.start))
+            || report.get("stop").and_then(|value| value.as_u64())
+                != Some(u64::from(manifest_task.stop))
+            || report.get("published").and_then(|value| value.as_bool()) != Some(false)
             || report_counts != ledger_counts
             || inserted_rows.is_none()
             || inserted_bytes.is_none()
@@ -436,9 +488,15 @@ FORMAT JSONEachRow
             .get(&task.task_id)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        if failures != [task.attempt_id.as_str()]
-            || accepted.get(&task.task_id) != task.retry_attempt_id.as_ref()
-        {
+        let initial_matches = failures.len() == 1
+            && (failures[0] == task.attempt_id
+                || crate::pool::durable_attempt_matches_prefix(&failures[0], &task.attempt_id));
+        let retry_matches = task.retry_attempt_id.as_ref().is_some_and(|prefix| {
+            accepted.get(&task.task_id).is_some_and(|attempt| {
+                attempt == prefix || crate::pool::durable_attempt_matches_prefix(attempt, prefix)
+            })
+        });
+        if !initial_matches || !retry_matches {
             bail!("controlled fail-once task {} does not prove failed initial and deterministically accepted retry attempts", task.task_id);
         }
     }
@@ -464,9 +522,9 @@ fn record_state(
             release: Release::Y1.as_str().to_string(),
             cohort: run.cohort.clone(),
             reference_genome: ReferenceGenome::Grch38.as_str().to_string(),
-            chrom: "chr22".to_string(),
+            chrom: run.chrom.clone(),
             interval_start: 1,
-            interval_end: CHR22_LENGTH,
+            interval_end: grch38_contig_length(&run.chrom)?,
             source_uri: run.source_uri.clone(),
             source_generation: run.source_generation.clone(),
             source_checksum_algorithm: run.source_checksum_algorithm.clone(),
@@ -508,7 +566,7 @@ fn revision_now() -> anyhow::Result<u64> {
 mod tests {
     use super::*;
 
-    fn task(index: usize, start: u32, stop: u32) -> PoolY1TaskSpec {
+    fn task_for(chrom: &str, index: usize, start: u32, stop: u32) -> PoolY1TaskSpec {
         PoolY1TaskSpec {
             coordinator_task_id: format!("custom_{index}"),
             label: "test".into(),
@@ -518,17 +576,19 @@ mod tests {
             release: "y1".into(),
             cohort: "aou".into(),
             reference_genome: "GRCh38".into(),
-            chrom: "chr22".into(),
+            chrom: chrom.into(),
             start,
             stop,
-            source_uri: "gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.chr22.vcf.gz"
-                .into(),
+            source_uri: format!(
+                "gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.{chrom}.vcf.gz"
+            ),
             source_generation: "1".into(),
             source_checksum_algorithm: "md5_base64".into(),
             source_checksum: "x".into(),
             source_size_bytes: 1,
-            source_index_uri:
-                "gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.chr22.vcf.gz.tbi".into(),
+            source_index_uri: format!(
+                "gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.{chrom}.vcf.gz.tbi"
+            ),
             source_index_generation: "2".into(),
             source_index_checksum_algorithm: "md5_base64".into(),
             source_index_checksum: "y".into(),
@@ -538,10 +598,34 @@ mod tests {
     }
 
     #[test]
-    fn manifest_requires_exact_adjacency_and_full_coverage() {
-        assert!(validate_manifest(&[task(0, 1, CHR22_LENGTH)]).is_ok());
-        assert!(validate_manifest(&[task(0, 1, CHR22_LENGTH - 1)]).is_err());
-        assert!(validate_manifest(&[task(0, 1, 10), task(1, 12, CHR22_LENGTH)]).is_err());
+    fn manifest_requires_exact_per_contig_adjacency_and_full_coverage() {
+        for chrom in (1..=22)
+            .map(|number| format!("chr{number}"))
+            .chain(["chrX".to_string(), "chrY".to_string()])
+        {
+            let length = grch38_contig_length(&chrom).unwrap();
+            assert!(
+                validate_manifest(&[task_for(&chrom, 0, 1, length)]).is_ok(),
+                "{chrom}"
+            );
+            assert!(
+                validate_manifest(&[task_for(&chrom, 0, 1, length - 1)]).is_err(),
+                "{chrom}"
+            );
+            assert!(
+                validate_manifest(&[task_for(&chrom, 0, 1, 10), task_for(&chrom, 1, 12, length),])
+                    .is_err(),
+                "{chrom}"
+            );
+        }
+        assert!(validate_manifest(&[task_for("chrM", 0, 1, 16_569)]).is_err());
+    }
+
+    #[test]
+    fn manifest_cannot_mix_contigs() {
+        let mut second = task_for("chr2", 1, 11, grch38_contig_length("chr2").unwrap());
+        second.run_id = "run".into();
+        assert!(validate_manifest(&[task_for("chr1", 0, 1, 10), second]).is_err());
     }
 
     #[test]

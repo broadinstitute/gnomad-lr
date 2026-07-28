@@ -29,13 +29,21 @@ pub enum Commands {
     InitY1(Y1InitArgs),
     /// Strict bounded Y1 source load into an isolated scratch database
     LoadY1Interval(Y1IntervalArgs),
-    /// Guardedly finalize a complete staged Y1 chr22 candidate
+    /// Guardedly finalize one complete staged Y1 GRCh38 chr1-22/X/Y candidate
+    FinalizeY1Contig(Y1FinalizeArgs),
+    /// Backward-compatible chr22-only finalization command
     FinalizeY1Chr22(Y1FinalizeArgs),
-    /// Materialize and signature-verify a published scratch chr22 run in isolated serving
+    /// Materialize and signature-verify one published scratch GRCh38 contig
+    MaterializeY1Contig(Y1MaterializeArgs),
+    /// Backward-compatible chr22-only materialization command
     MaterializeY1Chr22(Y1MaterializeArgs),
-    /// Activate a validated, published full-chr22 Y1 primary run on a serving target
+    /// Activate one validated, published full-contig Y1 primary run
+    ActivateY1Contig(Y1PrimaryPointerArgs),
+    /// Backward-compatible chr22-only activation command
     ActivateY1Chr22(Y1PrimaryPointerArgs),
-    /// Roll back a Y1 primary pointer to its recorded previous full-chr22 run
+    /// Roll back one Y1 contig pointer to its recorded previous run
+    RollbackY1Contig(Y1PrimaryPointerArgs),
+    /// Backward-compatible chr22-only rollback command
     RollbackY1Chr22(Y1PrimaryPointerArgs),
     /// Reconcile and publish an immutable HGSVC/HPRC Y1 metadata candidate
     ReconcileY1Metadata(Y1MetadataArgs),
@@ -157,7 +165,7 @@ pub struct Y1FinalizeArgs {
     #[command(flatten)]
     pub target: Y1InitArgs,
 
-    /// Checked, deterministic full-chr22 Genohype task manifest
+    /// Checked, deterministic single-contig Genohype task manifest
     #[arg(long)]
     pub manifest: std::path::PathBuf,
 
@@ -189,6 +197,10 @@ pub struct Y1MaterializeArgs {
     #[arg(long, value_enum)]
     pub cohort: Y1CohortArg,
 
+    /// Canonical GRCh38 contig (required by the generic command; legacy command fixes chr22)
+    #[arg(long)]
+    pub chrom: Option<String>,
+
     #[arg(long)]
     pub operator_identity: String,
 
@@ -202,7 +214,7 @@ pub struct Y1PrimaryPointerArgs {
     #[command(flatten)]
     pub target: Y1InitArgs,
 
-    /// Published full-chr22 run to activate/restore; with --restore-absence, the current run whose acceptance authorizes the tombstone
+    /// Published full-contig run to activate/restore; with --restore-absence, the current run whose acceptance authorizes the tombstone
     #[arg(long)]
     pub run_id: String,
 
@@ -218,7 +230,11 @@ pub struct Y1PrimaryPointerArgs {
     #[arg(long, value_enum)]
     pub cohort: Y1CohortArg,
 
-    /// Acceptance report emitted by materialize-y1-chr22 for this serving database/run/cohort
+    /// Canonical GRCh38 contig (required by generic commands; legacy commands fix chr22)
+    #[arg(long)]
+    pub chrom: Option<String>,
+
+    /// Acceptance report emitted by the matching materialization command for this serving database/run/cohort/contig
     #[arg(long)]
     pub acceptance: std::path::PathBuf,
 
@@ -550,6 +566,32 @@ mod tests {
     #[test]
     fn rejects_reversed_region() {
         assert!(parse_region("chr22:21-20").is_err());
+    }
+
+    #[test]
+    fn parses_generic_per_contig_finalization() {
+        let cli = Cli::try_parse_from([
+            "gnomad-lr",
+            "finalize-y1-contig",
+            "--endpoint",
+            "http://127.0.0.1:8123",
+            "--database",
+            "gnomad_lr_y1_scratch_unit",
+            "--target-kind",
+            "scratch",
+            "--auth-source",
+            "none",
+            "--manifest",
+            "chr1.json",
+            "--independent-counts",
+            "chr1-counts.json",
+            "--operator-identity",
+            "unit-test",
+            "--report",
+            "chr1-report.json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::FinalizeY1Contig(_)));
     }
 
     #[test]

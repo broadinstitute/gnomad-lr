@@ -13,7 +13,8 @@ compile_error!("gnomad-lr requires the default `clickhouse` feature");
 use clap::Parser;
 use cli::{
     parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
-    Y1InitArgs, Y1IntervalArgs, Y1MaterializeArgs, Y1PrimaryPointerArgs, Y1TargetKindArg,
+    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1MaterializeArgs, Y1PrimaryPointerArgs,
+    Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
@@ -50,36 +51,39 @@ async fn main() -> anyhow::Result<()> {
         Commands::LoadY1Interval(args) => {
             tokio::task::spawn_blocking(move || run_y1_interval(args)).await??;
         }
+        Commands::FinalizeY1Contig(args) => {
+            tokio::task::spawn_blocking(move || run_y1_finalization(args, false)).await??;
+        }
         Commands::FinalizeY1Chr22(args) => {
+            tokio::task::spawn_blocking(move || run_y1_finalization(args, true)).await??;
+        }
+        Commands::MaterializeY1Contig(args) => {
+            tokio::task::spawn_blocking(move || run_y1_materialization(args, false)).await??;
+        }
+        Commands::MaterializeY1Chr22(args) => {
+            tokio::task::spawn_blocking(move || run_y1_materialization(args, true)).await??;
+        }
+        Commands::ActivateY1Contig(args) => {
             tokio::task::spawn_blocking(move || {
-                let target = y1_target(&args.target)?;
-                let report = y1::finalizer::finalize_chr22_run(
-                    &target,
-                    &args.manifest,
-                    &args.independent_counts,
-                    &args.operator_identity,
-                )?;
-                if let Some(parent) = args.report.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&args.report, serde_json::to_vec_pretty(&report)?)?;
-                println!("{}", serde_json::to_string_pretty(&report)?);
-                Ok::<_, anyhow::Error>(())
+                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Activate, false)
             })
             .await??;
         }
-        Commands::MaterializeY1Chr22(args) => {
-            tokio::task::spawn_blocking(move || run_y1_materialization(args)).await??;
-        }
         Commands::ActivateY1Chr22(args) => {
             tokio::task::spawn_blocking(move || {
-                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Activate)
+                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Activate, true)
+            })
+            .await??;
+        }
+        Commands::RollbackY1Contig(args) => {
+            tokio::task::spawn_blocking(move || {
+                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Rollback, false)
             })
             .await??;
         }
         Commands::RollbackY1Chr22(args) => {
             tokio::task::spawn_blocking(move || {
-                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Rollback)
+                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Rollback, true)
             })
             .await??;
         }
@@ -179,21 +183,63 @@ fn cohort(value: Y1CohortArg) -> y1::Cohort {
     }
 }
 
-fn run_y1_materialization(args: Y1MaterializeArgs) -> anyhow::Result<()> {
+fn run_y1_finalization(args: Y1FinalizeArgs, chr22_compatibility: bool) -> anyhow::Result<()> {
     let target = y1_target(&args.target)?;
-    let report = y1::materialize_serving_candidate(
-        &target,
-        &args.scratch_database,
-        &args.run_id,
-        cohort(args.cohort),
-        &args.operator_identity,
-    )?;
+    let report = if chr22_compatibility {
+        y1::finalizer::finalize_chr22_run(
+            &target,
+            &args.manifest,
+            &args.independent_counts,
+            &args.operator_identity,
+        )?
+    } else {
+        y1::finalizer::finalize_contig_run(
+            &target,
+            &args.manifest,
+            &args.independent_counts,
+            &args.operator_identity,
+        )?
+    };
+    write_json_report(&args.report, &report)
+}
+
+fn run_y1_materialization(
+    args: Y1MaterializeArgs,
+    chr22_compatibility: bool,
+) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let report = if chr22_compatibility {
+        if args.chrom.as_deref().is_some_and(|chrom| chrom != "chr22") {
+            anyhow::bail!("legacy materialization accepts only --chrom chr22");
+        }
+        y1::materialize_serving_candidate(
+            &target,
+            &args.scratch_database,
+            &args.run_id,
+            cohort(args.cohort),
+            &args.operator_identity,
+        )?
+    } else {
+        let chrom = args
+            .chrom
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("generic materialization requires --chrom"))?;
+        y1::materialize_contig_serving_candidate(
+            &target,
+            &args.scratch_database,
+            &args.run_id,
+            cohort(args.cohort),
+            chrom,
+            &args.operator_identity,
+        )?
+    };
     write_json_report(&args.report, &report)
 }
 
 fn run_y1_primary_pointer(
     args: Y1PrimaryPointerArgs,
     action: y1::PrimaryPointerAction,
+    chr22_compatibility: bool,
 ) -> anyhow::Result<()> {
     let target = y1_target(&args.target)?;
     let acceptance: y1::ServingAcceptance =
@@ -210,17 +256,39 @@ fn run_y1_primary_pointer(
             ))?,
         }
     };
-    let report = y1::change_primary_pointer(
-        &target,
-        &args.run_id,
-        cohort(args.cohort),
-        &acceptance,
-        &expected,
-        &args.operator_identity,
-        action,
-        args.restore_absence,
-        args.dry_run,
-    )?;
+    let report = if chr22_compatibility {
+        if args.chrom.as_deref().is_some_and(|chrom| chrom != "chr22") {
+            anyhow::bail!("legacy primary-pointer commands accept only --chrom chr22");
+        }
+        y1::change_primary_pointer(
+            &target,
+            &args.run_id,
+            cohort(args.cohort),
+            &acceptance,
+            &expected,
+            &args.operator_identity,
+            action,
+            args.restore_absence,
+            args.dry_run,
+        )?
+    } else {
+        let chrom = args
+            .chrom
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("generic primary-pointer commands require --chrom"))?;
+        y1::change_contig_primary_pointer(
+            &target,
+            &args.run_id,
+            cohort(args.cohort),
+            chrom,
+            &acceptance,
+            &expected,
+            &args.operator_identity,
+            action,
+            args.restore_absence,
+            args.dry_run,
+        )?
+    };
     write_json_report(&args.report, &report)
 }
 

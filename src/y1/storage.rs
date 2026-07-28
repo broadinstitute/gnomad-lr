@@ -1,3 +1,4 @@
+use super::contig::{canonical_y1_mirror_uri, grch38_contig_length};
 use super::model::*;
 use super::target::{ClickHouseTarget, TargetKind};
 use anyhow::{bail, Context};
@@ -16,7 +17,7 @@ SELECT task_id, any(attempt_id) AS attempt_id
 FROM (
     SELECT task_id, attempt_id, argMax(state, revision) AS state
     FROM lr_y1_task_attempts
-    WHERE run_id = {run_id:String}
+    WHERE run_id = {run_id:String} AND chrom = {chrom:String}
     GROUP BY task_id, attempt_id
 )
 WHERE state = 'accepted'
@@ -914,6 +915,18 @@ impl PublicationRequest {
         if self.expected_counts.summaries != self.expected_counts.source_records {
             bail!("publication requires one canonical summary per source record");
         }
+        if self.scope == LoadScope::FullChromosome {
+            if self.reference_genome != ReferenceGenome::Grch38 {
+                bail!("Y1 full-chromosome publication requires GRCh38");
+            }
+            let contig_length = grch38_contig_length(&self.chrom)?;
+            if self.interval_start != 1 || self.interval_end != contig_length {
+                bail!(
+                    "full-chromosome publication for {} must cover 1-{contig_length}",
+                    self.chrom
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -931,6 +944,7 @@ pub fn publish_staged_run(
     request: &PublicationRequest,
 ) -> anyhow::Result<()> {
     request.validate()?;
+    validate_run_contig_isolation(target, target.database(), request, true)?;
     if target.kind() == TargetKind::Serving && request.scope != LoadScope::FullChromosome {
         bail!("interval and synthetic runs cannot be materialized in a serving Y1 target");
     }
@@ -966,7 +980,7 @@ pub fn publish_staged_run(
     for table in &tables {
         let selected_columns = prefixed_columns(table.columns, "s");
         let query = format!(
-            "INSERT INTO {published} ({columns})\nSELECT {selected_columns}\nFROM {staging} AS s\nINNER JOIN ({accepted}) AS a\n  ON s.task_id = a.task_id AND s.attempt_id = a.attempt_id\nWHERE s.run_id = {{run_id:String}}",
+            "INSERT INTO {published} ({columns})\nSELECT {selected_columns}\nFROM {staging} AS s\nINNER JOIN ({accepted}) AS a\n  ON s.task_id = a.task_id AND s.attempt_id = a.attempt_id\nWHERE s.run_id = {{run_id:String}} AND s.release = {{release:String}} AND s.cohort = {{cohort:String}} AND s.reference_genome = {{reference_genome:String}} AND s.chrom = {{chrom:String}}",
             published = table.published,
             columns = table.columns,
             staging = table.staging,
@@ -1062,6 +1076,64 @@ pub fn change_primary_pointer(
     restore_absence: bool,
     dry_run: bool,
 ) -> anyhow::Result<PrimaryPointerReport> {
+    change_primary_pointer_inner(
+        target,
+        run_id,
+        cohort,
+        acceptance,
+        expected_pointer,
+        operator_identity,
+        action,
+        restore_absence,
+        dry_run,
+        "chr22",
+        true,
+    )
+}
+
+/// Generic per-contig pointer operation for canonical GRCh38 chr1-22/X/Y runs.
+#[allow(clippy::too_many_arguments)]
+pub fn change_contig_primary_pointer(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    cohort: Cohort,
+    chrom: &str,
+    acceptance: &ServingAcceptance,
+    expected_pointer: &ExpectedPointer,
+    operator_identity: &str,
+    action: PrimaryPointerAction,
+    restore_absence: bool,
+    dry_run: bool,
+) -> anyhow::Result<PrimaryPointerReport> {
+    change_primary_pointer_inner(
+        target,
+        run_id,
+        cohort,
+        acceptance,
+        expected_pointer,
+        operator_identity,
+        action,
+        restore_absence,
+        dry_run,
+        chrom,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn change_primary_pointer_inner(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    cohort: Cohort,
+    acceptance: &ServingAcceptance,
+    expected_pointer: &ExpectedPointer,
+    operator_identity: &str,
+    action: PrimaryPointerAction,
+    restore_absence: bool,
+    dry_run: bool,
+    chrom: &str,
+    chr22_compatibility: bool,
+) -> anyhow::Result<PrimaryPointerReport> {
     if target.kind() != TargetKind::Serving {
         bail!("primary activation and rollback require an explicitly acknowledged serving target");
     }
@@ -1072,9 +1144,11 @@ pub fn change_primary_pointer(
         bail!("primary pointer changes require a non-empty operator identity");
     }
 
-    let request = published_request_from_ledger(target, run_id, cohort)?;
-    if request.chrom != "chr22" {
-        bail!("the reviewed primary operator surface is restricted to chr22");
+    grch38_contig_length(chrom)?;
+    let request = published_request_from_ledger(target, run_id, cohort, chrom)?;
+    validate_run_contig_isolation(target, target.database(), &request, false)?;
+    if chr22_compatibility && request.chrom != "chr22" {
+        bail!("the legacy primary operator surface is restricted to chr22");
     }
     validate_activation_candidate(target, &request)?;
     validate_serving_acceptance(target, &request, acceptance)?;
@@ -1113,7 +1187,7 @@ fn validate_activation_candidate(
     if request.scope != LoadScope::FullChromosome {
         bail!("only a full-chromosome run can be activated");
     }
-    let expected_end = grch38_chromosome_length(&request.chrom)?;
+    let expected_end = grch38_contig_length(&request.chrom)?;
     if request.interval_start != 1 || request.interval_end != expected_end {
         bail!(
             "full-chromosome activation for {} must cover 1-{expected_end}",
@@ -1335,15 +1409,23 @@ fn content_signatures(
     database: &str,
     run_id: &str,
     cohort: Cohort,
+    chrom: &str,
 ) -> anyhow::Result<Vec<ContentSignature>> {
     let mut result = Vec::with_capacity(4);
     for (table, columns) in SIGNATURE_COLUMNS {
-        let query = format!("SELECT count(), groupBitXor(cityHash64(toJSONString(tuple({columns})))), countIf(cohort != {{cohort:String}}) FROM {database}.lr_y1_{table} WHERE run_id = {{run_id:String}} FORMAT TabSeparated");
-        let body = target.query_text(&query, &[("run_id", run_id), ("cohort", cohort.as_str())])?;
+        let query = format!("SELECT count(), groupBitXor(cityHash64(toJSONString(tuple({columns})))), countIf(release != {{release:String}} OR cohort != {{cohort:String}} OR reference_genome != {{reference_genome:String}} OR chrom != {{chrom:String}}) FROM {database}.lr_y1_{table} WHERE run_id = {{run_id:String}} AND release = {{release:String}} AND cohort = {{cohort:String}} AND reference_genome = {{reference_genome:String}} AND chrom = {{chrom:String}} FORMAT TabSeparated");
+        let params = [
+            ("run_id", run_id),
+            ("release", Release::Y1.as_str()),
+            ("cohort", cohort.as_str()),
+            ("reference_genome", ReferenceGenome::Grch38.as_str()),
+            ("chrom", chrom),
+        ];
+        let body = target.query_text(&query, &params)?;
         let fields = parse_u64_row(&body, 3, table)?;
         if fields[2] != 0 {
             bail!(
-                "run {run_id} has {} unexpected cohort rows in lr_y1_{table}",
+                "run {run_id}/{chrom} has {} rows outside its exact partition in lr_y1_{table}",
                 fields[2]
             );
         }
@@ -1372,10 +1454,18 @@ fn validate_serving_acceptance(
     {
         bail!("content-signature acceptance provenance does not bind this serving database/run/cohort");
     }
-    let actual = content_signatures(target, target.database(), &request.run_id, request.cohort)?;
-    let expected = accepted_r1_signatures(request.cohort).to_vec();
-    if acceptance.signatures != expected || actual != expected {
-        bail!("serving content signatures do not equal the accepted r1 signatures");
+    let actual = content_signatures(
+        target,
+        target.database(),
+        &request.run_id,
+        request.cohort,
+        &request.chrom,
+    )?;
+    if actual != acceptance.signatures {
+        bail!("serving content signatures do not equal the materialization acceptance");
+    }
+    if request.chrom == "chr22" && actual != accepted_r1_signatures(request.cohort) {
+        bail!("chr22 serving content signatures do not equal the accepted r1 signatures");
     }
     Ok(())
 }
@@ -1390,6 +1480,47 @@ pub fn materialize_serving_candidate(
     cohort: Cohort,
     operator_identity: &str,
 ) -> anyhow::Result<ServingAcceptance> {
+    materialize_serving_candidate_inner(
+        target,
+        scratch_database,
+        run_id,
+        cohort,
+        operator_identity,
+        "chr22",
+        true,
+    )
+}
+
+/// Materialize one finalized canonical GRCh38 contig. Each contig remains an independent
+/// publication and acceptance unit.
+pub fn materialize_contig_serving_candidate(
+    target: &ClickHouseTarget,
+    scratch_database: &str,
+    run_id: &str,
+    cohort: Cohort,
+    chrom: &str,
+    operator_identity: &str,
+) -> anyhow::Result<ServingAcceptance> {
+    materialize_serving_candidate_inner(
+        target,
+        scratch_database,
+        run_id,
+        cohort,
+        operator_identity,
+        chrom,
+        false,
+    )
+}
+
+fn materialize_serving_candidate_inner(
+    target: &ClickHouseTarget,
+    scratch_database: &str,
+    run_id: &str,
+    cohort: Cohort,
+    operator_identity: &str,
+    chrom: &str,
+    chr22_compatibility: bool,
+) -> anyhow::Result<ServingAcceptance> {
     if target.kind() != TargetKind::Serving || operator_identity.trim().is_empty() {
         bail!("materialization requires an acknowledged serving target and operator identity");
     }
@@ -1400,45 +1531,59 @@ pub fn materialize_serving_candidate(
     if scratch_database == target.database() || run_id.trim().is_empty() {
         bail!("materialization requires distinct databases and a non-empty run ID");
     }
-    let source = published_request_from_qualified_ledger(target, scratch_database, run_id, cohort)?;
+    grch38_contig_length(chrom)?;
+    let source =
+        published_request_from_qualified_ledger(target, scratch_database, run_id, cohort, chrom)?;
+    validate_run_contig_isolation(target, scratch_database, &source, true)?;
     validate_surveyed_source_identity(&source)?;
-    if source.chrom != "chr22"
-        || source.interval_start != 1
-        || source.interval_end != grch38_chromosome_length("chr22")?
-    {
-        bail!("only complete GRCh38 chr22 candidates can be materialized");
+    let contig_length = grch38_contig_length(&source.chrom)?;
+    if source.interval_start != 1 || source.interval_end != contig_length {
+        bail!("only complete canonical GRCh38 contig candidates can be materialized");
     }
-    let expected = accepted_r1_signatures(cohort).to_vec();
-    if content_signatures(target, scratch_database, run_id, cohort)? != expected {
-        bail!("scratch content signatures do not equal the accepted r1 signatures");
+    if chr22_compatibility && source.chrom != "chr22" {
+        bail!("the legacy materialization command accepts only chr22 candidates");
     }
-    let occupancy = "SELECT (SELECT count() FROM lr_y1_load_runs WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_task_attempts WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_summaries WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_alleles WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_frequencies WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_carriers WHERE run_id = {run_id:String}) FORMAT TabSeparated";
-    if parse_u64_row(
-        &target.query_text(occupancy, &[("run_id", run_id)])?,
-        1,
+    let expected = if source.chrom == "chr22" {
+        accepted_r1_signatures(cohort).to_vec()
+    } else {
+        content_signatures(target, scratch_database, run_id, cohort, chrom)?
+    };
+    if content_signatures(target, scratch_database, run_id, cohort, chrom)? != expected {
+        bail!("scratch content signatures do not equal the required per-contig signatures");
+    }
+    let occupancy = "SELECT (SELECT count() FROM lr_y1_load_runs WHERE run_id = {run_id:String} AND chrom = {chrom:String}) + (SELECT count() FROM lr_y1_task_attempts WHERE run_id = {run_id:String} AND chrom = {chrom:String}) + (SELECT count() FROM lr_y1_summaries WHERE run_id = {run_id:String} AND chrom = {chrom:String}) + (SELECT count() FROM lr_y1_alleles WHERE run_id = {run_id:String} AND chrom = {chrom:String}) + (SELECT count() FROM lr_y1_frequencies WHERE run_id = {run_id:String} AND chrom = {chrom:String}) + (SELECT count() FROM lr_y1_carriers WHERE run_id = {run_id:String} AND chrom = {chrom:String}), (SELECT count() FROM lr_y1_load_runs WHERE run_id = {run_id:String} AND chrom != {chrom:String}) + (SELECT count() FROM lr_y1_task_attempts WHERE run_id = {run_id:String} AND chrom != {chrom:String}) + (SELECT count() FROM lr_y1_summaries WHERE run_id = {run_id:String} AND chrom != {chrom:String}) + (SELECT count() FROM lr_y1_alleles WHERE run_id = {run_id:String} AND chrom != {chrom:String}) + (SELECT count() FROM lr_y1_frequencies WHERE run_id = {run_id:String} AND chrom != {chrom:String}) + (SELECT count() FROM lr_y1_carriers WHERE run_id = {run_id:String} AND chrom != {chrom:String}) FORMAT TabSeparated";
+    let occupancy = parse_u64_row(
+        &target.query_text(occupancy, &[("run_id", run_id), ("chrom", chrom)])?,
+        2,
         "serving occupancy",
-    )?[0]
-        != 0
-    {
+    )?;
+    if occupancy != [0, 0] {
         bail!(
             "serving destination already contains this run; use a fresh isolated serving database"
         );
     }
-    let params = [("run_id", run_id), ("cohort", cohort.as_str())];
+    let params = [
+        ("run_id", run_id),
+        ("release", Release::Y1.as_str()),
+        ("cohort", cohort.as_str()),
+        ("reference_genome", ReferenceGenome::Grch38.as_str()),
+        ("chrom", chrom),
+    ];
     for (table, columns) in [
         ("summaries", SUMMARY_COLUMNS),
         ("alleles", ALLELE_COLUMNS),
         ("frequencies", FREQUENCY_COLUMNS),
         ("carriers", CARRIER_COLUMNS),
     ] {
-        target.execute_with_params(&format!("INSERT INTO lr_y1_{table} ({columns}) SELECT {columns} FROM {scratch_database}.lr_y1_{table} WHERE run_id = {{run_id:String}} AND cohort = {{cohort:String}}"), &params)?;
+        target.execute_with_params(&format!("INSERT INTO lr_y1_{table} ({columns}) SELECT {columns} FROM {scratch_database}.lr_y1_{table} WHERE run_id = {{run_id:String}} AND release = {{release:String}} AND cohort = {{cohort:String}} AND reference_genome = {{reference_genome:String}} AND chrom = {{chrom:String}}"), &params)?;
     }
-    target.execute_with_params(&format!("INSERT INTO lr_y1_task_attempts SELECT * FROM {scratch_database}.lr_y1_task_attempts WHERE run_id = {{run_id:String}}"), &[("run_id", run_id)])?;
+    target.execute_with_params(&format!("INSERT INTO lr_y1_task_attempts SELECT * FROM {scratch_database}.lr_y1_task_attempts WHERE run_id = {{run_id:String}} AND chrom = {{chrom:String}}"), &params)?;
     // Commit marker: copied only after all data and attempt rows.
-    target.execute_with_params(&format!("INSERT INTO lr_y1_load_runs SELECT * FROM {scratch_database}.lr_y1_load_runs WHERE run_id = {{run_id:String}}"), &[("run_id", run_id)])?;
-    let destination = published_request_from_ledger(target, run_id, cohort)?;
+    target.execute_with_params(&format!("INSERT INTO lr_y1_load_runs SELECT * FROM {scratch_database}.lr_y1_load_runs WHERE run_id = {{run_id:String}} AND release = {{release:String}} AND cohort = {{cohort:String}} AND reference_genome = {{reference_genome:String}} AND chrom = {{chrom:String}}"), &params)?;
+    let destination = published_request_from_ledger(target, run_id, cohort, chrom)?;
+    validate_run_contig_isolation(target, target.database(), &destination, false)?;
     validate_activation_candidate(target, &destination)?;
-    let actual = content_signatures(target, target.database(), run_id, cohort)?;
+    let actual = content_signatures(target, target.database(), run_id, cohort, chrom)?;
     if actual != expected {
         bail!("post-transfer serving signatures differ from the accepted r1 signatures");
     }
@@ -1449,7 +1594,7 @@ pub fn materialize_serving_candidate(
         serving_database: target.database().to_string(),
         run_id: run_id.to_string(),
         cohort: cohort.as_str().to_string(),
-        chrom: "chr22".to_string(),
+        chrom: source.chrom,
         signatures: actual,
         accepted_by: operator_identity.to_string(),
         accepted_at_ms: now_revision()? / 1_000_000,
@@ -1496,17 +1641,22 @@ fn published_request_from_qualified_ledger(
     database: &str,
     run_id: &str,
     cohort: Cohort,
+    chrom: &str,
 ) -> anyhow::Result<PublicationRequest> {
     let query = format!(
         r#"SELECT state, load_scope, release, cohort, reference_genome, chrom, interval_start, interval_end, source_uri, source_generation, source_checksum, schema_version, expected_tasks, expected_source_records, summary_rows, allele_rows, frequency_rows, carrier_rows, rejected_records
 FROM {database}.lr_y1_load_runs
-WHERE run_id = {{run_id:String}}
+WHERE run_id = {{run_id:String}} AND chrom = {{chrom:String}}
 ORDER BY revision DESC
 LIMIT 1
 FORMAT JSONEachRow"#
     );
-    let body = target.query_text(&query, &[("run_id", run_id)])?;
-    publication_request_from_ledger_body(&body, run_id, cohort)
+    let body = target.query_text(&query, &[("run_id", run_id), ("chrom", chrom)])?;
+    let request = publication_request_from_ledger_body(&body, run_id, cohort)?;
+    if request.chrom != chrom {
+        bail!("published ledger did not resolve the explicitly requested chromosome");
+    }
+    Ok(request)
 }
 
 fn publication_request_from_ledger_body(
@@ -1555,14 +1705,15 @@ fn published_request_from_ledger(
     target: &ClickHouseTarget,
     run_id: &str,
     cohort: Cohort,
+    chrom: &str,
 ) -> anyhow::Result<PublicationRequest> {
     let query = r#"SELECT state, load_scope, release, cohort, reference_genome, chrom, interval_start, interval_end, source_uri, source_generation, source_checksum, schema_version, expected_tasks, expected_source_records, summary_rows, allele_rows, frequency_rows, carrier_rows, rejected_records
 FROM lr_y1_load_runs
-WHERE run_id = {run_id:String}
+WHERE run_id = {run_id:String} AND chrom = {chrom:String}
 ORDER BY revision DESC
 LIMIT 1
 FORMAT JSONEachRow"#;
-    let body = target.query_text(query, &[("run_id", run_id)])?;
+    let body = target.query_text(query, &[("run_id", run_id), ("chrom", chrom)])?;
     let row: PublishedRunLedger = serde_json::from_str(body.trim()).with_context(|| {
         format!("published load-run ledger entry not found or invalid for run {run_id}")
     })?;
@@ -1582,8 +1733,11 @@ FORMAT JSONEachRow"#;
         || row.cohort != cohort.as_str()
         || row.reference_genome != ReferenceGenome::Grch38.as_str()
         || row.load_scope != LoadScope::FullChromosome.as_str()
+        || row.chrom != chrom
     {
-        bail!("run {run_id} is not the requested Y1 GRCh38 full-chromosome cohort candidate");
+        bail!(
+            "run {run_id}/{chrom} is not the requested Y1 GRCh38 full-chromosome cohort candidate"
+        );
     }
     Ok(PublicationRequest {
         run_id: run_id.to_string(),
@@ -1591,7 +1745,7 @@ FORMAT JSONEachRow"#;
         release: Release::Y1,
         cohort,
         reference_genome: ReferenceGenome::Grch38,
-        chrom: row.chrom,
+        chrom: chrom.to_string(),
         interval_start: row.interval_start,
         interval_end: row.interval_end,
         expected_tasks: row.expected_tasks,
@@ -1646,6 +1800,102 @@ FORMAT JSONEachRow"#;
     }
 }
 
+fn validate_run_contig_isolation(
+    target: &ClickHouseTarget,
+    database: &str,
+    request: &PublicationRequest,
+    include_staging: bool,
+) -> anyhow::Result<()> {
+    validate_scratch_database_or_current(target, database)?;
+    let params = publication_parameters(request);
+    let expected_uri = canonical_y1_mirror_uri(request.cohort.as_str(), &request.chrom)?;
+    let expected_index_uri = format!("{expected_uri}.tbi");
+    let mut ledger_params = params.to_vec();
+    ledger_params.push(("source_uri", expected_uri.as_str()));
+    ledger_params.push(("source_index_uri", expected_index_uri.as_str()));
+    let source_contract = if request.scope == LoadScope::FullChromosome {
+        " OR source_uri != {source_uri:String} OR source_index_uri != {source_index_uri:String} OR source_generation = '' OR source_checksum_algorithm != 'md5_base64' OR source_checksum = '' OR source_index_generation = '' OR source_index_checksum = ''"
+    } else {
+        ""
+    };
+    let ledger_query = format!(
+        "SELECT count(), countIf(release != {{release:String}} OR cohort != {{cohort:String}} OR reference_genome != {{reference_genome:String}} OR chrom != {{chrom:String}}{source_contract}) FROM {database}.lr_y1_load_runs WHERE run_id = {{run_id:String}} FORMAT TabSeparated"
+    );
+    let ledger = parse_u64_row(
+        &target.query_text(&ledger_query, &ledger_params)?,
+        2,
+        "load-run contig isolation",
+    )?;
+    if ledger[0] == 0 || ledger[1] != 0 {
+        bail!(
+            "run {}/{} has no ledger history or has incompatible cross-contig/source ledger revisions",
+            request.run_id,
+            request.chrom
+        );
+    }
+
+    let attempts_query = format!(
+        "SELECT countIf(chrom != {{chrom:String}}) FROM {database}.lr_y1_task_attempts WHERE run_id = {{run_id:String}} FORMAT TabSeparated"
+    );
+    if parse_u64_row(
+        &target.query_text(&attempts_query, &params)?,
+        1,
+        "task-attempt contig isolation",
+    )?[0]
+        != 0
+    {
+        bail!(
+            "run {}/{} has task attempts assigned to another contig",
+            request.run_id,
+            request.chrom
+        );
+    }
+
+    let table_names: &[&str] = if include_staging {
+        &[
+            "summaries",
+            "alleles",
+            "frequencies",
+            "carriers",
+            "summaries_staging",
+            "alleles_staging",
+            "frequencies_staging",
+            "carriers_staging",
+        ]
+    } else {
+        &["summaries", "alleles", "frequencies", "carriers"]
+    };
+    for table in table_names {
+        let query = format!(
+            "SELECT countIf(release != {{release:String}} OR cohort != {{cohort:String}} OR reference_genome != {{reference_genome:String}} OR chrom != {{chrom:String}}) FROM {database}.lr_y1_{table} WHERE run_id = {{run_id:String}} FORMAT TabSeparated"
+        );
+        if parse_u64_row(
+            &target.query_text(&query, &params)?,
+            1,
+            &format!("lr_y1_{table} contig isolation"),
+        )?[0]
+            != 0
+        {
+            bail!(
+                "run {}/{} has rows outside its exact partition in lr_y1_{table}",
+                request.run_id,
+                request.chrom
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_scratch_database_or_current(
+    target: &ClickHouseTarget,
+    database: &str,
+) -> anyhow::Result<()> {
+    if database == target.database() {
+        return Ok(());
+    }
+    validate_scratch_database(database)
+}
+
 fn accepted_counts(
     target: &ClickHouseTarget,
     request: &PublicationRequest,
@@ -1672,13 +1922,13 @@ FROM (
         argMax(carrier_rows, revision) AS carrier_rows,
         argMax(rejected_records, revision) AS rejected_records
     FROM lr_y1_task_attempts
-    WHERE run_id = {run_id:String}
+    WHERE run_id = {run_id:String} AND chrom = {chrom:String}
     GROUP BY task_id, attempt_id
 )
 WHERE state = 'accepted'
 FORMAT TabSeparated
 "#;
-    let body = target.query_text(query, &[("run_id", &request.run_id)])?;
+    let body = target.query_text(query, &publication_parameters(request))?;
     let values = parse_u64_row(&body, 8, "accepted task counts")?;
     if values[0] != u64::from(request.expected_tasks) || values[1] != values[0] {
         bail!(
@@ -1746,7 +1996,7 @@ fn validate_reject_staging(
     let query = format!(
         "SELECT count()\nFROM lr_y1_rejects_staging AS s\nINNER JOIN ({ACCEPTED_ATTEMPTS}) AS a\n  ON s.task_id = a.task_id AND s.attempt_id = a.attempt_id\nWHERE s.run_id = {{run_id:String}}\nFORMAT TabSeparated"
     );
-    let body = target.query_text(&query, &[("run_id", &request.run_id)])?;
+    let body = target.query_text(&query, &publication_parameters(request))?;
     let values = parse_u64_row(&body, 1, "reject staging")?;
     if values[0] != request.expected_counts.rejects {
         bail!(
@@ -1909,51 +2159,14 @@ fn compute_xpos(chrom: &str, position: u32) -> anyhow::Result<u64> {
 }
 
 fn validate_surveyed_source_identity(request: &PublicationRequest) -> anyhow::Result<()> {
-    let expected_name = format!(
-        "gnomAD_LR_Y1.{}.{}.vcf.gz",
-        request.cohort.as_str(),
-        request.chrom
-    );
-    if !request.source_uri.ends_with(&expected_name) {
-        bail!("serving activation source URI must end with {expected_name}");
+    let expected_uri = canonical_y1_mirror_uri(request.cohort.as_str(), &request.chrom)?;
+    if request.source_uri != expected_uri {
+        bail!("serving activation source URI must exactly equal {expected_uri}");
     }
     if request.source_generation.is_empty() || request.source_checksum.is_empty() {
         bail!("serving activation requires immutable source generation and checksum values");
     }
     Ok(())
-}
-
-fn grch38_chromosome_length(chrom: &str) -> anyhow::Result<u32> {
-    let raw = chrom.strip_prefix("chr").unwrap_or(chrom);
-    let length = match raw {
-        "1" => 248_956_422,
-        "2" => 242_193_529,
-        "3" => 198_295_559,
-        "4" => 190_214_555,
-        "5" => 181_538_259,
-        "6" => 170_805_979,
-        "7" => 159_345_973,
-        "8" => 145_138_636,
-        "9" => 138_394_717,
-        "10" => 133_797_422,
-        "11" => 135_086_622,
-        "12" => 133_275_309,
-        "13" => 114_364_328,
-        "14" => 107_043_718,
-        "15" => 101_991_189,
-        "16" => 90_338_345,
-        "17" => 83_257_441,
-        "18" => 80_373_285,
-        "19" => 58_617_616,
-        "20" => 64_444_167,
-        "21" => 46_709_983,
-        "22" => 50_818_468,
-        "X" => 156_040_895,
-        "Y" => 57_227_415,
-        "M" | "MT" => 16_569,
-        _ => bail!("unsupported GRCh38 chromosome {chrom:?}"),
-    };
-    Ok(length)
 }
 
 fn now_revision() -> anyhow::Result<u64> {
@@ -2216,6 +2429,32 @@ mod tests {
     }
 
     #[test]
+    fn serving_source_identity_rejects_deceptive_suffix_matches() {
+        let mut request = PublicationRequest {
+            run_id: "source-contract".into(),
+            scope: LoadScope::FullChromosome,
+            release: Release::Y1,
+            cohort: Cohort::Aou,
+            reference_genome: ReferenceGenome::Grch38,
+            chrom: "chr1".into(),
+            interval_start: 1,
+            interval_end: grch38_contig_length("chr1").unwrap(),
+            expected_tasks: 1,
+            expected_counts: StagedCounts::default(),
+            source_uri: canonical_y1_mirror_uri("aou", "chr1").unwrap(),
+            source_generation: "1".into(),
+            source_checksum: "checksum".into(),
+        };
+        validate_surveyed_source_identity(&request).unwrap();
+        request.source_uri =
+            "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.aou.chr1.vcf.gz".into();
+        assert!(validate_surveyed_source_identity(&request).is_err());
+        request.source_uri =
+            "gs://other-bucket/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.chr1.vcf.gz".into();
+        assert!(validate_surveyed_source_identity(&request).is_err());
+    }
+
+    #[test]
     fn accepted_signatures_are_bound_to_each_cohort() {
         let hgsvc = accepted_r1_signatures(Cohort::HgsvcHprc);
         let aou = accepted_r1_signatures(Cohort::Aou);
@@ -2233,8 +2472,35 @@ mod tests {
     }
 
     #[test]
-    fn grch38_chr22_length_is_fixed() {
-        assert_eq!(grch38_chromosome_length("chr22").unwrap(), 50_818_468);
+    fn full_chromosome_publication_uses_canonical_contig_lengths() {
+        let mut request = PublicationRequest {
+            run_id: "run-full".into(),
+            scope: LoadScope::FullChromosome,
+            release: Release::Y1,
+            cohort: Cohort::Aou,
+            reference_genome: ReferenceGenome::Grch38,
+            chrom: "chr22".into(),
+            interval_start: 1,
+            interval_end: 50_818_468,
+            expected_tasks: 1,
+            expected_counts: StagedCounts::default(),
+            source_uri: "fixture.vcf.gz".into(),
+            source_generation: "1".into(),
+            source_checksum: "checksum".into(),
+        };
+        for chrom in (1..=22)
+            .map(|number| format!("chr{number}"))
+            .chain(["chrX".to_string(), "chrY".to_string()])
+        {
+            request.chrom = chrom.clone();
+            request.interval_end = grch38_contig_length(&chrom).unwrap();
+            assert!(request.validate().is_ok(), "{chrom}");
+            request.interval_end -= 1;
+            assert!(request.validate().is_err(), "{chrom}");
+        }
+        request.chrom = "chrM".into();
+        request.interval_end = 16_569;
+        assert!(request.validate().is_err());
     }
 
     #[test]
@@ -2281,6 +2547,91 @@ mod tests {
                 rejects: 0,
             },
         );
+        exercise_cross_contig_run_rejection(&target);
+    }
+
+    fn exercise_cross_contig_run_rejection(target: &ClickHouseTarget) {
+        let run_id = format!(
+            "cross-contig-{}-{}",
+            std::process::id(),
+            now_revision().unwrap()
+        );
+        let revision = now_revision().unwrap();
+        let ledger = LoadRunLedgerRow {
+            run_id: run_id.clone(),
+            revision,
+            state: "validated".into(),
+            load_scope: LoadScope::Synthetic.as_str().into(),
+            release: Release::Y1.as_str().into(),
+            cohort: Cohort::Aou.as_str().into(),
+            reference_genome: ReferenceGenome::Grch38.as_str().into(),
+            chrom: "chr22".into(),
+            interval_start: 20_000_000,
+            interval_end: 20_010_000,
+            source_uri: "fixture.vcf".into(),
+            source_generation: "git".into(),
+            source_checksum_algorithm: "git_blob".into(),
+            source_checksum: "fixture".into(),
+            source_index_uri: "fixture.vcf.tbi".into(),
+            source_index_generation: "git".into(),
+            source_index_checksum: "fixture-index".into(),
+            schema_version: Y1_SCHEMA_VERSION,
+            loader_version: env!("CARGO_PKG_VERSION").into(),
+            expected_tasks: 1,
+            expected_source_records: 1,
+            summary_rows: 1,
+            allele_rows: 1,
+            frequency_rows: 6,
+            carrier_rows: 0,
+            rejected_records: 0,
+            created_at_ms: revision / 1_000_000,
+            updated_at_ms: revision / 1_000_000,
+            message: "adversarial isolation fixture".into(),
+        };
+        record_load_run(target, &ledger).unwrap();
+
+        let mut batch = fixture_batch(AOU_FIXTURE, Cohort::Aou);
+        for summary in &mut batch.summaries {
+            summary.chrom = "chr1".into();
+        }
+        let context = AttemptContext {
+            run_id: run_id.clone(),
+            task_id: "misassigned-chr1".into(),
+            attempt_id: "attempt-cross-contig".into(),
+            cohort: Cohort::Aou,
+            chrom: "chr1".into(),
+            interval_start: 1,
+            interval_end: grch38_contig_length("chr1").unwrap(),
+        };
+        let counts = stage_attempt(target, &context, &batch).unwrap();
+        let attempt = TaskAttemptLedgerRow::new(
+            &context,
+            now_revision().unwrap(),
+            AttemptState::Accepted,
+            counts,
+            &batch.report,
+            "",
+        )
+        .unwrap();
+        record_task_attempt(target, &attempt).unwrap();
+
+        let request = PublicationRequest {
+            run_id,
+            scope: LoadScope::Synthetic,
+            release: Release::Y1,
+            cohort: Cohort::Aou,
+            reference_genome: ReferenceGenome::Grch38,
+            chrom: "chr22".into(),
+            interval_start: 20_000_000,
+            interval_end: 20_010_000,
+            expected_tasks: 1,
+            expected_counts: counts,
+            source_uri: "fixture.vcf".into(),
+            source_generation: "git".into(),
+            source_checksum: "fixture".into(),
+        };
+        assert!(validate_run_contig_isolation(target, target.database(), &request, true).is_err());
+        assert!(publish_staged_run(target, &request).is_err());
     }
 
     fn exercise_fixture_publication(

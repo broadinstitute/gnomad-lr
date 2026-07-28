@@ -1,3 +1,4 @@
+use super::contig::{canonical_y1_mirror_uri, grch38_contig_length};
 use super::{
     record_task_attempt, stage_attempt_tracked, AttemptContext, AttemptState, ClickHouseTarget,
     Cohort, InsertStats, StagedCounts, TaskAttemptLedgerRow, TransformationReport, Y1Header,
@@ -126,18 +127,17 @@ impl PoolY1TaskSpec {
         if self.release != "y1" || self.reference_genome != "GRCh38" {
             bail!("pool Y1 tasks are restricted to release y1 and GRCh38");
         }
-        if self.chrom != "chr22" {
-            bail!("full-chr22 rehearsal tasks are restricted to chr22");
+        let contig_length = grch38_contig_length(&self.chrom)?;
+        if self.start == 0 || self.start > self.stop || self.stop > contig_length {
+            bail!(
+                "task bounds must be a non-empty one-based inclusive {} interval ending by {contig_length}",
+                self.chrom
+            );
         }
-        if self.start == 0 || self.start > self.stop || self.stop > 50_818_468 {
-            bail!("task bounds must be a non-empty one-based inclusive chr22 interval");
-        }
-        if !self
-            .source_uri
-            .starts_with("gs://gnomad-lr-data/y1/sources/")
-            || self.source_index_uri != format!("{}.tbi", self.source_uri)
-        {
-            bail!("task source must be a mirrored Y1 VCF with its exact adjacent TBI");
+        let expected_source_uri = canonical_y1_mirror_uri(&self.cohort, &self.chrom)?;
+        let expected_index_uri = format!("{expected_source_uri}.tbi");
+        if self.source_uri != expected_source_uri || self.source_index_uri != expected_index_uri {
+            bail!("task source and index must exactly equal the declared immutable Y1 cohort/contig mirror identities");
         }
         if self.source_generation.is_empty()
             || self.source_checksum.is_empty()
@@ -690,6 +690,48 @@ mod tests {
     #[test]
     fn descriptor_must_match_stable_task_id() {
         assert!(valid_task().validate("coordinator-renamed-task").is_err());
+    }
+
+    #[test]
+    fn deceptive_mirror_paths_fail_closed() {
+        let mut task = valid_task();
+        task.source_uri =
+            "gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr22.vcf.gz".into();
+        task.source_index_uri = format!("{}.tbi", task.source_uri);
+        assert!(task.validate(&task.coordinator_task_id).is_err());
+
+        let mut task = valid_task();
+        task.source_uri = "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/deceptive/gnomAD_LR_Y1.hgsvc_hprc.chr22.vcf.gz".into();
+        task.source_index_uri = format!("{}.tbi", task.source_uri);
+        assert!(task.validate(&task.coordinator_task_id).is_err());
+
+        let mut task = valid_task();
+        task.source_index_uri = "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr1.vcf.gz.tbi".into();
+        assert!(task.validate(&task.coordinator_task_id).is_err());
+    }
+
+    #[test]
+    fn task_contract_accepts_each_primary_contig_and_rejects_mt() {
+        for chrom in (1..=22)
+            .map(|number| format!("chr{number}"))
+            .chain(["chrX".to_string(), "chrY".to_string()])
+        {
+            let mut task = valid_task();
+            task.chrom = chrom.clone();
+            task.start = 1;
+            task.stop = grch38_contig_length(&chrom).unwrap();
+            task.source_uri = format!(
+                "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.{chrom}.vcf.gz"
+            );
+            task.source_index_uri = format!("{}.tbi", task.source_uri);
+            task.validate(&task.coordinator_task_id).unwrap();
+            task.stop += 1;
+            assert!(task.validate(&task.coordinator_task_id).is_err(), "{chrom}");
+        }
+
+        let mut mt = valid_task();
+        mt.chrom = "chrM".into();
+        assert!(mt.validate(&mt.coordinator_task_id).is_err());
     }
 
     #[test]
