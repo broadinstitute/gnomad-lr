@@ -2,6 +2,7 @@
 """Exact offline contract test for the dormant 128-worker private pool profile."""
 
 from pathlib import Path
+import re
 import tomllib
 import unittest
 
@@ -23,8 +24,10 @@ class FullGenome128ProfileTest(unittest.TestCase):
                 "manage_firewall": False,
             },
         )
-        self.assertEqual(set(config["pools"]), {"lr_full_genome_128"})
-        pool = config["pools"]["lr_full_genome_128"]
+        pool_name = "lr-full-genome-128"
+        self.assertEqual(set(config["pools"]), {pool_name})
+        self.assertRegex(f"{pool_name}-coordinator", re.compile(r"^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$"))
+        pool = config["pools"][pool_name]
         self.assertEqual(pool["starting_workers"], 0)
         self.assertEqual(pool["workers"], 128)
         self.assertTrue(pool["spot"])

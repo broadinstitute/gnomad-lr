@@ -8,7 +8,7 @@ network = "gnomad-v4-dev"
 public_ip = false
 manage_firewall = false
 
-[pools.lr_full_genome_128]
+[pools.lr-full-genome-128]
 machine_type = "n1-standard-2"
 spot = true
 starting_workers = 0
