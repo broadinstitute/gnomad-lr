@@ -363,7 +363,7 @@ FORMAT JSONEachRow
                     .get("failure")
                     .is_some_and(serde_json::Value::is_null)
                 || inserted_rows != Some(expected_inserted)
-                || inserted_bytes == Some(0)
+                || (expected_inserted > 0 && inserted_bytes == Some(0))
             {
                 bail!(
                     "accepted attempt {} does not contain a complete successful worker result",
