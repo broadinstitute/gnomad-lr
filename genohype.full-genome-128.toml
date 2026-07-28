@@ -1,0 +1,21 @@
+# Dedicated, dormant profile for the reviewed 128-worker full-genome prototype.
+# This file is design-only: all lifecycle commands require an explicit
+# `genohype --config genohype.full-genome-128.toml ...` selection.
+[defaults]
+project = "gnomadev"
+zone = "us-east1-b"
+network = "gnomad-v4-dev"
+public_ip = false
+manage_firewall = false
+
+[pools.lr_full_genome_128]
+machine_type = "n1-standard-2"
+spot = true
+starting_workers = 0
+workers = 128
+with_coordinator = true
+worker_binary = "target/release/gnomad-lr-worker"
+subnet = "gnomad-lr-y1-full-prototype"
+pool_db_path = "gs://gnomad-lr-data/pool-ops/full-genome-128/ops.db"
+service_account = "lr-y1-full-proto-worker@gnomadev.iam.gserviceaccount.com"
+coordinator_service_account = "lr-y1-full-proto-coord@gnomadev.iam.gserviceaccount.com"
