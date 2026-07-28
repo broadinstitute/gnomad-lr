@@ -1,7 +1,7 @@
 use super::model::*;
 use super::target::{ClickHouseTarget, TargetKind};
 use anyhow::{bail, Context};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const Y1_SCHEMA_VERSION: u16 = 3;
@@ -989,11 +989,122 @@ pub fn publish_staged_run(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryPointerAction {
+    Activate,
+    Rollback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentSignature {
+    pub table: String,
+    pub rows: u64,
+    pub signature: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServingAcceptance {
+    pub schema_version: u16,
+    pub accepted: bool,
+    pub source_database: String,
+    pub serving_database: String,
+    pub run_id: String,
+    pub cohort: String,
+    pub chrom: String,
+    pub signatures: Vec<ContentSignature>,
+    pub accepted_by: String,
+    pub accepted_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedPointer {
+    Absent,
+    Current { run_id: String, revision: u64 },
+}
+
+#[derive(Debug, Serialize)]
+pub struct PrimaryPointerReport {
+    pub action: PrimaryPointerAction,
+    pub dry_run: bool,
+    pub changed: bool,
+    pub database: String,
+    pub release: String,
+    pub cohort: String,
+    pub reference_genome: String,
+    pub chrom: String,
+    pub requested_run_id: String,
+    pub restore_absence: bool,
+    pub tombstone_written: bool,
+    pub active_before: Option<String>,
+    pub active_after: Option<String>,
+    pub previous_run_id: Option<String>,
+    pub proposed_revision: Option<u64>,
+    pub expected_current_run_id: Option<String>,
+    pub expected_current_revision: Option<u64>,
+    pub acceptance_source_database: String,
+    pub acceptance_timestamp_ms: u64,
+    pub validated_signatures: Vec<ContentSignature>,
+    pub validated_counts: StagedCounts,
+}
+
+/// Resolve a published run from its immutable ledger, validate its accepted attempts and
+/// canonical rows, then plan or append one primary pointer revision.
+#[allow(clippy::too_many_arguments)]
+pub fn change_primary_pointer(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    cohort: Cohort,
+    acceptance: &ServingAcceptance,
+    expected_pointer: &ExpectedPointer,
+    operator_identity: &str,
+    action: PrimaryPointerAction,
+    restore_absence: bool,
+    dry_run: bool,
+) -> anyhow::Result<PrimaryPointerReport> {
+    if target.kind() != TargetKind::Serving {
+        bail!("primary activation and rollback require an explicitly acknowledged serving target");
+    }
+    if run_id.is_empty() {
+        bail!("primary pointer run ID must not be empty");
+    }
+    if operator_identity.trim().is_empty() {
+        bail!("primary pointer changes require a non-empty operator identity");
+    }
+
+    let request = published_request_from_ledger(target, run_id, cohort)?;
+    if request.chrom != "chr22" {
+        bail!("the reviewed primary operator surface is restricted to chr22");
+    }
+    validate_activation_candidate(target, &request)?;
+    validate_serving_acceptance(target, &request, acceptance)?;
+    change_validated_pointer(
+        target,
+        &request,
+        acceptance,
+        expected_pointer,
+        operator_identity,
+        action,
+        restore_absence,
+        dry_run,
+    )
+}
+
+/// Lower-level compatibility entry point for callers that already hold the finalizer's
+/// immutable publication request.
 pub fn activate_published_run(
     target: &ClickHouseTarget,
     request: &PublicationRequest,
     independent_source_records: u64,
     activated_by: &str,
+) -> anyhow::Result<()> {
+    let _ = (target, request, independent_source_records, activated_by);
+    bail!("direct activation is disabled; use materialize-y1-chr22 and an acceptance-bound guarded pointer command")
+}
+
+fn validate_activation_candidate(
+    target: &ClickHouseTarget,
+    request: &PublicationRequest,
 ) -> anyhow::Result<()> {
     request.validate()?;
     if target.kind() != TargetKind::Serving {
@@ -1009,51 +1120,496 @@ pub fn activate_published_run(
             request.chrom
         );
     }
-    if independent_source_records == 0
-        || independent_source_records != request.expected_counts.source_records
-    {
-        bail!("independent source count does not match the validated publication count");
-    }
     validate_surveyed_source_identity(request)?;
-    if activated_by.is_empty() {
-        bail!("activation requires a non-empty operator identity");
-    }
 
+    let accepted = accepted_counts(target, request)?;
+    if accepted != request.expected_counts {
+        bail!(
+            "accepted task ledger counts {accepted:?} do not match published run counts {:?}",
+            request.expected_counts
+        );
+    }
     for table in published_tables(request) {
         let actual = published_row_count(target, request, table.published)?;
         if actual != table.expected {
             bail!(
-                "cannot activate: {} has {actual} rows, expected {}",
+                "cannot change primary pointer: {} has {actual} rows, expected {}",
                 table.published,
                 table.expected
             );
         }
     }
+    Ok(())
+}
 
-    let previous_run_id = active_run(target, request)?.unwrap_or_default();
-    if previous_run_id == request.run_id {
-        return Ok(());
+fn change_validated_pointer(
+    target: &ClickHouseTarget,
+    request: &PublicationRequest,
+    acceptance: &ServingAcceptance,
+    expected_pointer: &ExpectedPointer,
+    operator_identity: &str,
+    action: PrimaryPointerAction,
+    restore_absence: bool,
+    dry_run: bool,
+) -> anyhow::Result<PrimaryPointerReport> {
+    if operator_identity.trim().is_empty() {
+        bail!("primary pointer changes require a non-empty operator identity");
     }
-    let revision = now_revision()?;
-    let row = ActivePartitionRow {
+    let latest = latest_pointer_revision(target, request)?;
+    let current = latest.as_ref().and_then(resolve_active_pointer);
+    validate_expected_pointer(current, expected_pointer)?;
+    validate_pointer_transition(action, current, &request.run_id, restore_absence)?;
+    let active_before = current.map(|row| row.run_id.clone());
+    let previous_run_id = active_before.clone();
+    let changed = restore_absence || active_before.as_deref() != Some(request.run_id.as_str());
+    // The next revision is derived from the latest ledger revision, including a tombstone.
+    // Publishers racing from the same guarded state therefore collide on one revision.
+    let proposed_revision = if changed {
+        Some(match latest.as_ref() {
+            Some(row) => row
+                .revision
+                .checked_add(1)
+                .context("active primary pointer revision exhausted UInt64")?,
+            None => 1,
+        })
+    } else {
+        None
+    };
+
+    if changed && !dry_run {
+        let revision = proposed_revision.expect("changed pointer has a revision");
+        let row = ActivePartitionRow {
+            release: request.release.as_str().to_string(),
+            cohort: request.cohort.as_str().to_string(),
+            reference_genome: request.reference_genome.as_str().to_string(),
+            chrom: request.chrom.clone(),
+            revision,
+            // An empty run ID is the explicit append-only absence revision. It is only
+            // reachable through the guarded initial-activation rollback above.
+            run_id: if restore_absence {
+                String::new()
+            } else {
+                request.run_id.clone()
+            },
+            previous_run_id: previous_run_id.clone().unwrap_or_default(),
+            activated_at_ms: now_revision()? / 1_000_000,
+            activated_by: operator_identity.to_string(),
+        };
+        target.insert_json_each_row("lr_y1_active_partitions", std::slice::from_ref(&row))?;
+        let collision_query = "SELECT count(), uniqExact(run_id) FROM lr_y1_active_partitions WHERE release = {release:String} AND cohort = {cohort:String} AND reference_genome = {reference_genome:String} AND chrom = {chrom:String} AND revision = {revision:UInt64} FORMAT TabSeparated";
+        let revision_text = revision.to_string();
+        let mut collision_params = publication_parameters(request).to_vec();
+        collision_params.push(("revision", revision_text.as_str()));
+        let collision = parse_u64_row(
+            &target.query_text(collision_query, &collision_params)?,
+            2,
+            "pointer revision collision",
+        )?;
+        if collision != [1, 1] {
+            bail!("pointer revision collision detected; serialized single-publisher protocol failed closed");
+        }
+        let resolved = active_run(target, request)?;
+        if restore_absence {
+            if resolved.is_some() {
+                bail!("active-partition tombstone did not resolve to absence");
+            }
+        } else if resolved.as_deref() != Some(request.run_id.as_str()) {
+            bail!("active-partition pointer did not resolve to the requested run");
+        }
+    }
+
+    Ok(PrimaryPointerReport {
+        action,
+        dry_run,
+        changed,
+        database: target.database().to_string(),
         release: request.release.as_str().to_string(),
         cohort: request.cohort.as_str().to_string(),
         reference_genome: request.reference_genome.as_str().to_string(),
         chrom: request.chrom.clone(),
-        revision,
-        run_id: request.run_id.clone(),
+        requested_run_id: request.run_id.clone(),
+        restore_absence,
+        tombstone_written: restore_absence && changed && !dry_run,
+        active_before: active_before.clone(),
+        active_after: if changed && !dry_run {
+            (!restore_absence).then(|| request.run_id.clone())
+        } else {
+            active_before
+        },
         previous_run_id,
-        activated_at_ms: revision / 1_000_000,
-        activated_by: activated_by.to_string(),
-    };
-    target.insert_json_each_row("lr_y1_active_partitions", std::slice::from_ref(&row))?;
-    if active_run(target, request)?.as_deref() != Some(request.run_id.as_str()) {
-        bail!("active-partition pointer did not resolve to the requested run");
+        proposed_revision,
+        expected_current_run_id: current.map(|row| row.run_id.clone()),
+        expected_current_revision: current.map(|row| row.revision),
+        acceptance_source_database: acceptance.source_database.clone(),
+        acceptance_timestamp_ms: acceptance.accepted_at_ms,
+        validated_signatures: acceptance.signatures.clone(),
+        validated_counts: request.expected_counts,
+    })
+}
+
+fn validate_pointer_transition(
+    action: PrimaryPointerAction,
+    current: Option<&ActivePartitionRow>,
+    requested_run_id: &str,
+    restore_absence: bool,
+) -> anyhow::Result<()> {
+    if restore_absence {
+        if action != PrimaryPointerAction::Rollback {
+            bail!("--restore-absence is valid only for rollback");
+        }
+        let current = current.context("cannot restore absence with no active run")?;
+        if current.run_id != requested_run_id {
+            bail!("absence rollback acceptance must be bound to the guarded current run");
+        }
+        if !current.previous_run_id.is_empty() {
+            bail!("absence rollback is allowed only when the current activation recorded prior absence");
+        }
+        return Ok(());
+    }
+    if action == PrimaryPointerAction::Rollback {
+        let current = current.context("cannot roll back a primary partition with no active run")?;
+        if current.previous_run_id.is_empty() {
+            bail!("active primary pointer recorded prior absence; use --restore-absence with acceptance for the current run");
+        }
+        if current.previous_run_id != requested_run_id {
+            bail!(
+                "rollback target must equal the active pointer's recorded previous run {}",
+                current.previous_run_id
+            );
+        }
     }
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
+fn validate_expected_pointer(
+    current: Option<&ActivePartitionRow>,
+    expected: &ExpectedPointer,
+) -> anyhow::Result<()> {
+    match (current, expected) {
+        (None, ExpectedPointer::Absent) => Ok(()),
+        (Some(actual), ExpectedPointer::Current { run_id, revision })
+            if actual.run_id == *run_id && actual.revision == *revision => Ok(()),
+        (None, ExpectedPointer::Current { .. }) => bail!("stale pointer token: expected a current pointer, but none exists"),
+        (Some(actual), ExpectedPointer::Absent) => bail!(
+            "stale pointer token: expected no current pointer, found {} at revision {}",
+            actual.run_id, actual.revision
+        ),
+        (Some(actual), ExpectedPointer::Current { run_id, revision }) => bail!(
+            "stale pointer token: expected {run_id} at revision {revision}, found {} at revision {}",
+            actual.run_id, actual.revision
+        ),
+    }
+}
+
+const SIGNATURE_COLUMNS: [(&str, &str); 4] = [
+    ("summaries", "chrom,position,source_variant_id,ref_allele,alts,ac,an,af"),
+    ("alleles", "chrom,position,source_variant_id,alt_index,ref_allele,alt,ac,an,af,rsids,cadd_phred,phylop,major_consequence,short_read_match_id,short_read_match_type,short_read_match_source"),
+    ("frequencies", "chrom,position,source_variant_id,alt_index,division,ac,an,af,values_available"),
+    ("carriers", "chrom,position,source_variant_id,alt_index,sample_id,genotype_position,gt_alleles,gt_phased"),
+];
+
+fn accepted_r1_signatures(cohort: Cohort) -> [ContentSignature; 4] {
+    let values = match cohort {
+        Cohort::HgsvcHprc => [
+            (808_853, 14_634_967_967_081_205_611),
+            (1_046_072, 14_614_298_358_322_652_621),
+            (21_967_512, 3_800_520_885_522_330_351),
+            (38_285_467, 5_740_761_881_423_515_696),
+        ],
+        Cohort::Aou => [
+            (1_166_762, 17_948_364_209_855_283_030),
+            (3_152_223, 6_909_096_278_152_444_077),
+            (18_913_338, 10_838_463_094_380_439_429),
+            (0, 0),
+        ],
+    };
+    std::array::from_fn(|index| ContentSignature {
+        table: SIGNATURE_COLUMNS[index].0.to_string(),
+        rows: values[index].0,
+        signature: values[index].1,
+    })
+}
+
+fn content_signatures(
+    target: &ClickHouseTarget,
+    database: &str,
+    run_id: &str,
+    cohort: Cohort,
+) -> anyhow::Result<Vec<ContentSignature>> {
+    let mut result = Vec::with_capacity(4);
+    for (table, columns) in SIGNATURE_COLUMNS {
+        let query = format!("SELECT count(), groupBitXor(cityHash64(toJSONString(tuple({columns})))), countIf(cohort != {{cohort:String}}) FROM {database}.lr_y1_{table} WHERE run_id = {{run_id:String}} FORMAT TabSeparated");
+        let body = target.query_text(&query, &[("run_id", run_id), ("cohort", cohort.as_str())])?;
+        let fields = parse_u64_row(&body, 3, table)?;
+        if fields[2] != 0 {
+            bail!(
+                "run {run_id} has {} unexpected cohort rows in lr_y1_{table}",
+                fields[2]
+            );
+        }
+        result.push(ContentSignature {
+            table: table.to_string(),
+            rows: fields[0],
+            signature: fields[1],
+        });
+    }
+    Ok(result)
+}
+
+fn validate_serving_acceptance(
+    target: &ClickHouseTarget,
+    request: &PublicationRequest,
+    acceptance: &ServingAcceptance,
+) -> anyhow::Result<()> {
+    if !acceptance.accepted || acceptance.schema_version != Y1_SCHEMA_VERSION {
+        bail!("content-signature acceptance is absent or uses the wrong schema version");
+    }
+    if acceptance.serving_database != target.database()
+        || acceptance.run_id != request.run_id
+        || acceptance.cohort != request.cohort.as_str()
+        || acceptance.chrom != request.chrom
+        || acceptance.accepted_by.trim().is_empty()
+    {
+        bail!("content-signature acceptance provenance does not bind this serving database/run/cohort");
+    }
+    let actual = content_signatures(target, target.database(), &request.run_id, request.cohort)?;
+    let expected = accepted_r1_signatures(request.cohort).to_vec();
+    if acceptance.signatures != expected || actual != expected {
+        bail!("serving content signatures do not equal the accepted r1 signatures");
+    }
+    Ok(())
+}
+
+/// Copy an immutable published scratch candidate into an isolated serving database on the
+/// same ClickHouse server, then verify exact accepted-r1 signatures. The publication ledger
+/// is copied last, so an interrupted transfer can never look activation-ready.
+pub fn materialize_serving_candidate(
+    target: &ClickHouseTarget,
+    scratch_database: &str,
+    run_id: &str,
+    cohort: Cohort,
+    operator_identity: &str,
+) -> anyhow::Result<ServingAcceptance> {
+    if target.kind() != TargetKind::Serving || operator_identity.trim().is_empty() {
+        bail!("materialization requires an acknowledged serving target and operator identity");
+    }
+    if !target.database().starts_with("gnomad_lr_y1_serving_") {
+        bail!("materialization is restricted to an isolated gnomad_lr_y1_serving_* database");
+    }
+    validate_scratch_database(scratch_database)?;
+    if scratch_database == target.database() || run_id.trim().is_empty() {
+        bail!("materialization requires distinct databases and a non-empty run ID");
+    }
+    let source = published_request_from_qualified_ledger(target, scratch_database, run_id, cohort)?;
+    validate_surveyed_source_identity(&source)?;
+    if source.chrom != "chr22"
+        || source.interval_start != 1
+        || source.interval_end != grch38_chromosome_length("chr22")?
+    {
+        bail!("only complete GRCh38 chr22 candidates can be materialized");
+    }
+    let expected = accepted_r1_signatures(cohort).to_vec();
+    if content_signatures(target, scratch_database, run_id, cohort)? != expected {
+        bail!("scratch content signatures do not equal the accepted r1 signatures");
+    }
+    let occupancy = "SELECT (SELECT count() FROM lr_y1_load_runs WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_task_attempts WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_summaries WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_alleles WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_frequencies WHERE run_id = {run_id:String}) + (SELECT count() FROM lr_y1_carriers WHERE run_id = {run_id:String}) FORMAT TabSeparated";
+    if parse_u64_row(
+        &target.query_text(occupancy, &[("run_id", run_id)])?,
+        1,
+        "serving occupancy",
+    )?[0]
+        != 0
+    {
+        bail!(
+            "serving destination already contains this run; use a fresh isolated serving database"
+        );
+    }
+    let params = [("run_id", run_id), ("cohort", cohort.as_str())];
+    for (table, columns) in [
+        ("summaries", SUMMARY_COLUMNS),
+        ("alleles", ALLELE_COLUMNS),
+        ("frequencies", FREQUENCY_COLUMNS),
+        ("carriers", CARRIER_COLUMNS),
+    ] {
+        target.execute_with_params(&format!("INSERT INTO lr_y1_{table} ({columns}) SELECT {columns} FROM {scratch_database}.lr_y1_{table} WHERE run_id = {{run_id:String}} AND cohort = {{cohort:String}}"), &params)?;
+    }
+    target.execute_with_params(&format!("INSERT INTO lr_y1_task_attempts SELECT * FROM {scratch_database}.lr_y1_task_attempts WHERE run_id = {{run_id:String}}"), &[("run_id", run_id)])?;
+    // Commit marker: copied only after all data and attempt rows.
+    target.execute_with_params(&format!("INSERT INTO lr_y1_load_runs SELECT * FROM {scratch_database}.lr_y1_load_runs WHERE run_id = {{run_id:String}}"), &[("run_id", run_id)])?;
+    let destination = published_request_from_ledger(target, run_id, cohort)?;
+    validate_activation_candidate(target, &destination)?;
+    let actual = content_signatures(target, target.database(), run_id, cohort)?;
+    if actual != expected {
+        bail!("post-transfer serving signatures differ from the accepted r1 signatures");
+    }
+    Ok(ServingAcceptance {
+        schema_version: Y1_SCHEMA_VERSION,
+        accepted: true,
+        source_database: scratch_database.to_string(),
+        serving_database: target.database().to_string(),
+        run_id: run_id.to_string(),
+        cohort: cohort.as_str().to_string(),
+        chrom: "chr22".to_string(),
+        signatures: actual,
+        accepted_by: operator_identity.to_string(),
+        accepted_at_ms: now_revision()? / 1_000_000,
+    })
+}
+
+fn validate_scratch_database(database: &str) -> anyhow::Result<()> {
+    if !database.starts_with("gnomad_lr_y1_scratch_")
+        || database == "gnomad_lr_y1_scratch_"
+        || !database
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        bail!("scratch database must be an isolated gnomad_lr_y1_scratch_* identifier");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishedRunLedger {
+    state: String,
+    load_scope: String,
+    release: String,
+    cohort: String,
+    reference_genome: String,
+    chrom: String,
+    interval_start: u32,
+    interval_end: u32,
+    source_uri: String,
+    source_generation: String,
+    source_checksum: String,
+    schema_version: u16,
+    expected_tasks: u32,
+    expected_source_records: u64,
+    summary_rows: u64,
+    allele_rows: u64,
+    frequency_rows: u64,
+    carrier_rows: u64,
+    rejected_records: u64,
+}
+
+fn published_request_from_qualified_ledger(
+    target: &ClickHouseTarget,
+    database: &str,
+    run_id: &str,
+    cohort: Cohort,
+) -> anyhow::Result<PublicationRequest> {
+    let query = format!(
+        r#"SELECT state, load_scope, release, cohort, reference_genome, chrom, interval_start, interval_end, source_uri, source_generation, source_checksum, schema_version, expected_tasks, expected_source_records, summary_rows, allele_rows, frequency_rows, carrier_rows, rejected_records
+FROM {database}.lr_y1_load_runs
+WHERE run_id = {{run_id:String}}
+ORDER BY revision DESC
+LIMIT 1
+FORMAT JSONEachRow"#
+    );
+    let body = target.query_text(&query, &[("run_id", run_id)])?;
+    publication_request_from_ledger_body(&body, run_id, cohort)
+}
+
+fn publication_request_from_ledger_body(
+    body: &str,
+    run_id: &str,
+    cohort: Cohort,
+) -> anyhow::Result<PublicationRequest> {
+    let row: PublishedRunLedger = serde_json::from_str(body.trim()).with_context(|| {
+        format!("published load-run ledger entry not found or invalid for run {run_id}")
+    })?;
+    if row.state != "published" || row.schema_version != Y1_SCHEMA_VERSION {
+        bail!("run {run_id} is not a supported published Y1 run");
+    }
+    if row.release != Release::Y1.as_str()
+        || row.cohort != cohort.as_str()
+        || row.reference_genome != ReferenceGenome::Grch38.as_str()
+        || row.load_scope != LoadScope::FullChromosome.as_str()
+    {
+        bail!("run {run_id} is not the requested Y1 GRCh38 full-chromosome cohort candidate");
+    }
+    Ok(PublicationRequest {
+        run_id: run_id.to_string(),
+        scope: LoadScope::FullChromosome,
+        release: Release::Y1,
+        cohort,
+        reference_genome: ReferenceGenome::Grch38,
+        chrom: row.chrom,
+        interval_start: row.interval_start,
+        interval_end: row.interval_end,
+        expected_tasks: row.expected_tasks,
+        expected_counts: StagedCounts {
+            source_records: row.expected_source_records,
+            summaries: row.summary_rows,
+            alleles: row.allele_rows,
+            frequencies: row.frequency_rows,
+            carriers: row.carrier_rows,
+            rejects: row.rejected_records,
+        },
+        source_uri: row.source_uri,
+        source_generation: row.source_generation,
+        source_checksum: row.source_checksum,
+    })
+}
+
+fn published_request_from_ledger(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    cohort: Cohort,
+) -> anyhow::Result<PublicationRequest> {
+    let query = r#"SELECT state, load_scope, release, cohort, reference_genome, chrom, interval_start, interval_end, source_uri, source_generation, source_checksum, schema_version, expected_tasks, expected_source_records, summary_rows, allele_rows, frequency_rows, carrier_rows, rejected_records
+FROM lr_y1_load_runs
+WHERE run_id = {run_id:String}
+ORDER BY revision DESC
+LIMIT 1
+FORMAT JSONEachRow"#;
+    let body = target.query_text(query, &[("run_id", run_id)])?;
+    let row: PublishedRunLedger = serde_json::from_str(body.trim()).with_context(|| {
+        format!("published load-run ledger entry not found or invalid for run {run_id}")
+    })?;
+    if row.state != "published" {
+        bail!(
+            "run {run_id} is not published (latest state is {})",
+            row.state
+        );
+    }
+    if row.schema_version != Y1_SCHEMA_VERSION {
+        bail!(
+            "run {run_id} uses unsupported Y1 schema version {}",
+            row.schema_version
+        );
+    }
+    if row.release != Release::Y1.as_str()
+        || row.cohort != cohort.as_str()
+        || row.reference_genome != ReferenceGenome::Grch38.as_str()
+        || row.load_scope != LoadScope::FullChromosome.as_str()
+    {
+        bail!("run {run_id} is not the requested Y1 GRCh38 full-chromosome cohort candidate");
+    }
+    Ok(PublicationRequest {
+        run_id: run_id.to_string(),
+        scope: LoadScope::FullChromosome,
+        release: Release::Y1,
+        cohort,
+        reference_genome: ReferenceGenome::Grch38,
+        chrom: row.chrom,
+        interval_start: row.interval_start,
+        interval_end: row.interval_end,
+        expected_tasks: row.expected_tasks,
+        expected_counts: StagedCounts {
+            source_records: row.expected_source_records,
+            summaries: row.summary_rows,
+            alleles: row.allele_rows,
+            frequencies: row.frequency_rows,
+            carriers: row.carrier_rows,
+            rejects: row.rejected_records,
+        },
+        source_uri: row.source_uri,
+        source_generation: row.source_generation,
+        source_checksum: row.source_checksum,
+    })
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct ActivePartitionRow {
     release: String,
     cohort: String,
@@ -1064,6 +1620,30 @@ struct ActivePartitionRow {
     previous_run_id: String,
     activated_at_ms: u64,
     activated_by: String,
+}
+
+fn resolve_active_pointer(row: &ActivePartitionRow) -> Option<&ActivePartitionRow> {
+    (!row.run_id.is_empty()).then_some(row)
+}
+
+fn latest_pointer_revision(
+    target: &ClickHouseTarget,
+    request: &PublicationRequest,
+) -> anyhow::Result<Option<ActivePartitionRow>> {
+    let query = r#"SELECT release, cohort, reference_genome, chrom, revision, run_id, previous_run_id, activated_at_ms, activated_by
+FROM lr_y1_active_partitions
+WHERE release = {release:String} AND cohort = {cohort:String} AND reference_genome = {reference_genome:String} AND chrom = {chrom:String}
+ORDER BY revision DESC
+LIMIT 1
+FORMAT JSONEachRow"#;
+    let body = target.query_text(query, &publication_parameters(request))?;
+    if body.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_str(body.trim()).context(
+            "invalid active primary pointer row returned by ClickHouse",
+        )?))
+    }
 }
 
 fn accepted_counts(
@@ -1194,7 +1774,7 @@ fn active_run(
     target: &ClickHouseTarget,
     request: &PublicationRequest,
 ) -> anyhow::Result<Option<String>> {
-    let query = "SELECT argMax(run_id, revision) FROM lr_y1_active_partitions WHERE release = {release:String} AND cohort = {cohort:String} AND reference_genome = {reference_genome:String} AND chrom = {chrom:String} FORMAT TabSeparated";
+    let query = "SELECT run_id FROM lr_y1_active_partitions WHERE release = {release:String} AND cohort = {cohort:String} AND reference_genome = {reference_genome:String} AND chrom = {chrom:String} ORDER BY revision DESC LIMIT 1 FORMAT TabSeparated";
     let body = target.query_text(query, &publication_parameters(request))?;
     let value = body.trim();
     if value.is_empty() {
@@ -1502,6 +2082,154 @@ mod tests {
             source_checksum: "fixture".to_string(),
         };
         assert!(activate_published_run(&target, &request, 1, "unit-test").is_err());
+    }
+
+    #[test]
+    fn rollback_must_restore_the_recorded_previous_run() {
+        let current = ActivePartitionRow {
+            release: "y1".to_string(),
+            cohort: "aou".to_string(),
+            reference_genome: "GRCh38".to_string(),
+            chrom: "chr22".to_string(),
+            revision: 2,
+            run_id: "run-r2".to_string(),
+            previous_run_id: "run-r1".to_string(),
+            activated_at_ms: 1,
+            activated_by: "unit-test".to_string(),
+        };
+        assert!(validate_pointer_transition(
+            PrimaryPointerAction::Rollback,
+            Some(&current),
+            "run-r1",
+            false
+        )
+        .is_ok());
+        assert!(validate_pointer_transition(
+            PrimaryPointerAction::Rollback,
+            Some(&current),
+            "unrelated-run",
+            false
+        )
+        .is_err());
+        assert!(
+            validate_pointer_transition(PrimaryPointerAction::Rollback, None, "run-r1", false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn activation_allows_an_initial_or_replacement_pointer() {
+        assert!(
+            validate_pointer_transition(PrimaryPointerAction::Activate, None, "run-r1", false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn initial_activation_can_only_roll_back_to_its_recorded_absence() {
+        let initial = ActivePartitionRow {
+            release: "y1".into(),
+            cohort: "aou".into(),
+            reference_genome: "GRCh38".into(),
+            chrom: "chr22".into(),
+            revision: 1,
+            run_id: "run-r1".into(),
+            previous_run_id: String::new(),
+            activated_at_ms: 1,
+            activated_by: "test".into(),
+        };
+        assert!(validate_pointer_transition(
+            PrimaryPointerAction::Rollback,
+            Some(&initial),
+            "run-r1",
+            true
+        )
+        .is_ok());
+        assert!(validate_pointer_transition(
+            PrimaryPointerAction::Rollback,
+            Some(&initial),
+            "unrelated-run",
+            true
+        )
+        .is_err());
+        assert!(validate_pointer_transition(
+            PrimaryPointerAction::Activate,
+            Some(&initial),
+            "run-r1",
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tombstone_revision_resolves_to_absence() {
+        let tombstone = ActivePartitionRow {
+            release: "y1".into(),
+            cohort: "aou".into(),
+            reference_genome: "GRCh38".into(),
+            chrom: "chr22".into(),
+            revision: 2,
+            run_id: String::new(),
+            previous_run_id: "run-r1".into(),
+            activated_at_ms: 2,
+            activated_by: "test".into(),
+        };
+        assert!(resolve_active_pointer(&tombstone).is_none());
+        assert!(validate_expected_pointer(
+            resolve_active_pointer(&tombstone),
+            &ExpectedPointer::Absent
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn pointer_expectations_fail_closed_on_stale_or_missing_tokens() {
+        let current = ActivePartitionRow {
+            release: "y1".into(),
+            cohort: "aou".into(),
+            reference_genome: "GRCh38".into(),
+            chrom: "chr22".into(),
+            revision: 7,
+            run_id: "run-r1".into(),
+            previous_run_id: String::new(),
+            activated_at_ms: 1,
+            activated_by: "test".into(),
+        };
+        assert!(validate_expected_pointer(None, &ExpectedPointer::Absent).is_ok());
+        assert!(validate_expected_pointer(Some(&current), &ExpectedPointer::Absent).is_err());
+        assert!(validate_expected_pointer(
+            Some(&current),
+            &ExpectedPointer::Current {
+                run_id: "run-r1".into(),
+                revision: 7,
+            }
+        )
+        .is_ok());
+        assert!(validate_expected_pointer(
+            Some(&current),
+            &ExpectedPointer::Current {
+                run_id: "run-r1".into(),
+                revision: 6,
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn accepted_signatures_are_bound_to_each_cohort() {
+        let hgsvc = accepted_r1_signatures(Cohort::HgsvcHprc);
+        let aou = accepted_r1_signatures(Cohort::Aou);
+        assert_ne!(hgsvc, aou);
+        assert_eq!(hgsvc[0].rows, 808_853);
+        assert_eq!(aou[0].rows, 1_166_762);
+        assert_eq!(
+            aou[3],
+            ContentSignature {
+                table: "carriers".into(),
+                rows: 0,
+                signature: 0
+            }
+        );
     }
 
     #[test]

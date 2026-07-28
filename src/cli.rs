@@ -31,6 +31,12 @@ pub enum Commands {
     LoadY1Interval(Y1IntervalArgs),
     /// Guardedly finalize a complete staged Y1 chr22 candidate
     FinalizeY1Chr22(Y1FinalizeArgs),
+    /// Materialize and signature-verify a published scratch chr22 run in isolated serving
+    MaterializeY1Chr22(Y1MaterializeArgs),
+    /// Activate a validated, published full-chr22 Y1 primary run on a serving target
+    ActivateY1Chr22(Y1PrimaryPointerArgs),
+    /// Roll back a Y1 primary pointer to its recorded previous full-chr22 run
+    RollbackY1Chr22(Y1PrimaryPointerArgs),
     /// Reconcile and publish an immutable HGSVC/HPRC Y1 metadata candidate
     ReconcileY1Metadata(Y1MetadataArgs),
     /// Activate an accepted Y1 metadata run on a serving target
@@ -164,6 +170,79 @@ pub struct Y1FinalizeArgs {
     pub operator_identity: String,
 
     /// Machine-readable finalization report destination
+    #[arg(long)]
+    pub report: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1MaterializeArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    /// Isolated scratch database on the same ClickHouse server
+    #[arg(long)]
+    pub scratch_database: String,
+
+    #[arg(long)]
+    pub run_id: String,
+
+    #[arg(long, value_enum)]
+    pub cohort: Y1CohortArg,
+
+    #[arg(long)]
+    pub operator_identity: String,
+
+    /// Machine-readable, activation-consumable acceptance report
+    #[arg(long)]
+    pub report: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1PrimaryPointerArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    /// Published full-chr22 run to activate/restore; with --restore-absence, the current run whose acceptance authorizes the tombstone
+    #[arg(long)]
+    pub run_id: String,
+
+    /// Roll back an initial activation to its recorded prior absent state
+    #[arg(
+        long,
+        requires = "expected_current_run_id",
+        conflicts_with = "expect_no_current"
+    )]
+    pub restore_absence: bool,
+
+    /// Cohort partition whose primary pointer will change
+    #[arg(long, value_enum)]
+    pub cohort: Y1CohortArg,
+
+    /// Acceptance report emitted by materialize-y1-chr22 for this serving database/run/cohort
+    #[arg(long)]
+    pub acceptance: std::path::PathBuf,
+
+    /// Expected current run. Omit only together with --expect-no-current.
+    #[arg(long, conflicts_with = "expect_no_current")]
+    pub expected_current_run_id: Option<String>,
+
+    /// Expected current pointer revision. Required with --expected-current-run-id.
+    #[arg(long, requires = "expected_current_run_id")]
+    pub expected_current_revision: Option<u64>,
+
+    /// Explicitly assert that no current pointer exists
+    #[arg(long, conflicts_with_all = ["expected_current_run_id", "expected_current_revision"])]
+    pub expect_no_current: bool,
+
+    /// Human or service identity recorded in the append-only pointer ledger
+    #[arg(long)]
+    pub operator_identity: String,
+
+    /// Validate and emit the proposed change without appending a pointer revision
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Machine-readable activation or rollback report destination
     #[arg(long)]
     pub report: std::path::PathBuf,
 }
@@ -457,7 +536,8 @@ pub fn parse_region(region: &str) -> anyhow::Result<(String, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_region;
+    use super::{parse_region, Cli, Commands};
+    use clap::Parser;
 
     #[test]
     fn parses_and_normalizes_region() {
@@ -470,5 +550,71 @@ mod tests {
     #[test]
     fn rejects_reversed_region() {
         assert!(parse_region("chr22:21-20").is_err());
+    }
+
+    #[test]
+    fn parses_guarded_primary_activation_plan() {
+        let cli = Cli::try_parse_from([
+            "gnomad-lr",
+            "activate-y1-chr22",
+            "--endpoint",
+            "http://127.0.0.1:8123",
+            "--database",
+            "gnomad_lr_y1_serving_unit",
+            "--target-kind",
+            "serving",
+            "--auth-source",
+            "none",
+            "--allow-serving",
+            "--run-id",
+            "run-r2",
+            "--cohort",
+            "aou",
+            "--acceptance",
+            "acceptance.json",
+            "--expect-no-current",
+            "--operator-identity",
+            "unit-test",
+            "--dry-run",
+            "--report",
+            "activation.json",
+        ])
+        .unwrap();
+        let Commands::ActivateY1Chr22(args) = cli.command else {
+            panic!("expected primary activation command");
+        };
+        assert!(args.dry_run);
+        assert_eq!(args.run_id, "run-r2");
+        assert!(args.expect_no_current);
+        assert_eq!(args.acceptance, std::path::PathBuf::from("acceptance.json"));
+    }
+
+    #[test]
+    fn absence_rollback_requires_a_guarded_current_token() {
+        let result = Cli::try_parse_from([
+            "gnomad-lr",
+            "rollback-y1-chr22",
+            "--endpoint",
+            "http://127.0.0.1:8123",
+            "--database",
+            "gnomad_lr_y1_serving_unit",
+            "--target-kind",
+            "serving",
+            "--auth-source",
+            "none",
+            "--allow-serving",
+            "--run-id",
+            "run-r1",
+            "--restore-absence",
+            "--cohort",
+            "aou",
+            "--acceptance",
+            "acceptance.json",
+            "--operator-identity",
+            "unit-test",
+            "--report",
+            "rollback.json",
+        ]);
+        assert!(result.is_err());
     }
 }

@@ -13,7 +13,7 @@ compile_error!("gnomad-lr requires the default `clickhouse` feature");
 use clap::Parser;
 use cli::{
     parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
-    Y1InitArgs, Y1IntervalArgs, Y1TargetKindArg,
+    Y1InitArgs, Y1IntervalArgs, Y1MaterializeArgs, Y1PrimaryPointerArgs, Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
@@ -65,6 +65,21 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::write(&args.report, serde_json::to_vec_pretty(&report)?)?;
                 println!("{}", serde_json::to_string_pretty(&report)?);
                 Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+        }
+        Commands::MaterializeY1Chr22(args) => {
+            tokio::task::spawn_blocking(move || run_y1_materialization(args)).await??;
+        }
+        Commands::ActivateY1Chr22(args) => {
+            tokio::task::spawn_blocking(move || {
+                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Activate)
+            })
+            .await??;
+        }
+        Commands::RollbackY1Chr22(args) => {
+            tokio::task::spawn_blocking(move || {
+                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Rollback)
             })
             .await??;
         }
@@ -155,6 +170,70 @@ fn y1_target(args: &Y1InitArgs) -> anyhow::Result<y1::ClickHouseTarget> {
         args.allow_remote,
         args.allow_serving,
     )
+}
+
+fn cohort(value: Y1CohortArg) -> y1::Cohort {
+    match value {
+        Y1CohortArg::HgsvcHprc => y1::Cohort::HgsvcHprc,
+        Y1CohortArg::Aou => y1::Cohort::Aou,
+    }
+}
+
+fn run_y1_materialization(args: Y1MaterializeArgs) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let report = y1::materialize_serving_candidate(
+        &target,
+        &args.scratch_database,
+        &args.run_id,
+        cohort(args.cohort),
+        &args.operator_identity,
+    )?;
+    write_json_report(&args.report, &report)
+}
+
+fn run_y1_primary_pointer(
+    args: Y1PrimaryPointerArgs,
+    action: y1::PrimaryPointerAction,
+) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let acceptance: y1::ServingAcceptance =
+        serde_json::from_slice(&std::fs::read(&args.acceptance)?)?;
+    let expected = if args.expect_no_current {
+        y1::ExpectedPointer::Absent
+    } else {
+        y1::ExpectedPointer::Current {
+            run_id: args.expected_current_run_id.ok_or_else(|| anyhow::anyhow!(
+                "supply --expected-current-run-id/--expected-current-revision or --expect-no-current"
+            ))?,
+            revision: args.expected_current_revision.ok_or_else(|| anyhow::anyhow!(
+                "--expected-current-revision is required with --expected-current-run-id"
+            ))?,
+        }
+    };
+    let report = y1::change_primary_pointer(
+        &target,
+        &args.run_id,
+        cohort(args.cohort),
+        &acceptance,
+        &expected,
+        &args.operator_identity,
+        action,
+        args.restore_absence,
+        args.dry_run,
+    )?;
+    write_json_report(&args.report, &report)
+}
+
+fn write_json_report<T: serde::Serialize>(
+    path: &std::path::Path,
+    report: &T,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(report)?)?;
+    println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
 }
 
 fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
