@@ -3,6 +3,9 @@ use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::Url;
 use serde::Serialize;
 use std::net::IpAddr;
+use std::time::Duration;
+
+const CLICKHOUSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 const SCRATCH_DATABASE_PREFIX: &str = "gnomad_lr_y1_scratch_";
 const SERVING_DATABASE: &str = "gnomad_lr_y1_pilot";
@@ -164,7 +167,7 @@ impl ClickHouseTarget {
         parameters: &[(&str, &str)],
     ) -> anyhow::Result<()> {
         let response = self
-            .authorized(Client::new().post(self.request_url(parameters)?))?
+            .authorized(clickhouse_client()?.post(self.request_url(parameters)?))?
             .header("Content-Type", "text/plain")
             .body(query.to_string())
             .send()
@@ -174,7 +177,7 @@ impl ClickHouseTarget {
 
     pub fn query_text(&self, query: &str, parameters: &[(&str, &str)]) -> anyhow::Result<String> {
         let response = self
-            .authorized(Client::new().post(self.request_url(parameters)?))?
+            .authorized(clickhouse_client()?.post(self.request_url(parameters)?))?
             .header("Content-Type", "text/plain")
             .body(query.to_string())
             .send()
@@ -201,7 +204,7 @@ impl ClickHouseTarget {
         let mut url = self.request_url(&[])?;
         url.query_pairs_mut().append_pair("query", &query);
         let response = self
-            .authorized(Client::new().post(url))?
+            .authorized(clickhouse_client()?.post(url))?
             .header("Content-Type", "application/x-ndjson")
             .body(body)
             .send()
@@ -242,6 +245,14 @@ impl ClickHouseTarget {
             }
         }
     }
+}
+
+fn clickhouse_client() -> anyhow::Result<Client> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(CLICKHOUSE_REQUEST_TIMEOUT)
+        .build()
+        .context("failed to build ClickHouse HTTP client")
 }
 
 fn endpoint_is_private(endpoint: &Url) -> bool {
