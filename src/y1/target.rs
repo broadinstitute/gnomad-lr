@@ -8,6 +8,7 @@ use std::time::Duration;
 const CLICKHOUSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 const SCRATCH_DATABASE_PREFIX: &str = "gnomad_lr_y1_scratch_";
+const FULL_PROTOTYPE_SCRATCH_DATABASE_PREFIX: &str = "gnomad_lr_y1_full_prototype_scratch_";
 const SERVING_DATABASE: &str = "gnomad_lr_y1_pilot";
 const SERVING_DATABASE_PREFIX: &str = "gnomad_lr_y1_serving_";
 
@@ -86,8 +87,13 @@ impl ClickHouseTarget {
             bail!("the default ClickHouse database is forbidden for Y1");
         }
         match kind {
-            TargetKind::Scratch if !database.starts_with(SCRATCH_DATABASE_PREFIX) => {
-                bail!("Y1 scratch database must start with {SCRATCH_DATABASE_PREFIX}")
+            TargetKind::Scratch
+                if !database.starts_with(SCRATCH_DATABASE_PREFIX)
+                    && !database.starts_with(FULL_PROTOTYPE_SCRATCH_DATABASE_PREFIX) =>
+            {
+                bail!(
+                    "Y1 scratch database must start with {SCRATCH_DATABASE_PREFIX} or {FULL_PROTOTYPE_SCRATCH_DATABASE_PREFIX}"
+                )
             }
             TargetKind::Serving
                 if database != SERVING_DATABASE
@@ -99,7 +105,10 @@ impl ClickHouseTarget {
             }
             _ => {}
         }
-        if database == SCRATCH_DATABASE_PREFIX || database == SERVING_DATABASE_PREFIX {
+        if database == SCRATCH_DATABASE_PREFIX
+            || database == FULL_PROTOTYPE_SCRATCH_DATABASE_PREFIX
+            || database == SERVING_DATABASE_PREFIX
+        {
             bail!("Y1 database prefix must have a non-empty suffix");
         }
         if kind == TargetKind::Serving && !allow_serving {
@@ -333,6 +342,26 @@ mod tests {
         let target = scratch("http://127.0.0.1:8123", "gnomad_lr_y1_scratch_unit").unwrap();
         assert_eq!(target.database(), "gnomad_lr_y1_scratch_unit");
         assert_eq!(target.kind(), TargetKind::Scratch);
+
+        let full_prototype = scratch(
+            "http://127.0.0.1:8123",
+            "gnomad_lr_y1_full_prototype_scratch_v1",
+        )
+        .unwrap();
+        assert_eq!(
+            full_prototype.database(),
+            "gnomad_lr_y1_full_prototype_scratch_v1"
+        );
+        assert!(scratch(
+            "http://127.0.0.1:8123",
+            "gnomad_lr_y1_full_prototype_scratch_"
+        )
+        .is_err());
+        assert!(scratch(
+            "http://127.0.0.1:8123",
+            "prefix_gnomad_lr_y1_full_prototype_scratch_v1"
+        )
+        .is_err());
     }
 
     #[test]
