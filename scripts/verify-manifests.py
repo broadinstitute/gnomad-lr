@@ -104,6 +104,12 @@ for table in ["lr_y1_methylation_staging", "lr_y1_methylation"]:
     ddl = (y1_sql_dir / f"{table}.sql").read_text()
     assert all(measure in ddl for measure in source_measures)
     assert "combined" in ddl.lower() or "Total" in ddl
+for nullable_migration in [
+    '("estimated_modified_count", "Nullable(UInt32)")',
+    '("estimated_unmodified_count", "Nullable(UInt32)")',
+    '("discretized_methylation", "Nullable(Float32)")',
+]:
+    assert nullable_migration in storage, "existing v3 rows must not receive synthetic source-measure zeroes"
 
 for table in ["lr_y1_methylation_phased_staging", "lr_y1_methylation_phased"]:
     ddl = (y1_sql_dir / f"{table}.sql").read_text()

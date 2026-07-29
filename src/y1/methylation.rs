@@ -243,32 +243,32 @@ impl Y1MethylationTaskSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImmutableObjectIdentity {
-    pub uri: String,
-    pub generation: String,
-    pub byte_size: u64,
-    pub checksum_algorithm: String,
-    pub checksum: String,
-    pub created_at: String,
-    pub immutable_read_uri: String,
+    uri: String,
+    generation: String,
+    byte_size: u64,
+    checksum_algorithm: String,
+    checksum: String,
+    created_at: String,
+    immutable_read_uri: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PreparedMethylationAttempt {
-    pub ancillary_run_id: String,
-    pub task_id: String,
-    pub attempt_id: String,
-    pub lease_id: String,
-    pub source_manifest_hash: String,
-    pub manifest_entry_id: String,
-    pub sample_id: String,
-    pub data_layer: MethylationDataLayer,
-    pub source_haplotype: Option<SourceHaplotype>,
-    pub expected_type: MethylationSourceType,
-    pub chrom: String,
-    pub start: u32,
-    pub stop: u32,
-    pub source: ImmutableObjectIdentity,
-    pub index: ImmutableObjectIdentity,
+    ancillary_run_id: String,
+    task_id: String,
+    attempt_id: String,
+    lease_id: String,
+    source_manifest_hash: String,
+    manifest_entry_id: String,
+    sample_id: String,
+    data_layer: MethylationDataLayer,
+    source_haplotype: Option<SourceHaplotype>,
+    expected_type: MethylationSourceType,
+    chrom: String,
+    start: u32,
+    stop: u32,
+    source: ImmutableObjectIdentity,
+    index: ImmutableObjectIdentity,
 }
 
 /// Resolve a typed task against the checked immutable manifest. This performs
@@ -330,6 +330,13 @@ pub fn prepare_methylation_attempt(
             .unwrap_or_else(|| "unspecified manifest readiness blocker".to_string());
         bail!("methylation v2 source is not load-ready: {blockers}");
     }
+    // Shape validation of repository metadata is not runtime object validation.
+    // Keep even a hand-edited/rehashed load_authorized manifest blocked until a
+    // concrete GCS implementation revalidates metadata and binds both reads to
+    // the declared generations without a check/read TOCTOU gap.
+    if !runtime_immutable_reads_enabled() {
+        bail!("Y1 methylation runtime generation/size/checksum verification and generation-bound reads are not implemented");
+    }
 
     let entry = manifest
         .get("samples")
@@ -387,6 +394,10 @@ pub fn prepare_methylation_attempt(
         source,
         index,
     })
+}
+
+fn runtime_immutable_reads_enabled() -> bool {
+    false
 }
 
 fn resolve_immutable_object(
@@ -708,6 +719,38 @@ mod tests {
         assert!(message.contains("frozen Terra LR_sample entity snapshot"));
         assert!(message.contains("generation-pinned combined BED indexes"));
         assert!(message.contains("generation-bound read URIs"));
+    }
+
+    #[test]
+    fn rehashed_load_authorized_manifest_still_cannot_bypass_runtime_identity_gate() {
+        let source_path = Path::new("sources/y1/methylation-phased-source-manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(source_path).unwrap()).unwrap();
+        manifest.as_object_mut().unwrap().remove("content_sha256");
+        manifest["load_readiness"] = serde_json::json!({
+            "status": "load_ready",
+            "load_authorized": true,
+            "blockers": [],
+        });
+        let hash = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&manifest).unwrap())
+        );
+        manifest["content_sha256"] = Value::String(hash.clone());
+        let path = std::env::temp_dir().join(format!(
+            "gnomad-lr-methylation-runtime-gate-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let mut forged_task = task();
+        forged_task.source_manifest_hash = hash;
+        let error =
+            prepare_methylation_attempt(&scratch_target(), &forged_task, "descriptor-1", &path)
+                .unwrap_err();
+        std::fs::remove_file(path).unwrap();
+        assert!(error
+            .to_string()
+            .contains("runtime generation/size/checksum verification"));
     }
 
     #[test]

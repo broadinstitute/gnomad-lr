@@ -197,6 +197,22 @@ if v2["load_readiness"]["load_authorized"]:
             assert immutable["generation"].isdigit() and immutable["byte_size"] > 0
             assert immutable["checksum"]["algorithm"] != "none" and immutable["checksum"]["value"]
             assert immutable["immutable_read_uri"] != immutable["uri"]
+elif v2["terra_entity_snapshot"]["status"] == "frozen_normalized_snapshot_complete":
+    assert v2["load_readiness"]["status"] == "blocked_pending_runtime_immutable_identity_verification"
+    assert v2["load_readiness"]["blockers"] == [
+        "runtime generation/size/checksum revalidation and generation-bound GCS reads are not implemented"
+    ]
+    assert v2["terra_entity_snapshot"]["captured_at"]
+    assert v2["terra_entity_snapshot"]["entity_snapshot_sha256"]
+    for entry in by_status["source_present"]:
+        assert entry["authorized_object_count"] == 0
+        for obj in entry["objects"].values():
+            immutable = obj["immutable_identity"]
+            assert obj["load_authorized"] is False
+            require_fields(immutable, {"uri", "generation", "byte_size", "checksum", "created_at", "immutable_read_uri"}, entry["entry_id"])
+            assert immutable["generation"].isdigit() and immutable["byte_size"] > 0
+            assert immutable["checksum"]["algorithm"] != "none" and immutable["checksum"]["value"]
+            assert immutable["immutable_read_uri"] != immutable["uri"]
 else:
     assert v2["load_readiness"]["status"] == "blocked_missing_immutable_source_metadata"
     assert len(v2["load_readiness"]["blockers"]) == 3

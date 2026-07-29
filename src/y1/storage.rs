@@ -204,10 +204,15 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
                 "ALTER TABLE {table} MODIFY COLUMN coverage UInt32"
             ))
             .with_context(|| format!("failed to widen {table}.coverage to UInt32"))?;
+        // Existing schema-v3 rows never loaded these source measures. Add them
+        // nullable in place so ClickHouse cannot fabricate numeric zeroes for
+        // historical parts. Fresh schema-v4 tables use the required non-null
+        // types; a later publisher must reload/reconcile old data before a
+        // nullable migration column can be promoted.
         for (column, column_type) in [
-            ("estimated_modified_count", "UInt32"),
-            ("estimated_unmodified_count", "UInt32"),
-            ("discretized_methylation", "Float32"),
+            ("estimated_modified_count", "Nullable(UInt32)"),
+            ("estimated_unmodified_count", "Nullable(UInt32)"),
+            ("discretized_methylation", "Nullable(Float32)"),
         ] {
             target
                 .execute(&format!(

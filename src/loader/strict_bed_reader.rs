@@ -67,16 +67,16 @@ impl StrictBedStream {
             .query(ref_seq_id, interval)
             .with_context(|| format!("failed to query tabix chunks for {chrom}:{start}-{stop}"))?;
 
+        // Open synchronously even for a zero-chunk query. A successful zero-row
+        // receipt still attests that the declared source object was openable;
+        // missing/revoked sources must never be converted to clean EOF.
+        let reader = open_bed_source(bed_path)?;
         if chunks.is_empty() {
             info!("strict BED: no chunks for {chrom}:{start}-{stop}");
             return Ok(Self {
                 lines: StrictBedLines::completed(),
             });
         }
-
-        // Open synchronously: a missing/unreadable source cannot disappear in a
-        // detached worker before the caller receives an attempt failure.
-        let reader = open_bed_source(bed_path)?;
         let chrom = chrom.to_string();
         let source_start0 = start - 1;
         let source_end0 = stop;
@@ -254,7 +254,9 @@ fn load_tabix_index(index_path: &str) -> anyhow::Result<tabix::Index> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use noodles::core::Position;
+    use noodles::csi::binning_index::index::reference_sequence::bin::Chunk;
+    use std::io::{Cursor, Write};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -275,6 +277,43 @@ mod tests {
             stream_records(&mut Cursor::new(owned), sender, "chr22", 99, 200)
         })
         .collect()
+    }
+
+    fn indexed_fixture(label: &str) -> (PathBuf, PathBuf) {
+        let bed_path = temp_path(label).with_extension("bed.gz");
+        let index_path = PathBuf::from(format!("{}.tbi", bed_path.display()));
+        let file = std::fs::File::create(&bed_path).unwrap();
+        let mut writer = bgzf::Writer::new(file);
+        let mut indexer = tabix::index::Indexer::default();
+        indexer.set_header(noodles::csi::binning_index::index::header::Builder::bed().build());
+        let records = [(99u32, 100u32, "first"), (149u32, 150u32, "second")];
+        let mut chunk_start = writer.virtual_position();
+        for (start0, end0, value) in records {
+            writeln!(writer, "chr22\t{start0}\t{end0}\t{value}").unwrap();
+            // Force each indexed record across a real BGZF block boundary.
+            writer.flush().unwrap();
+            let chunk_end = writer.virtual_position();
+            indexer
+                .add_record(
+                    "chr22",
+                    Position::try_from((start0 + 1) as usize).unwrap(),
+                    Position::try_from(end0 as usize).unwrap(),
+                    Chunk::new(chunk_start, chunk_end),
+                )
+                .unwrap();
+            chunk_start = chunk_end;
+        }
+        writer.finish().unwrap();
+        let index = indexer.build();
+        let file = std::fs::File::create(&index_path).unwrap();
+        let mut index_writer = tabix::io::Writer::new(file);
+        index_writer.write_index(&index).unwrap();
+        (bed_path, index_path)
+    }
+
+    fn remove_fixture(bed_path: &PathBuf, index_path: &PathBuf) {
+        let _ = std::fs::remove_file(bed_path);
+        let _ = std::fs::remove_file(index_path);
     }
 
     #[test]
@@ -323,6 +362,68 @@ mod tests {
             .to_string()
             .contains("worker panicked"));
         assert!(panic_failure.next().is_none());
+    }
+
+    #[test]
+    fn real_bgzf_tabix_blocks_return_each_boundary_key_exactly_once() {
+        let (bed_path, index_path) = indexed_fixture("boundary");
+        let rows: anyhow::Result<Vec<_>> = StrictBedStream::open_region(
+            bed_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            100,
+            150,
+        )
+        .unwrap()
+        .records()
+        .collect();
+        remove_fixture(&bed_path, &index_path);
+        assert_eq!(
+            rows.unwrap(),
+            [
+                "chr22\t99\t100\tfirst".to_string(),
+                "chr22\t149\t150\tsecond".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn real_corrupt_bgzf_error_propagates_through_the_indexed_query() {
+        let (bed_path, index_path) = indexed_fixture("corrupt-bgzf");
+        let source_len = std::fs::metadata(&bed_path).unwrap().len() as usize;
+        std::fs::write(&bed_path, vec![0u8; source_len]).unwrap();
+        let result: anyhow::Result<Vec<_>> = StrictBedStream::open_region(
+            bed_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            100,
+            150,
+        )
+        .unwrap()
+        .records()
+        .collect();
+        remove_fixture(&bed_path, &index_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zero_chunk_query_still_opens_the_declared_source() {
+        let (bed_path, index_path) = indexed_fixture("empty-region");
+        std::fs::remove_file(&bed_path).unwrap();
+        let error = match StrictBedStream::open_region(
+            bed_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            10_000,
+            20_000,
+        ) {
+            Ok(_) => panic!("missing zero-chunk source unexpectedly returned clean EOF"),
+            Err(error) => error,
+        };
+        let _ = std::fs::remove_file(index_path);
+        assert!(error
+            .to_string()
+            .contains("failed to open strict BED source"));
     }
 
     #[test]

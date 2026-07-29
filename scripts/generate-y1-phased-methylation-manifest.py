@@ -133,7 +133,15 @@ def immutable_object(value: Any, label: str, expected_uri: str | None = None) ->
     if not isinstance(value["byte_size"], int) or value["byte_size"] <= 0:
         raise SystemExit(f"{label}: byte_size must be positive")
     checksum = value["checksum"]
-    if not isinstance(checksum, dict) or set(checksum) != {"algorithm", "value"} or checksum["algorithm"] == "none" or not checksum["value"]:
+    if (
+        not isinstance(checksum, dict)
+        or set(checksum) != {"algorithm", "value"}
+        or not isinstance(checksum["algorithm"], str)
+        or not checksum["algorithm"]
+        or checksum["algorithm"] == "none"
+        or not isinstance(checksum["value"], str)
+        or not checksum["value"]
+    ):
         raise SystemExit(f"{label}: checksum must be complete")
     if not isinstance(value["created_at"], str) or not value["created_at"]:
         raise SystemExit(f"{label}: created_at must be nonempty")
@@ -233,9 +241,11 @@ def generate(discovery_path: Path, roster_path: Path, historical_path: Path, ter
         if set(immutable) != discovery_ids:
             raise SystemExit("normalized Terra snapshot did not resolve all 231 source-present samples")
         readiness = {
-            "status": "load_ready_for_isolated_raw_and_total_staging_only",
-            "load_authorized": True,
-            "blockers": [],
+            "status": "blocked_pending_runtime_immutable_identity_verification",
+            "load_authorized": False,
+            "blockers": [
+                "runtime generation/size/checksum revalidation and generation-bound GCS reads are not implemented"
+            ],
         }
 
     entries = []
@@ -253,13 +263,14 @@ def generate(discovery_path: Path, roster_path: Path, historical_path: Path, ter
             reason = "sample is in the 292-sample roster but absent from the complete phased source inventory"
             discovered = {}
         resolved = immutable.get(sample_id, {})
+        runtime_authorized = readiness["load_authorized"]
         objects = {}
         for slot, source_field in OBJECT_SLOTS.items():
             objects[slot] = {
                 "source_field": source_field,
                 "discovery_uri": discovered.get(slot),
                 "immutable_identity": resolved.get(slot),
-                "load_authorized": slot in resolved,
+                "load_authorized": runtime_authorized and slot in resolved,
             }
         entries.append({
             "entry_id": f"hgsvc_hprc:{sample_id}",
@@ -269,7 +280,7 @@ def generate(discovery_path: Path, roster_path: Path, historical_path: Path, ter
             "coordinate_convention": "GRCh38 BED 0-based half-open [start0,end0); canonical position=start0+1",
             "source_schema": "exact nine columns: chrom,start0,end0,mod_score,type,coverage,estimated_modified_count,estimated_unmodified_count,discretized_mod_score",
             "objects": objects,
-            "authorized_object_count": len(resolved),
+            "authorized_object_count": len(resolved) if runtime_authorized else 0,
         })
 
     payload: dict[str, Any] = {
