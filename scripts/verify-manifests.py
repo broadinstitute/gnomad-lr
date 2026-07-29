@@ -88,9 +88,9 @@ assert "ORDER BY (release, cohort, reference_genome, modality)" in active_ancill
 storage = (ROOT / "src" / "y1" / "storage.rs").read_text()
 assert "pub const Y1_SCHEMA_VERSION: u16 = 4;" in storage
 assert 'include_str!("../../sql/y1/lr_y1_schema_versions.sql")' in storage
-assert "preflight_methylation_v4_upgrade(target)?;" in storage
+assert "preflight_methylation_v4_upgrade(backend)?;" in storage
 assert "refusing ambiguous Y1 schema-v4 migration" in storage
-assert "phased_methylation_d0_no_synthetic_measure_backfill" in storage
+assert "phased_methylation_v4_exact_schema_empty_upgrade_no_synthetic_identity" in storage
 for table in [
     "lr_y1_methylation_phased_staging",
     "lr_y1_methylation_phased",
@@ -109,12 +109,15 @@ for table in ["lr_y1_methylation_staging", "lr_y1_methylation"]:
     ddl = (y1_sql_dir / f"{table}.sql").read_text()
     assert all(measure in ddl for measure in source_measures)
     assert "combined" in ddl.lower() or "Total" in ddl
-for nullable_migration in [
-    '("estimated_modified_count", "Nullable(UInt32)")',
-    '("estimated_unmodified_count", "Nullable(UInt32)")',
-    '("discretized_methylation", "Nullable(Float32)")',
+for exact_empty_migration in [
+    '("estimated_modified_count", "UInt32")',
+    '("estimated_unmodified_count", "UInt32")',
+    '("discretized_methylation", "Float32")',
 ]:
-    assert nullable_migration in storage, "existing v3 rows must not receive synthetic source-measure zeroes"
+    assert exact_empty_migration in storage, "empty v3 upgrades must match fresh non-null v4 types"
+assert "require_empty_upgrade_tables" in storage
+assert "validate_exact_methylation_v4_schema" in storage
+assert "no_synthetic_identity" in storage
 
 for table in ["lr_y1_methylation_phased_staging", "lr_y1_methylation_phased"]:
     ddl = (y1_sql_dir / f"{table}.sql").read_text()

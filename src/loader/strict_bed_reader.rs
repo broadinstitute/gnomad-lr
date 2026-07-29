@@ -8,7 +8,7 @@ use genohype_core::io::get_reader;
 use noodles::bgzf;
 use noodles::csi::BinningIndex;
 use noodles::tabix;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::JoinHandle;
@@ -20,6 +20,32 @@ enum StreamMessage {
     Done,
 }
 
+/// Coordinates returned only after a source-specific validator has accepted
+/// the complete row shape and all typed invariants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedBedRecord {
+    pub chrom: String,
+    pub start0: u32,
+    pub end0: u32,
+}
+
+/// Source-specific contract applied before interval spill filtering.
+///
+/// This prevents the indexed reader from silently discarding a malformed row
+/// merely because its coordinates lie outside the requested interval.
+pub trait StrictBedRecordValidator: Send + 'static {
+    fn validate(&self, line: &str) -> anyhow::Result<ValidatedBedRecord>;
+}
+
+impl<F> StrictBedRecordValidator for F
+where
+    F: Fn(&str) -> anyhow::Result<ValidatedBedRecord> + Send + 'static,
+{
+    fn validate(&self, line: &str) -> anyhow::Result<ValidatedBedRecord> {
+        self(line)
+    }
+}
+
 /// A strict, error-bearing stream of raw non-comment BED records.
 pub struct StrictBedStream {
     lines: StrictBedLines,
@@ -28,13 +54,17 @@ pub struct StrictBedStream {
 impl StrictBedStream {
     /// Open an explicitly indexed BED source for a one-based inclusive browser
     /// interval. The equivalent BED interval is `[start - 1, stop)`.
-    pub fn open_region(
+    pub fn open_region<V>(
         bed_path: &str,
         index_path: &str,
         chrom: &str,
         start: u32,
         stop: u32,
-    ) -> anyhow::Result<Self> {
+        validator: V,
+    ) -> anyhow::Result<Self>
+    where
+        V: StrictBedRecordValidator,
+    {
         if start == 0 || start > stop {
             bail!("browser interval must be nonempty and one-based inclusive");
         }
@@ -72,7 +102,10 @@ impl StrictBedStream {
         // missing/revoked sources must never be converted to clean EOF.
         let reader = open_bed_source(bed_path)?;
         if chunks.is_empty() {
-            info!("strict BED: no chunks for {chrom}:{start}-{stop}");
+            validate_zero_chunk_source(reader, &index, &validator).with_context(|| {
+                format!("zero-chunk source/index validation failed for {chrom}:{start}-{stop}")
+            })?;
+            info!("strict BED: validated source/index with no chunks for {chrom}:{start}-{stop}");
             return Ok(Self {
                 lines: StrictBedLines::completed(),
             });
@@ -84,7 +117,14 @@ impl StrictBedStream {
             let mut bgzf_data = bgzf::Reader::new(reader);
             let query = noodles::csi::io::Query::new(&mut bgzf_data, chunks);
             let mut buffered = BufReader::new(query);
-            stream_records(&mut buffered, sender, &chrom, source_start0, source_end0)
+            stream_records(
+                &mut buffered,
+                sender,
+                &chrom,
+                source_start0,
+                source_end0,
+                &validator,
+            )
         });
         Ok(Self { lines })
     }
@@ -182,13 +222,80 @@ impl Drop for StrictBedLines {
     }
 }
 
-fn stream_records<R: BufRead>(
+fn validate_zero_chunk_source<R, V>(
+    reader: R,
+    index: &tabix::Index,
+    validator: &V,
+) -> anyhow::Result<()>
+where
+    R: Read,
+    V: StrictBedRecordValidator,
+{
+    let mut reader = BufReader::new(bgzf::Reader::new(reader));
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        let count = reader
+            .read_until(b'\n', &mut bytes)
+            .context("zero-chunk BGZF validation read failed")?;
+        if count == 0 {
+            if reader.get_ref().virtual_position().compressed() == 0 {
+                bail!("zero-chunk source is empty or lacks a decodable BGZF container");
+            }
+            if index.last_first_record_start_position().is_some() {
+                bail!("tabix index advertises records but the BGZF source has none");
+            }
+            return Ok(());
+        }
+        if !bytes.ends_with(b"\n") {
+            bail!("truncated nonempty BED line in zero-chunk BGZF source");
+        }
+        bytes.pop();
+        if bytes.ends_with(b"\r") {
+            bytes.pop();
+        }
+        if bytes.is_empty() {
+            continue;
+        }
+        let line = std::str::from_utf8(&bytes).context("BED line is not valid UTF-8")?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let record = validator.validate(line)?;
+        if index.last_first_record_start_position().is_none() {
+            bail!("BGZF source has records but the tabix index advertises none");
+        }
+        let indexed_chrom = index
+            .header()
+            .expect("open_region requires a tabix header")
+            .reference_sequence_names()
+            .iter()
+            .any(|name| {
+                let bytes: &[u8] = name.as_ref();
+                bytes == record.chrom.as_bytes()
+            });
+        if !indexed_chrom {
+            bail!(
+                "first BGZF source record chromosome {} is absent from the tabix index",
+                record.chrom
+            );
+        }
+        return Ok(());
+    }
+}
+
+fn stream_records<R, V>(
     reader: &mut R,
     sender: &SyncSender<StreamMessage>,
     expected_chrom: &str,
     source_start0: u32,
     source_end0: u32,
-) -> anyhow::Result<()> {
+    validator: &V,
+) -> anyhow::Result<()>
+where
+    R: BufRead,
+    V: StrictBedRecordValidator,
+{
     let mut bytes = Vec::new();
     loop {
         bytes.clear();
@@ -214,22 +321,13 @@ fn stream_records<R: BufRead>(
             continue;
         }
 
-        let mut fields = line.splitn(4, '\t');
-        let chrom = fields.next().unwrap_or_default();
-        let start0 = fields
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("nonempty BED line has no start0 column"))?
-            .parse::<u32>()
-            .context("BED start0 is not a UInt32")?;
-        let end0 = fields
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("nonempty BED line has no end0 column"))?
-            .parse::<u32>()
-            .context("BED end0 is not a UInt32")?;
-        if end0 <= start0 {
-            bail!("BED interval must have end0 greater than start0");
-        }
-        if chrom != expected_chrom || start0 < source_start0 || start0 >= source_end0 {
+        // Validate the entire source-specific record before considering whether
+        // it is an off-interval chunk spill row.
+        let record = validator.validate(line)?;
+        if record.chrom != expected_chrom
+            || record.start0 < source_start0
+            || record.start0 >= source_end0
+        {
             continue;
         }
         sender
@@ -254,6 +352,7 @@ fn load_tabix_index(index_path: &str) -> anyhow::Result<tabix::Index> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::y1::methylation::{parse_methylation_source_record, MethylationSourceType};
     use noodles::core::Position;
     use noodles::csi::binning_index::index::reference_sequence::bin::Chunk;
     use std::io::{Cursor, Write};
@@ -271,33 +370,57 @@ mod tests {
         ))
     }
 
+    fn total_validator() -> impl StrictBedRecordValidator {
+        |line: &str| {
+            let record = parse_methylation_source_record(line)?;
+            if record.source_type != MethylationSourceType::Total {
+                bail!("fixture source type is not Total");
+            }
+            Ok(ValidatedBedRecord {
+                chrom: record.chrom,
+                start0: record.source_start0,
+                end0: record.source_end0,
+            })
+        }
+    }
+
     fn collect_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
         let owned = bytes.to_vec();
         StrictBedLines::spawn(move |sender| {
-            stream_records(&mut Cursor::new(owned), sender, "chr22", 99, 200)
+            stream_records(
+                &mut Cursor::new(owned),
+                sender,
+                "chr22",
+                99,
+                200,
+                &total_validator(),
+            )
         })
         .collect()
     }
 
-    fn indexed_fixture(label: &str) -> (PathBuf, PathBuf) {
+    fn indexed_fixture_with_records(
+        label: &str,
+        index_chrom: &str,
+        records: &[(u32, u32, &str)],
+    ) -> (PathBuf, PathBuf) {
         let bed_path = temp_path(label).with_extension("bed.gz");
         let index_path = PathBuf::from(format!("{}.tbi", bed_path.display()));
         let file = std::fs::File::create(&bed_path).unwrap();
         let mut writer = bgzf::Writer::new(file);
         let mut indexer = tabix::index::Indexer::default();
         indexer.set_header(noodles::csi::binning_index::index::header::Builder::bed().build());
-        let records = [(99u32, 100u32, "first"), (149u32, 150u32, "second")];
         let mut chunk_start = writer.virtual_position();
-        for (start0, end0, value) in records {
-            writeln!(writer, "chr22\t{start0}\t{end0}\t{value}").unwrap();
+        for (start0, end0, line) in records {
+            writeln!(writer, "{line}").unwrap();
             // Force each indexed record across a real BGZF block boundary.
             writer.flush().unwrap();
             let chunk_end = writer.virtual_position();
             indexer
                 .add_record(
-                    "chr22",
-                    Position::try_from((start0 + 1) as usize).unwrap(),
-                    Position::try_from(end0 as usize).unwrap(),
+                    index_chrom,
+                    Position::try_from((*start0 + 1) as usize).unwrap(),
+                    Position::try_from(*end0 as usize).unwrap(),
                     Chunk::new(chunk_start, chunk_end),
                 )
                 .unwrap();
@@ -311,6 +434,17 @@ mod tests {
         (bed_path, index_path)
     }
 
+    fn indexed_fixture(label: &str) -> (PathBuf, PathBuf) {
+        indexed_fixture_with_records(
+            label,
+            "chr22",
+            &[
+                (99, 100, "chr22\t99\t100\t80\tTotal\t2\t1\t1\t50"),
+                (149, 150, "chr22\t149\t150\t25\tTotal\t4\t1\t3\t25"),
+            ],
+        )
+    }
+
     fn remove_fixture(bed_path: &PathBuf, index_path: &PathBuf) {
         let _ = std::fs::remove_file(bed_path);
         let _ = std::fs::remove_file(index_path);
@@ -318,26 +452,82 @@ mod tests {
 
     #[test]
     fn exact_empty_chunk_separator_is_ignored_without_losing_or_duplicating_keys() {
-        let input = b"#header\nchr22\t99\t100\t1\n\nchr22\t149\t150\t2\nchr22\t200\t201\toutside\n";
+        let input = b"#header\nchr22\t99\t100\t80\tTotal\t2\t1\t1\t50\n\nchr22\t149\t150\t25\tTotal\t4\t1\t3\t25\nchr22\t200\t201\t50\tTotal\t2\t1\t1\t50\n";
         let rows = collect_from_bytes(input).unwrap();
         assert_eq!(
             rows,
             vec![
-                "chr22\t99\t100\t1".to_string(),
-                "chr22\t149\t150\t2".to_string(),
+                "chr22\t99\t100\t80\tTotal\t2\t1\t1\t50".to_string(),
+                "chr22\t149\t150\t25\tTotal\t4\t1\t3\t25".to_string(),
             ]
         );
     }
 
     #[test]
     fn truncated_and_malformed_nonempty_lines_propagate() {
-        let truncated = collect_from_bytes(b"chr22\t99\t100\t1").unwrap_err();
+        let truncated = collect_from_bytes(b"chr22\t99\t100\t80\tTotal\t2\t1\t1\t50").unwrap_err();
         assert!(truncated
             .to_string()
             .contains("truncated nonempty BED line"));
 
-        let malformed = collect_from_bytes(b"chr22\tnot-a-position\t100\t1\n").unwrap_err();
-        assert!(malformed.to_string().contains("BED start0 is not a UInt32"));
+        let malformed = collect_from_bytes(b"chr22\tnot-a-position\t100\t80\tTotal\t2\t1\t1\t50\n")
+            .unwrap_err();
+        assert!(malformed
+            .to_string()
+            .contains("methylation start0 is not a UInt32"));
+    }
+
+    #[test]
+    fn malformed_four_eight_and_ten_field_spill_rows_fail_before_filtering() {
+        let malformed = [
+            // Before, inside, and after the requested [99, 200) start range.
+            "chr22\t98\t99\t80",
+            "chr22\t149\t150\t80\tTotal\t2\t1\t1",
+            "chr22\t200\t201\t80\tTotal\t2\t1\t1\t50\textra",
+        ];
+        for line in malformed {
+            let input = format!("{line}\n");
+            let error = collect_from_bytes(input.as_bytes()).unwrap_err();
+            assert!(
+                error.to_string().contains("exactly nine"),
+                "unexpected error for {line}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_rows_at_real_bgzf_chunk_boundaries_are_not_discarded() {
+        for (label, malformed) in [
+            ("four", "chr22\t149\t150\t80"),
+            ("eight", "chr22\t149\t150\t80\tTotal\t2\t1\t1"),
+            ("ten", "chr22\t149\t150\t80\tTotal\t2\t1\t1\t50\textra"),
+        ] {
+            let fixture_label = format!("malformed-boundary-{label}");
+            let (bed_path, index_path) = indexed_fixture_with_records(
+                &fixture_label,
+                "chr22",
+                &[
+                    (99, 100, "chr22\t99\t100\t80\tTotal\t2\t1\t1\t50"),
+                    (149, 150, malformed),
+                ],
+            );
+            let result: anyhow::Result<Vec<_>> = StrictBedStream::open_region(
+                bed_path.to_str().unwrap(),
+                index_path.to_str().unwrap(),
+                "chr22",
+                100,
+                150,
+                total_validator(),
+            )
+            .unwrap()
+            .records()
+            .collect();
+            remove_fixture(&bed_path, &index_path);
+            assert!(
+                result.unwrap_err().to_string().contains("exactly nine"),
+                "malformed {label}-field boundary row was not rejected"
+            );
+        }
     }
 
     #[test]
@@ -373,6 +563,7 @@ mod tests {
             "chr22",
             100,
             150,
+            total_validator(),
         )
         .unwrap()
         .records()
@@ -381,8 +572,8 @@ mod tests {
         assert_eq!(
             rows.unwrap(),
             [
-                "chr22\t99\t100\tfirst".to_string(),
-                "chr22\t149\t150\tsecond".to_string(),
+                "chr22\t99\t100\t80\tTotal\t2\t1\t1\t50".to_string(),
+                "chr22\t149\t150\t25\tTotal\t4\t1\t3\t25".to_string(),
             ]
         );
     }
@@ -398,12 +589,76 @@ mod tests {
             "chr22",
             100,
             150,
+            total_validator(),
         )
         .unwrap()
         .records()
         .collect();
         remove_fixture(&bed_path, &index_path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn valid_zero_chunk_query_decodes_bgzf_and_returns_no_rows() {
+        let (bed_path, index_path) = indexed_fixture("valid-empty-region");
+        let rows: Vec<_> = StrictBedStream::open_region(
+            bed_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            10_000_000,
+            10_010_000,
+            total_validator(),
+        )
+        .unwrap()
+        .records()
+        .collect::<anyhow::Result<_>>()
+        .unwrap();
+        remove_fixture(&bed_path, &index_path);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn corrupt_bgzf_is_rejected_even_when_the_valid_index_returns_zero_chunks() {
+        let (bed_path, index_path) = indexed_fixture("corrupt-empty-region");
+        let source_len = std::fs::metadata(&bed_path).unwrap().len() as usize;
+        std::fs::write(&bed_path, vec![0u8; source_len]).unwrap();
+        let error = match StrictBedStream::open_region(
+            bed_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            10_000_000,
+            10_010_000,
+            total_validator(),
+        ) {
+            Ok(_) => panic!("corrupt zero-chunk source unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        remove_fixture(&bed_path, &index_path);
+        assert!(error.to_string().contains("zero-chunk source/index"));
+    }
+
+    #[test]
+    fn zero_chunk_query_rejects_a_source_index_chromosome_mismatch() {
+        let (source_path, source_index) = indexed_fixture_with_records(
+            "mismatch-source",
+            "chr21",
+            &[(99, 100, "chr21\t99\t100\t80\tTotal\t2\t1\t1\t50")],
+        );
+        let (indexed_source, index_path) = indexed_fixture("mismatch-index");
+        let error = match StrictBedStream::open_region(
+            source_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            10_000_000,
+            10_010_000,
+            total_validator(),
+        ) {
+            Ok(_) => panic!("mismatched zero-chunk source/index unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        remove_fixture(&source_path, &source_index);
+        remove_fixture(&indexed_source, &index_path);
+        assert!(format!("{error:#}").contains("absent from the tabix index"));
     }
 
     #[test]
@@ -414,8 +669,9 @@ mod tests {
             bed_path.to_str().unwrap(),
             index_path.to_str().unwrap(),
             "chr22",
-            10_000,
-            20_000,
+            10_000_000,
+            10_010_000,
+            total_validator(),
         ) {
             Ok(_) => panic!("missing zero-chunk source unexpectedly returned clean EOF"),
             Err(error) => error,
@@ -444,6 +700,7 @@ mod tests {
             "chr22",
             100,
             200,
+            total_validator(),
         ) {
             Ok(_) => panic!("missing index unexpectedly opened"),
             Err(error) => error,

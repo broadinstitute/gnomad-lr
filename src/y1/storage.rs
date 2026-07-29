@@ -3,9 +3,467 @@ use super::model::*;
 use super::target::{ClickHouseTarget, TargetKind};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const Y1_SCHEMA_VERSION: u16 = 4;
+
+const METHYLATION_V4_CONTRACT: &str =
+    "phased_methylation_v4_exact_schema_empty_upgrade_no_synthetic_identity";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ColumnContract {
+    name: &'static str,
+    column_type: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TableContract {
+    name: &'static str,
+    engine: &'static str,
+    columns: &'static [ColumnContract],
+    partition_key: &'static [&'static str],
+    sorting_key: &'static [&'static str],
+    must_be_empty_before_upgrade: bool,
+}
+
+macro_rules! columns {
+    ($(($name:literal, $column_type:literal)),+ $(,)?) => {
+        &[$(ColumnContract { name: $name, column_type: $column_type }),+]
+    };
+}
+
+const EMPTY_KEY: &[&str] = &[];
+const METHYLATION_PARTITION_KEY: &[&str] = &[
+    "release",
+    "cohort",
+    "reference_genome",
+    "chrom",
+    "ancillary_run_id",
+];
+
+const METHYLATION_V4_TABLES: &[TableContract] = &[
+    TableContract {
+        name: "lr_y1_schema_versions",
+        engine: "ReplacingMergeTree",
+        columns: columns![
+            ("schema_version", "UInt16"),
+            ("state", "LowCardinality(String)"),
+            ("contract", "String"),
+            ("applied_at", "DateTime64(3, 'UTC')"),
+            ("revision", "UInt64"),
+        ],
+        partition_key: EMPTY_KEY,
+        sorting_key: &["schema_version"],
+        must_be_empty_before_upgrade: false,
+    },
+    TableContract {
+        name: "lr_y1_ancillary_runs",
+        engine: "ReplacingMergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("source_manifest_hash", "FixedString(64)"),
+            ("scope", "LowCardinality(String)"),
+            ("state", "LowCardinality(String)"),
+            ("source_rows", "UInt64"),
+            ("canonical_rows", "UInt64"),
+            ("reject_rows", "UInt64"),
+            ("content_hash", "FixedString(64)"),
+            ("peak_rss_bytes", "UInt64"),
+            ("created_at", "DateTime64(3, 'UTC')"),
+            ("revision", "UInt64"),
+        ],
+        partition_key: EMPTY_KEY,
+        sorting_key: &[
+            "release",
+            "cohort",
+            "reference_genome",
+            "modality",
+            "ancillary_run_id",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_active_ancillary",
+        engine: "ReplacingMergeTree",
+        columns: columns![
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("ancillary_run_id", "String"),
+            ("source_version", "String"),
+            ("activated_by", "String"),
+            ("activated_at", "DateTime64(3, 'UTC')"),
+            ("revision", "UInt64"),
+        ],
+        partition_key: EMPTY_KEY,
+        sorting_key: &["release", "cohort", "reference_genome", "modality"],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_ancillary_task_attempts",
+        engine: "ReplacingMergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("modality", "LowCardinality(String)"),
+            ("chrom", "LowCardinality(String)"),
+            ("task_id", "String"),
+            ("attempt_id", "String"),
+            ("lease_id", "String"),
+            ("sample_id", "LowCardinality(String)"),
+            ("data_layer", "LowCardinality(String)"),
+            ("source_haplotype", "Nullable(UInt8)"),
+            ("manifest_entry_id", "String"),
+            ("source_object_slot", "LowCardinality(String)"),
+            ("source_uri", "String"),
+            ("source_generation", "String"),
+            ("source_size_bytes", "UInt64"),
+            ("source_checksum_algorithm", "LowCardinality(String)"),
+            ("source_checksum", "String"),
+            ("interval_start", "UInt32"),
+            ("interval_end", "UInt32"),
+            ("state", "LowCardinality(String)"),
+            ("source_rows", "UInt64"),
+            ("staged_rows", "UInt64"),
+            ("reject_rows", "UInt64"),
+            ("key_hash", "FixedString(64)"),
+            ("content_hash", "FixedString(64)"),
+            ("error", "Nullable(String)"),
+            ("created_at", "DateTime64(3, 'UTC')"),
+            ("revision", "UInt64"),
+        ],
+        partition_key: EMPTY_KEY,
+        sorting_key: &[
+            "ancillary_run_id",
+            "modality",
+            "chrom",
+            "task_id",
+            "attempt_id",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_methylation_staging",
+        engine: "MergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("attempt_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt32"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ],
+        partition_key: METHYLATION_PARTITION_KEY,
+        sorting_key: &[
+            "ancillary_run_id",
+            "attempt_id",
+            "chrom",
+            "position",
+            "sample_id",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_methylation",
+        engine: "MergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt32"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ],
+        partition_key: METHYLATION_PARTITION_KEY,
+        sorting_key: &["ancillary_run_id", "chrom", "position", "sample_id"],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_methylation_phased_staging",
+        engine: "MergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("attempt_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("source_haplotype", "UInt8"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt32"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ],
+        partition_key: METHYLATION_PARTITION_KEY,
+        sorting_key: &[
+            "ancillary_run_id",
+            "attempt_id",
+            "chrom",
+            "position",
+            "sample_id",
+            "source_haplotype",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_methylation_phased",
+        engine: "MergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("source_haplotype", "UInt8"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt32"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ],
+        partition_key: METHYLATION_PARTITION_KEY,
+        sorting_key: &[
+            "ancillary_run_id",
+            "chrom",
+            "position",
+            "sample_id",
+            "source_haplotype",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_methylation_availability",
+        engine: "MergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("source_manifest_hash", "FixedString(64)"),
+            ("chrom", "LowCardinality(String)"),
+            ("sample_id", "LowCardinality(String)"),
+            ("data_layer", "LowCardinality(String)"),
+            ("source_haplotype", "Nullable(UInt8)"),
+            ("inventory_status", "LowCardinality(String)"),
+            ("load_status", "LowCardinality(String)"),
+            ("source_rows", "UInt64"),
+            ("canonical_rows", "UInt64"),
+            ("reason", "String"),
+            ("orientation_status", "String"),
+            ("queryable_raw", "Bool"),
+            ("joinable_to_vcf", "Bool"),
+        ],
+        partition_key: METHYLATION_PARTITION_KEY,
+        sorting_key: &[
+            "ancillary_run_id",
+            "chrom",
+            "sample_id",
+            "data_layer",
+            "source_haplotype",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_methylation_summary",
+        engine: "MergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("mean_methylation", "Float64"),
+            ("mean_coverage", "Float64"),
+            ("num_samples", "UInt32"),
+            ("std_methylation", "Float64"),
+            ("min_methylation", "Float32"),
+            ("max_methylation", "Float32"),
+        ],
+        partition_key: METHYLATION_PARTITION_KEY,
+        sorting_key: &["ancillary_run_id", "chrom", "position"],
+        must_be_empty_before_upgrade: true,
+    },
+];
+
+const METHYLATION_V3_TABLES: &[TableContract] = &[
+    TableContract {
+        name: "lr_y1_ancillary_runs",
+        engine: "ReplacingMergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("source_manifest_hash", "FixedString(64)"),
+            ("scope", "LowCardinality(String)"),
+            ("state", "LowCardinality(String)"),
+            ("source_rows", "UInt64"),
+            ("canonical_rows", "UInt64"),
+            ("reject_rows", "UInt64"),
+            ("content_hash", "FixedString(64)"),
+            ("peak_rss_bytes", "UInt64"),
+            ("created_at", "DateTime64(3, 'UTC')"),
+            ("revision", "UInt64"),
+        ],
+        partition_key: EMPTY_KEY,
+        sorting_key: &[
+            "release",
+            "cohort",
+            "reference_genome",
+            "modality",
+            "ancillary_run_id",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_active_ancillary",
+        engine: "ReplacingMergeTree",
+        columns: columns![
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("ancillary_run_id", "String"),
+            ("source_version", "String"),
+            ("activated_by", "String"),
+            ("activated_at", "DateTime64(3, 'UTC')"),
+            ("revision", "UInt64"),
+        ],
+        partition_key: EMPTY_KEY,
+        sorting_key: &["release", "cohort", "reference_genome", "modality"],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_ancillary_task_attempts",
+        engine: "ReplacingMergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("modality", "LowCardinality(String)"),
+            ("chrom", "LowCardinality(String)"),
+            ("task_id", "String"),
+            ("attempt_id", "String"),
+            ("interval_start", "UInt32"),
+            ("interval_end", "UInt32"),
+            ("state", "LowCardinality(String)"),
+            ("source_rows", "UInt64"),
+            ("staged_rows", "UInt64"),
+            ("reject_rows", "UInt64"),
+            ("content_hash", "FixedString(64)"),
+            ("error", "Nullable(String)"),
+            ("created_at", "DateTime64(3, 'UTC')"),
+            ("revision", "UInt64"),
+        ],
+        partition_key: EMPTY_KEY,
+        sorting_key: &[
+            "ancillary_run_id",
+            "modality",
+            "chrom",
+            "task_id",
+            "attempt_id",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_methylation_staging",
+        engine: "MergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("attempt_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt16"),
+        ],
+        partition_key: METHYLATION_PARTITION_KEY,
+        sorting_key: &[
+            "ancillary_run_id",
+            "attempt_id",
+            "chrom",
+            "position",
+            "sample_id",
+        ],
+        must_be_empty_before_upgrade: true,
+    },
+    TableContract {
+        name: "lr_y1_methylation",
+        engine: "MergeTree",
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt16"),
+        ],
+        partition_key: METHYLATION_PARTITION_KEY,
+        sorting_key: &["ancillary_run_id", "chrom", "position", "sample_id"],
+        must_be_empty_before_upgrade: true,
+    },
+];
 
 const SUMMARY_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, ref_allele, alts, allele_type, qual, filters, ac, an, af, allele_lengths, length_provenance, source_allele_length, source_svlen, source_svlen_present, frequencies_json, source_info_json";
 const ALLELE_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, reference_end, xpos, source_variant_id, alt_index, ref_allele, alt, allele_type, qual, filters, ac, an, af, allele_length, length_provenance, rsids, cadd_phred, phylop, major_consequence, short_read_match_id, short_read_match_type, short_read_match_source";
@@ -25,8 +483,38 @@ GROUP BY task_id
 HAVING count() = 1
 "#;
 
+trait SchemaBackend {
+    fn database(&self) -> &str;
+    fn execute(&self, query: &str) -> anyhow::Result<()>;
+    fn query_text(&self, query: &str, parameters: &[(&str, &str)]) -> anyhow::Result<String>;
+}
+
+impl SchemaBackend for ClickHouseTarget {
+    fn database(&self) -> &str {
+        ClickHouseTarget::database(self)
+    }
+
+    fn execute(&self, query: &str) -> anyhow::Result<()> {
+        ClickHouseTarget::execute(self, query)
+    }
+
+    fn query_text(&self, query: &str, parameters: &[(&str, &str)]) -> anyhow::Result<String> {
+        ClickHouseTarget::query_text(self, query, parameters)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MethylationV4Disposition {
+    AlreadyApplied,
+    UpgradeEmpty,
+}
+
 pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
-    preflight_methylation_v4_upgrade(target)?;
+    init_schema_with_backend(target)
+}
+
+fn init_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()> {
+    let disposition = preflight_methylation_v4_upgrade(backend)?;
     let schemas: &[(&str, &str)] = &[
         (
             "lr_y1_schema_versions",
@@ -159,7 +647,7 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
     ];
 
     for (name, ddl) in schemas {
-        target
+        backend
             .execute(ddl)
             .with_context(|| format!("failed to initialize Y1 table {name}"))?;
     }
@@ -176,107 +664,354 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
             ("short_read_match_type", "Nullable(String)"),
             ("short_read_match_source", "Nullable(String)"),
         ] {
-            target
+            backend
                 .execute(&format!(
                     "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"
                 ))
                 .with_context(|| format!("failed to add Y1 annotation column {table}.{column}"))?;
         }
     }
-    for (column, column_type) in [
-        ("lease_id", "String"),
-        ("sample_id", "LowCardinality(String)"),
-        ("data_layer", "LowCardinality(String)"),
-        ("source_haplotype", "Nullable(UInt8)"),
-        ("manifest_entry_id", "String"),
-        ("source_object_slot", "LowCardinality(String)"),
-        ("source_uri", "String"),
-        ("source_generation", "String"),
-        ("source_size_bytes", "UInt64"),
-        ("source_checksum_algorithm", "LowCardinality(String)"),
-        ("source_checksum", "String"),
-        ("key_hash", "FixedString(64)"),
+
+    // Empty v3 tables are the only historical tables that may reach this code.
+    // ADD plus MODIFY ... AFTER both creates missing columns and forces their
+    // exact fresh-v4 position/type; ClickHouse is never asked to synthesize
+    // identity values for historical rows.
+    for (column, column_type, after) in [
+        ("lease_id", "String", "attempt_id"),
+        ("sample_id", "LowCardinality(String)", "lease_id"),
+        ("data_layer", "LowCardinality(String)", "sample_id"),
+        ("source_haplotype", "Nullable(UInt8)", "data_layer"),
+        ("manifest_entry_id", "String", "source_haplotype"),
+        (
+            "source_object_slot",
+            "LowCardinality(String)",
+            "manifest_entry_id",
+        ),
+        ("source_uri", "String", "source_object_slot"),
+        ("source_generation", "String", "source_uri"),
+        ("source_size_bytes", "UInt64", "source_generation"),
+        (
+            "source_checksum_algorithm",
+            "LowCardinality(String)",
+            "source_size_bytes",
+        ),
+        ("source_checksum", "String", "source_checksum_algorithm"),
+        ("key_hash", "FixedString(64)", "reject_rows"),
     ] {
-        target
+        backend
             .execute(&format!(
-                "ALTER TABLE lr_y1_ancillary_task_attempts ADD COLUMN IF NOT EXISTS {column} {column_type}"
+                "ALTER TABLE lr_y1_ancillary_task_attempts ADD COLUMN IF NOT EXISTS {column} {column_type} AFTER {after}"
             ))
             .with_context(|| format!("failed to add Y1 ancillary attempt column {column}"))?;
+        backend
+            .execute(&format!(
+                "ALTER TABLE lr_y1_ancillary_task_attempts MODIFY COLUMN {column} {column_type} AFTER {after}"
+            ))
+            .with_context(|| {
+                format!("failed to enforce Y1 ancillary attempt column {column}")
+            })?;
     }
     for table in ["lr_y1_methylation_staging", "lr_y1_methylation"] {
-        target
+        backend
             .execute(&format!(
                 "ALTER TABLE {table} MODIFY COLUMN coverage UInt32"
             ))
             .with_context(|| format!("failed to widen {table}.coverage to UInt32"))?;
-        // Existing schema-v3 rows never loaded these source measures. Add them
-        // nullable in place so ClickHouse cannot fabricate numeric zeroes for
-        // historical parts. Fresh schema-v4 tables use the required non-null
-        // types; a later publisher must reload/reconcile old data before a
-        // nullable migration column can be promoted.
+        let mut after = "coverage";
         for (column, column_type) in [
-            ("estimated_modified_count", "Nullable(UInt32)"),
-            ("estimated_unmodified_count", "Nullable(UInt32)"),
-            ("discretized_methylation", "Nullable(Float32)"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
         ] {
-            target
+            backend
                 .execute(&format!(
-                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type} AFTER {after}"
                 ))
                 .with_context(|| {
                     format!("failed to add Y1 methylation measure {table}.{column}")
                 })?;
+            backend
+                .execute(&format!(
+                    "ALTER TABLE {table} MODIFY COLUMN {column} {column_type} AFTER {after}"
+                ))
+                .with_context(|| {
+                    format!("failed to enforce Y1 methylation measure {table}.{column}")
+                })?;
+            after = column;
         }
     }
-    target
-        .execute(
-            "INSERT INTO lr_y1_schema_versions \
-             (schema_version, state, contract, applied_at, revision) VALUES \
-             (4, 'applied', 'phased_methylation_d0_no_synthetic_measure_backfill', now64(3), toUInt64(toUnixTimestamp64Milli(now64(3))))",
-        )
-        .context("failed to record applied Y1 schema version 4")?;
+
+    let post_ddl = read_methylation_schema_inventory(backend)?;
+    validate_exact_methylation_v4_schema(&post_ddl)?;
+    if disposition == MethylationV4Disposition::UpgradeEmpty {
+        require_empty_upgrade_tables(&post_ddl)?;
+        backend
+            .execute(&format!(
+                "INSERT INTO lr_y1_schema_versions \
+                 (schema_version, state, contract, applied_at, revision) VALUES \
+                 (4, 'applied', '{METHYLATION_V4_CONTRACT}', now64(3), toUInt64(toUnixTimestamp64Milli(now64(3))))"
+            ))
+            .context("failed to record applied Y1 schema version 4")?;
+    }
+
+    // An applied receipt is accepted only together with a complete schema
+    // attestation. This also verifies the just-written durable receipt.
+    let verified = read_methylation_schema_inventory(backend)?;
+    validate_exact_methylation_v4_schema(&verified)?;
+    require_applied_v4_receipt(backend, &verified)?;
     Ok(())
 }
 
-fn preflight_methylation_v4_upgrade(target: &ClickHouseTarget) -> anyhow::Result<()> {
-    let database = target.database();
-    let table_exists = |table: &str| -> anyhow::Result<bool> {
-        let body = target.query_text(
-            "SELECT count() FROM system.tables WHERE database = {database:String} AND name = {table:String} FORMAT TabSeparated",
-            &[("database", database), ("table", table)],
-        )?;
-        Ok(parse_single_count(&body, "system table existence")? == 1)
-    };
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TableInventory {
+    engine: String,
+    columns: Vec<(String, String)>,
+    partition_key: Vec<String>,
+    sorting_key: Vec<String>,
+    primary_key: Vec<String>,
+    rows: u64,
+}
 
-    if table_exists("lr_y1_schema_versions")? {
-        let body = target.query_text(
-            "SELECT count() FROM lr_y1_schema_versions FINAL WHERE schema_version = 4 AND state = 'applied' FORMAT TabSeparated",
-            &[],
-        )?;
-        if parse_single_count(&body, "schema v4 receipt")? > 0 {
-            return Ok(());
+type SchemaInventory = BTreeMap<String, TableInventory>;
+
+fn preflight_methylation_v4_upgrade<B: SchemaBackend>(
+    backend: &B,
+) -> anyhow::Result<MethylationV4Disposition> {
+    // This single inventory pass precedes every CREATE/ALTER. It covers the
+    // receipt, ancillary run/pointer/attempt ledgers, both total tables, both
+    // phased tables, availability, and the total-summary intermediate.
+    let inventory = read_methylation_schema_inventory(backend)?;
+    match read_v4_receipt(backend, &inventory)? {
+        Some((state, contract)) => {
+            if state != "applied" || contract != METHYLATION_V4_CONTRACT {
+                bail!(
+                    "refusing Y1 schema-v4 receipt with unrecognized state/contract: state={state:?} contract={contract:?}"
+                );
+            }
+            validate_exact_methylation_v4_schema(&inventory)?;
+            Ok(MethylationV4Disposition::AlreadyApplied)
+        }
+        None => {
+            require_empty_upgrade_tables(&inventory)?;
+            validate_known_empty_upgrade_shapes(&inventory)?;
+            Ok(MethylationV4Disposition::UpgradeEmpty)
         }
     }
+}
 
-    // No trustworthy v4 receipt exists. Refuse to evolve any populated v3 or
-    // intermediate table: ADD COLUMN defaults may already have fabricated
-    // zeroes, and their provenance cannot be reconstructed in place. Empty
-    // scratch tables can be migrated; populated databases require a fresh v4
-    // database and source reload/reconciliation.
-    for table in ["lr_y1_methylation_staging", "lr_y1_methylation"] {
-        if table_exists(table)? {
-            let body = target.query_text(
-                &format!("SELECT count() FROM {table} FORMAT TabSeparated"),
-                &[],
-            )?;
-            if parse_single_count(&body, table)? > 0 {
+fn read_methylation_schema_inventory<B: SchemaBackend>(
+    backend: &B,
+) -> anyhow::Result<SchemaInventory> {
+    let table_names = METHYLATION_V4_TABLES
+        .iter()
+        .map(|table| format!("'{}'", table.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tables_query = format!(
+        "SELECT name, engine, partition_key, sorting_key, primary_key FROM system.tables \
+         WHERE database = {{database:String}} AND name IN ({table_names}) \
+         ORDER BY name FORMAT TabSeparated"
+    );
+    let table_rows = backend.query_text(&tables_query, &[("database", backend.database())])?;
+    let mut inventory = SchemaInventory::new();
+    for line in table_rows.lines().filter(|line| !line.is_empty()) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 5 {
+            bail!("system.tables schema inventory returned a malformed row");
+        }
+        if !METHYLATION_V4_TABLES
+            .iter()
+            .any(|table| table.name == fields[0])
+            || inventory.contains_key(fields[0])
+        {
+            bail!("system.tables schema inventory returned an unexpected table row");
+        }
+        inventory.insert(
+            fields[0].to_string(),
+            TableInventory {
+                engine: fields[1].to_string(),
+                columns: Vec::new(),
+                partition_key: parse_key_expression(fields[2]),
+                sorting_key: parse_key_expression(fields[3]),
+                primary_key: parse_key_expression(fields[4]),
+                rows: 0,
+            },
+        );
+    }
+
+    let columns_query = format!(
+        "SELECT table, name, type, position FROM system.columns \
+         WHERE database = {{database:String}} AND table IN ({table_names}) \
+         ORDER BY table, position FORMAT TabSeparated"
+    );
+    let column_rows = backend.query_text(&columns_query, &[("database", backend.database())])?;
+    let mut positions: BTreeMap<String, u64> = BTreeMap::new();
+    for line in column_rows.lines().filter(|line| !line.is_empty()) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 4 {
+            bail!("system.columns schema inventory returned a malformed row");
+        }
+        let position = fields[3]
+            .parse::<u64>()
+            .context("system.columns position is not numeric")?;
+        let table = inventory
+            .get_mut(fields[0])
+            .ok_or_else(|| anyhow::anyhow!("system.columns returned an absent table"))?;
+        let expected_position = positions.entry(fields[0].to_string()).or_insert(1);
+        if position != *expected_position {
+            bail!("system.columns positions are duplicated or noncontiguous");
+        }
+        *expected_position += 1;
+        table
+            .columns
+            .push((fields[1].to_string(), fields[2].to_string()));
+    }
+
+    for (name, table) in &mut inventory {
+        let population_filter = match name.as_str() {
+            "lr_y1_ancillary_runs" | "lr_y1_active_ancillary" => {
+                " WHERE positionCaseInsensitive(modality, 'methylation') > 0"
+            }
+            _ => "",
+        };
+        let body = backend.query_text(
+            &format!("SELECT count() FROM {name}{population_filter} FORMAT TabSeparated"),
+            &[],
+        )?;
+        table.rows = parse_single_count(&body, name)?;
+    }
+    Ok(inventory)
+}
+
+fn parse_key_expression(expression: &str) -> Vec<String> {
+    let mut compact: String = expression
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    loop {
+        if compact.starts_with("tuple(") && compact.ends_with(')') {
+            compact = compact[6..compact.len() - 1].to_string();
+        } else if compact.starts_with('(') && compact.ends_with(')') {
+            compact = compact[1..compact.len() - 1].to_string();
+        } else {
+            break;
+        }
+    }
+    if compact.is_empty() {
+        Vec::new()
+    } else {
+        compact.split(',').map(str::to_string).collect()
+    }
+}
+
+fn read_v4_receipt<B: SchemaBackend>(
+    backend: &B,
+    inventory: &SchemaInventory,
+) -> anyhow::Result<Option<(String, String)>> {
+    if !inventory.contains_key("lr_y1_schema_versions") {
+        return Ok(None);
+    }
+    let body = backend.query_text(
+        "SELECT state, contract FROM lr_y1_schema_versions FINAL WHERE schema_version = 4 FORMAT TabSeparated",
+        &[],
+    )?;
+    if body.trim().is_empty() {
+        return Ok(None);
+    }
+    let rows: Vec<&str> = body.lines().filter(|line| !line.is_empty()).collect();
+    if rows.len() != 1 {
+        bail!("schema v4 receipt query returned multiple resolved rows");
+    }
+    let fields: Vec<&str> = rows[0].split('\t').collect();
+    if fields.len() != 2 {
+        bail!("schema v4 receipt query returned a malformed row");
+    }
+    Ok(Some((fields[0].to_string(), fields[1].to_string())))
+}
+
+fn require_applied_v4_receipt<B: SchemaBackend>(
+    backend: &B,
+    inventory: &SchemaInventory,
+) -> anyhow::Result<()> {
+    match read_v4_receipt(backend, inventory)? {
+        Some((state, contract)) if state == "applied" && contract == METHYLATION_V4_CONTRACT => {
+            Ok(())
+        }
+        _ => bail!("Y1 schema v4 lacks its exact applied schema-contract receipt"),
+    }
+}
+
+fn require_empty_upgrade_tables(inventory: &SchemaInventory) -> anyhow::Result<()> {
+    for contract in METHYLATION_V4_TABLES
+        .iter()
+        .filter(|table| table.must_be_empty_before_upgrade)
+    {
+        if let Some(table) = inventory.get(contract.name) {
+            if table.rows != 0 {
                 bail!(
-                    "refusing ambiguous Y1 schema-v4 migration: {table} is populated without an applied v4 receipt; use a fresh isolated v4 database and reload from immutable source"
+                    "refusing ambiguous Y1 schema-v4 migration: {} is populated without an exact applied v4 receipt; use a fresh isolated v4 database and reload from immutable source",
+                    contract.name
                 );
             }
         }
     }
     Ok(())
+}
+
+fn validate_known_empty_upgrade_shapes(inventory: &SchemaInventory) -> anyhow::Result<()> {
+    for (name, table) in inventory {
+        let v4 = METHYLATION_V4_TABLES
+            .iter()
+            .find(|contract| contract.name == name)
+            .expect("inventory is restricted to v4 contract tables");
+        let known_v3 = METHYLATION_V3_TABLES
+            .iter()
+            .find(|contract| contract.name == name);
+        if !table_matches_contract(table, v4)
+            && !known_v3.is_some_and(|contract| table_matches_contract(table, contract))
+        {
+            bail!("refusing Y1 schema-v4 migration from unknown empty shape for table {name}");
+        }
+    }
+    Ok(())
+}
+
+fn validate_exact_methylation_v4_schema(inventory: &SchemaInventory) -> anyhow::Result<()> {
+    for contract in METHYLATION_V4_TABLES {
+        let table = inventory
+            .get(contract.name)
+            .ok_or_else(|| anyhow::anyhow!("Y1 schema v4 is missing table {}", contract.name))?;
+        if !table_matches_contract(table, contract) {
+            bail!(
+                "Y1 schema v4 table {} does not match exact columns/types/keys/partition contract",
+                contract.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn table_matches_contract(table: &TableInventory, contract: &TableContract) -> bool {
+    let expected_columns: Vec<(String, String)> = contract
+        .columns
+        .iter()
+        .map(|column| (column.name.to_string(), column.column_type.to_string()))
+        .collect();
+    let expected_partition: Vec<String> = contract
+        .partition_key
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect();
+    let expected_sorting: Vec<String> = contract
+        .sorting_key
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect();
+    table.engine == contract.engine
+        && table.columns == expected_columns
+        && table.partition_key == expected_partition
+        && table.sorting_key == expected_sorting
+        && table.primary_key == expected_sorting
 }
 
 fn parse_single_count(body: &str, label: &str) -> anyhow::Result<u64> {
@@ -2300,6 +3035,7 @@ fn now_revision() -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     const HGSVC_FIXTURE: &str = include_str!("../../tests/fixtures/y1/hgsvc_hprc_trv_13_alt.vcf");
     const AOU_FIXTURE: &str = include_str!("../../tests/fixtures/y1/aou_summary_only_ins.vcf");
@@ -2313,12 +3049,407 @@ mod tests {
         super::super::parser::transform_records(&header, records)
     }
 
+    #[derive(Default)]
+    struct MockSchemaState {
+        tables: SchemaInventory,
+        receipt: Option<(String, String)>,
+        executed: Vec<String>,
+    }
+
+    struct MockSchemaBackend {
+        state: RefCell<MockSchemaState>,
+    }
+
+    impl MockSchemaBackend {
+        fn empty_v3() -> Self {
+            let mut tables = SchemaInventory::new();
+            for contract in METHYLATION_V3_TABLES {
+                tables.insert(
+                    contract.name.to_string(),
+                    table_inventory_from_contract(contract, 0),
+                );
+            }
+            Self {
+                state: RefCell::new(MockSchemaState {
+                    tables,
+                    ..MockSchemaState::default()
+                }),
+            }
+        }
+
+        fn exact_v4_with_receipt() -> Self {
+            let mut tables = SchemaInventory::new();
+            for contract in METHYLATION_V4_TABLES {
+                tables.insert(
+                    contract.name.to_string(),
+                    table_inventory_from_contract(contract, 0),
+                );
+            }
+            Self {
+                state: RefCell::new(MockSchemaState {
+                    tables,
+                    receipt: Some(("applied".into(), METHYLATION_V4_CONTRACT.into())),
+                    ..MockSchemaState::default()
+                }),
+            }
+        }
+    }
+
+    impl SchemaBackend for MockSchemaBackend {
+        fn database(&self) -> &str {
+            "gnomad_lr_y1_scratch_schema_mock"
+        }
+
+        fn execute(&self, query: &str) -> anyhow::Result<()> {
+            let mut state = self.state.borrow_mut();
+            state.executed.push(query.to_string());
+
+            for contract in METHYLATION_V4_TABLES {
+                if query.contains(&format!("CREATE TABLE IF NOT EXISTS {} (", contract.name)) {
+                    if !state.tables.contains_key(contract.name) {
+                        let (table_name, table) = table_inventory_from_ddl(query)?;
+                        state.tables.insert(table_name, table);
+                    }
+                    return Ok(());
+                }
+            }
+
+            if query.starts_with("ALTER TABLE lr_y1_ancillary_task_attempts")
+                || query.starts_with("ALTER TABLE lr_y1_methylation_staging")
+                || query.starts_with("ALTER TABLE lr_y1_methylation ")
+            {
+                apply_mock_alter(&mut state.tables, query)?;
+            } else if query.starts_with("INSERT INTO lr_y1_schema_versions") {
+                state.receipt = Some(("applied".into(), METHYLATION_V4_CONTRACT.into()));
+                if let Some(table) = state.tables.get_mut("lr_y1_schema_versions") {
+                    table.rows = 1;
+                }
+            }
+            Ok(())
+        }
+
+        fn query_text(&self, query: &str, _parameters: &[(&str, &str)]) -> anyhow::Result<String> {
+            let state = self.state.borrow();
+            if query.contains("FROM system.tables") {
+                let mut body = String::new();
+                for (name, table) in &state.tables {
+                    body.push_str(&format!(
+                        "{}\t{}\t{}\t{}\t{}\n",
+                        name,
+                        table.engine,
+                        table.partition_key.join(", "),
+                        table.sorting_key.join(", "),
+                        table.primary_key.join(", ")
+                    ));
+                }
+                return Ok(body);
+            }
+            if query.contains("FROM system.columns") {
+                let mut body = String::new();
+                for (table_name, table) in &state.tables {
+                    for (index, (name, column_type)) in table.columns.iter().enumerate() {
+                        body.push_str(&format!(
+                            "{table_name}\t{name}\t{column_type}\t{}\n",
+                            index + 1
+                        ));
+                    }
+                }
+                return Ok(body);
+            }
+            if query.contains("FROM lr_y1_schema_versions FINAL") {
+                return Ok(state
+                    .receipt
+                    .as_ref()
+                    .map(|(state, contract)| format!("{state}\t{contract}\n"))
+                    .unwrap_or_default());
+            }
+            if let Some(rest) = query.strip_prefix("SELECT count() FROM ") {
+                let table_name = rest
+                    .split_whitespace()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("mock count query lacks table"))?;
+                let rows = state
+                    .tables
+                    .get(table_name)
+                    .ok_or_else(|| anyhow::anyhow!("mock count query names absent table"))?
+                    .rows;
+                return Ok(format!("{rows}\n"));
+            }
+            bail!("unhandled mock schema query: {query}")
+        }
+    }
+
+    fn table_inventory_from_contract(contract: &TableContract, rows: u64) -> TableInventory {
+        TableInventory {
+            engine: contract.engine.into(),
+            columns: contract
+                .columns
+                .iter()
+                .map(|column| (column.name.into(), column.column_type.into()))
+                .collect(),
+            partition_key: contract
+                .partition_key
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+            sorting_key: contract
+                .sorting_key
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+            primary_key: contract
+                .sorting_key
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+            rows,
+        }
+    }
+
+    fn table_inventory_from_ddl(query: &str) -> anyhow::Result<(String, TableInventory)> {
+        const CREATE: &str = "CREATE TABLE IF NOT EXISTS ";
+        let create_start = query
+            .find(CREATE)
+            .ok_or_else(|| anyhow::anyhow!("mock DDL lacks CREATE TABLE"))?
+            + CREATE.len();
+        let after_create = &query[create_start..];
+        let name_end = after_create
+            .find(char::is_whitespace)
+            .ok_or_else(|| anyhow::anyhow!("mock DDL lacks table columns"))?;
+        let table_name = after_create[..name_end].to_string();
+        let columns_start = query[create_start + name_end..]
+            .find('(')
+            .ok_or_else(|| anyhow::anyhow!("mock DDL lacks opening column delimiter"))?
+            + create_start
+            + name_end
+            + 1;
+        let columns_end = query[columns_start..]
+            .find(") ENGINE")
+            .ok_or_else(|| anyhow::anyhow!("mock DDL lacks closing column delimiter"))?
+            + columns_start;
+        let columns = split_top_level_commas(&query[columns_start..columns_end])
+            .into_iter()
+            .map(|definition| {
+                let mut fields = definition.trim().splitn(2, char::is_whitespace);
+                let name = fields
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("mock DDL has nameless column"))?;
+                let column_type = fields
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("mock DDL has typeless column"))?;
+                Ok((name.to_string(), column_type.to_string()))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let engine_start = query[columns_end..]
+            .find("ENGINE = ")
+            .expect("closing column marker includes ENGINE")
+            + columns_end
+            + "ENGINE = ".len();
+        let engine_end = query[engine_start..]
+            .find('(')
+            .ok_or_else(|| anyhow::anyhow!("mock DDL engine lacks arguments"))?
+            + engine_start;
+        let engine = query[engine_start..engine_end].trim().to_string();
+        let partition_key = ddl_key_clause(query, "PARTITION BY ", &["\nORDER BY "])
+            .map(|value| parse_key_expression(&value))
+            .unwrap_or_default();
+        let sorting_key = ddl_key_clause(query, "ORDER BY ", &["\nSETTINGS ", ";"])
+            .map(|value| parse_key_expression(&value))
+            .ok_or_else(|| anyhow::anyhow!("mock DDL lacks ORDER BY"))?;
+        Ok((
+            table_name,
+            TableInventory {
+                engine,
+                columns,
+                partition_key,
+                primary_key: sorting_key.clone(),
+                sorting_key,
+                rows: 0,
+            },
+        ))
+    }
+
+    fn split_top_level_commas(value: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth = 0u32;
+        let mut quoted = false;
+        let mut start = 0usize;
+        for (index, character) in value.char_indices() {
+            match character {
+                '\'' => quoted = !quoted,
+                '(' if !quoted => depth += 1,
+                ')' if !quoted => depth = depth.saturating_sub(1),
+                ',' if !quoted && depth == 0 => {
+                    parts.push(&value[start..index]);
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&value[start..]);
+        parts
+    }
+
+    fn ddl_key_clause(query: &str, label: &str, endings: &[&str]) -> Option<String> {
+        let start = query.find(label)? + label.len();
+        let tail = &query[start..];
+        let end = endings
+            .iter()
+            .filter_map(|ending| tail.find(ending))
+            .min()
+            .unwrap_or(tail.len());
+        Some(tail[..end].trim().to_string())
+    }
+
+    fn apply_mock_alter(tables: &mut SchemaInventory, query: &str) -> anyhow::Result<()> {
+        let fields: Vec<&str> = query.split_whitespace().collect();
+        let table = tables
+            .get_mut(fields[2])
+            .ok_or_else(|| anyhow::anyhow!("mock ALTER names absent table"))?;
+        let (column, column_type, after, add_only_if_missing) = match fields[3] {
+            "ADD" => (fields[8], fields[9], Some(fields[11]), true),
+            "MODIFY" => (
+                fields[5],
+                fields[6],
+                (fields.get(7) == Some(&"AFTER")).then(|| fields[8]),
+                false,
+            ),
+            action => bail!("unsupported mock ALTER action {action}"),
+        };
+        let existing = table.columns.iter().position(|(name, _)| name == column);
+        if add_only_if_missing && existing.is_some() {
+            return Ok(());
+        }
+        if let Some(index) = existing {
+            table.columns.remove(index);
+        }
+        let insertion = match after {
+            Some(after) => {
+                table
+                    .columns
+                    .iter()
+                    .position(|(name, _)| name == after)
+                    .ok_or_else(|| anyhow::anyhow!("mock ALTER AFTER column is absent"))?
+                    + 1
+            }
+            None => existing
+                .unwrap_or(table.columns.len())
+                .min(table.columns.len()),
+        };
+        table
+            .columns
+            .insert(insertion, (column.into(), column_type.into()));
+        Ok(())
+    }
+
     #[test]
     fn schema_preflight_count_rows_fail_closed() {
         assert_eq!(parse_single_count("0\n", "count").unwrap(), 0);
         assert_eq!(parse_single_count("17", "count").unwrap(), 17);
         for invalid in ["", "1\t2\n", "1\n2\n", "not-a-count\n"] {
             assert!(parse_single_count(invalid, "count").is_err());
+        }
+    }
+
+    #[test]
+    fn schema_mock_empty_v3_upgrade_matches_fresh_v4_and_writes_exact_receipt() {
+        let backend = MockSchemaBackend::empty_v3();
+        init_schema_with_backend(&backend).unwrap();
+        let state = backend.state.borrow();
+        validate_exact_methylation_v4_schema(&state.tables).unwrap();
+        assert_eq!(
+            state.receipt,
+            Some(("applied".into(), METHYLATION_V4_CONTRACT.into()))
+        );
+        for table_name in ["lr_y1_methylation_staging", "lr_y1_methylation"] {
+            let measures: BTreeMap<_, _> =
+                state.tables[table_name].columns.iter().cloned().collect();
+            assert_eq!(measures["estimated_modified_count"], "UInt32");
+            assert_eq!(measures["estimated_unmodified_count"], "UInt32");
+            assert_eq!(measures["discretized_methylation"], "Float32");
+        }
+    }
+
+    #[test]
+    fn schema_mock_rejects_populated_v3_ledger_and_partial_phased_table_before_ddl() {
+        let populated_ledger = MockSchemaBackend::empty_v3();
+        populated_ledger
+            .state
+            .borrow_mut()
+            .tables
+            .get_mut("lr_y1_ancillary_task_attempts")
+            .unwrap()
+            .rows = 1;
+        let error = init_schema_with_backend(&populated_ledger).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("lr_y1_ancillary_task_attempts is populated"));
+        assert!(populated_ledger.state.borrow().executed.is_empty());
+
+        let populated_run_ledger = MockSchemaBackend::empty_v3();
+        populated_run_ledger
+            .state
+            .borrow_mut()
+            .tables
+            .get_mut("lr_y1_ancillary_runs")
+            .unwrap()
+            .rows = 1;
+        let error = init_schema_with_backend(&populated_run_ledger).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("lr_y1_ancillary_runs is populated"));
+        assert!(populated_run_ledger.state.borrow().executed.is_empty());
+
+        let partial_phased = MockSchemaBackend::empty_v3();
+        let contract = METHYLATION_V4_TABLES
+            .iter()
+            .find(|table| table.name == "lr_y1_methylation_phased_staging")
+            .unwrap();
+        partial_phased.state.borrow_mut().tables.insert(
+            contract.name.into(),
+            table_inventory_from_contract(contract, 7),
+        );
+        let error = init_schema_with_backend(&partial_phased).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("lr_y1_methylation_phased_staging is populated"));
+        assert!(partial_phased.state.borrow().executed.is_empty());
+    }
+
+    #[test]
+    fn applied_v4_receipt_never_bypasses_columns_types_keys_or_partition_contract() {
+        for mutation in ["columns", "types", "keys", "partition"] {
+            let backend = MockSchemaBackend::exact_v4_with_receipt();
+            {
+                let mut state = backend.state.borrow_mut();
+                let table = state.tables.get_mut("lr_y1_methylation_phased").unwrap();
+                match mutation {
+                    "columns" => {
+                        table.columns.pop();
+                    }
+                    "types" => {
+                        table.columns[14].1 = "Nullable(UInt32)".into();
+                    }
+                    "keys" => {
+                        table.sorting_key.swap(3, 4);
+                    }
+                    "partition" => {
+                        table.partition_key.pop();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let error = init_schema_with_backend(&backend).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("exact columns/types/keys/partition"),
+                "{mutation} mutation was not rejected: {error:#}"
+            );
+            assert!(backend.state.borrow().executed.is_empty());
         }
     }
 
