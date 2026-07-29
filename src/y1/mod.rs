@@ -2,6 +2,7 @@ mod contig;
 pub mod finalizer;
 mod interval;
 pub mod metadata;
+pub mod methylation;
 mod model;
 mod parser;
 mod storage;
@@ -9,6 +10,13 @@ mod target;
 
 pub use interval::{
     run_pool_interval_attempt, PoolY1AttemptReport, PoolY1JobSpec, PoolY1TargetSpec, PoolY1TaskSpec,
+};
+pub use methylation::{
+    open_prepared_methylation_records, parse_methylation_record, plan_methylation_finalization,
+    prepare_methylation_attempt, ImmutableObjectIdentity, MethylationDataLayer,
+    MethylationFinalizationPlan, MethylationRecord, MethylationSourceType,
+    PreparedMethylationAttempt, SourceHaplotype, Y1MethylationFinalizationSpec,
+    Y1MethylationTaskSpec,
 };
 pub use model::*;
 pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};

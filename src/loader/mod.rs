@@ -5,6 +5,7 @@ pub mod histograms;
 pub mod metadata;
 pub mod methylation;
 pub mod prescan;
+pub mod strict_bed_reader;
 pub mod variants;
 pub mod vcf_reader;
 
