@@ -26,7 +26,12 @@ HAVING count() = 1
 "#;
 
 pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
+    preflight_methylation_v4_upgrade(target)?;
     let schemas: &[(&str, &str)] = &[
+        (
+            "lr_y1_schema_versions",
+            include_str!("../../sql/y1/lr_y1_schema_versions.sql"),
+        ),
         (
             "lr_y1_load_runs",
             include_str!("../../sql/y1/lr_y1_load_runs.sql"),
@@ -223,7 +228,65 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
                 })?;
         }
     }
+    target
+        .execute(
+            "INSERT INTO lr_y1_schema_versions \
+             (schema_version, state, contract, applied_at, revision) VALUES \
+             (4, 'applied', 'phased_methylation_d0_no_synthetic_measure_backfill', now64(3), toUInt64(toUnixTimestamp64Milli(now64(3))))",
+        )
+        .context("failed to record applied Y1 schema version 4")?;
     Ok(())
+}
+
+fn preflight_methylation_v4_upgrade(target: &ClickHouseTarget) -> anyhow::Result<()> {
+    let database = target.database();
+    let table_exists = |table: &str| -> anyhow::Result<bool> {
+        let body = target.query_text(
+            "SELECT count() FROM system.tables WHERE database = {database:String} AND name = {table:String} FORMAT TabSeparated",
+            &[("database", database), ("table", table)],
+        )?;
+        Ok(parse_single_count(&body, "system table existence")? == 1)
+    };
+
+    if table_exists("lr_y1_schema_versions")? {
+        let body = target.query_text(
+            "SELECT count() FROM lr_y1_schema_versions FINAL WHERE schema_version = 4 AND state = 'applied' FORMAT TabSeparated",
+            &[],
+        )?;
+        if parse_single_count(&body, "schema v4 receipt")? > 0 {
+            return Ok(());
+        }
+    }
+
+    // No trustworthy v4 receipt exists. Refuse to evolve any populated v3 or
+    // intermediate table: ADD COLUMN defaults may already have fabricated
+    // zeroes, and their provenance cannot be reconstructed in place. Empty
+    // scratch tables can be migrated; populated databases require a fresh v4
+    // database and source reload/reconciliation.
+    for table in ["lr_y1_methylation_staging", "lr_y1_methylation"] {
+        if table_exists(table)? {
+            let body = target.query_text(
+                &format!("SELECT count() FROM {table} FORMAT TabSeparated"),
+                &[],
+            )?;
+            if parse_single_count(&body, table)? > 0 {
+                bail!(
+                    "refusing ambiguous Y1 schema-v4 migration: {table} is populated without an applied v4 receipt; use a fresh isolated v4 database and reload from immutable source"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_single_count(body: &str, label: &str) -> anyhow::Result<u64> {
+    let value = body.trim();
+    if value.is_empty() || value.contains('\t') || value.contains('\n') {
+        bail!("{label} returned an invalid ClickHouse count row");
+    }
+    value
+        .parse::<u64>()
+        .with_context(|| format!("{label} returned a nonnumeric ClickHouse count"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2248,6 +2311,15 @@ mod tests {
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .collect();
         super::super::parser::transform_records(&header, records)
+    }
+
+    #[test]
+    fn schema_preflight_count_rows_fail_closed() {
+        assert_eq!(parse_single_count("0\n", "count").unwrap(), 0);
+        assert_eq!(parse_single_count("17", "count").unwrap(), 17);
+        for invalid in ["", "1\t2\n", "1\n2\n", "not-a-count\n"] {
+            assert!(parse_single_count(invalid, "count").is_err());
+        }
     }
 
     #[test]

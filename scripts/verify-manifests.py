@@ -21,6 +21,7 @@ assert "/gnomAD_LR_vcfs/" not in smoke["inputs"]["vcf"], (
 )
 
 y1_tables = {
+    "lr_y1_schema_versions",
     "lr_y1_load_runs",
     "lr_y1_task_attempts",
     "lr_y1_active_partitions",
@@ -86,6 +87,10 @@ assert "ORDER BY (release, cohort, reference_genome, modality)" in active_ancill
 
 storage = (ROOT / "src" / "y1" / "storage.rs").read_text()
 assert "pub const Y1_SCHEMA_VERSION: u16 = 4;" in storage
+assert 'include_str!("../../sql/y1/lr_y1_schema_versions.sql")' in storage
+assert "preflight_methylation_v4_upgrade(target)?;" in storage
+assert "refusing ambiguous Y1 schema-v4 migration" in storage
+assert "phased_methylation_d0_no_synthetic_measure_backfill" in storage
 for table in [
     "lr_y1_methylation_phased_staging",
     "lr_y1_methylation_phased",
