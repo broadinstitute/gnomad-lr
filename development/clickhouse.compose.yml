@@ -1,7 +1,7 @@
 services:
   clickhouse:
     # Exact multi-architecture LTS image used by local development and CI.
-    image: clickhouse/clickhouse-server:24.8.14.39@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b
+    image: clickhouse/clickhouse-server:26.3.9.8@sha256:537014a67ce8bf1f5c79c2e2b26fb30b8285a86ffff03875bb14ed17ea35db62
     environment:
       # Development-only: permit the passwordless default user from the host.
       CLICKHOUSE_SKIP_USER_SETUP: "1"

@@ -23,9 +23,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Initialize the current legacy-contract schema (not the Y1 v3 schema)
+    /// Initialize the current legacy-contract schema (not the Y1 v4 schema)
     Init(InitArgs),
-    /// Initialize isolated cohort-aware Y1 v3 tables
+    /// Strictly create fresh isolated Y1 v4 tables or verify an exact attested schema
     InitY1(Y1InitArgs),
     /// Strict bounded Y1 source load into an isolated scratch database
     LoadY1Interval(Y1IntervalArgs),

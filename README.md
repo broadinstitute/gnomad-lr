@@ -29,18 +29,18 @@ make install-genohype
 
 ## ClickHouse environments
 
-The repository-owned DDL for the current legacy browser contract lives at the top of `sql/` and is embedded in the binary's `init` command. Y1 v3 DDL lives separately in `sql/y1/` and is initialized only by `init-y1`. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. Legacy HTTP requests preserve a URL's `database` query parameter:
+The repository-owned DDL for the current legacy browser contract lives at the top of `sql/` and is embedded in the binary's `init` command. Y1 v4 DDL lives separately in `sql/y1/` and is initialized only by `init-y1`. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. Legacy HTTP requests preserve a URL's `database` query parameter:
 
 ```text
 http://127.0.0.1:8123/?database=gnomad_lr_smoke
 ```
 
-The Y1 target contract is stricter: endpoint, database, target kind, and auth source are separate values. It rejects `default`, credentials or `database=...` embedded in the endpoint, unsafe database names, unauthenticated remote endpoints, and serving targets without an additional acknowledgement. For example, after an administrator creates the database:
+The Y1 target contract is stricter: endpoint, database, target kind, and auth source are separate values. It rejects `default`, credentials or `database=...` embedded in the endpoint, unsafe database names, unauthenticated remote endpoints, and serving targets without an additional acknowledgement. D0 performs no in-place migration or `ALTER`: initialization accepts only an empty isolated database with an `_v4_` name token, or an already exact live schema carrying the full checked-Y1 attestation. That attestation proves schema shape only and is never load authorization. For example, after an administrator creates a fresh database:
 
 ```bash
 target/debug/gnomad-lr init-y1 \
   --endpoint http://127.0.0.1:8123 \
-  --database gnomad_lr_y1_scratch_local \
+  --database gnomad_lr_y1_scratch_v4_local \
   --target-kind scratch \
   --auth-source none
 ```

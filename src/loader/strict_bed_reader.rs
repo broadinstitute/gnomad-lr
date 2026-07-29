@@ -12,7 +12,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::JoinHandle;
-use tracing::info;
+
+const ZERO_CHUNK_VALIDATION_MAX_DECOMPRESSED_BYTES: u64 = 1024 * 1024;
 
 enum StreamMessage {
     Line(String),
@@ -77,6 +78,7 @@ impl StrictBedStream {
         let index_header = index
             .header()
             .ok_or_else(|| anyhow::anyhow!("tabix index {index_path} has no header"))?;
+        let line_comment_prefix = index_header.line_comment_prefix();
         let ref_seq_id = index_header
             .reference_sequence_names()
             .iter()
@@ -105,10 +107,7 @@ impl StrictBedStream {
             validate_zero_chunk_source(reader, &index, &validator).with_context(|| {
                 format!("zero-chunk source/index validation failed for {chrom}:{start}-{stop}")
             })?;
-            info!("strict BED: validated source/index with no chunks for {chrom}:{start}-{stop}");
-            return Ok(Self {
-                lines: StrictBedLines::completed(),
-            });
+            unreachable!("zero-chunk completion is disabled until an exact binding exists");
         }
         let chrom = chrom.to_string();
         let source_start0 = start - 1;
@@ -123,6 +122,7 @@ impl StrictBedStream {
                 &chrom,
                 source_start0,
                 source_end0,
+                line_comment_prefix,
                 &validator,
             )
         });
@@ -143,16 +143,6 @@ pub struct StrictBedLines {
 }
 
 impl StrictBedLines {
-    fn completed() -> Self {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let _ = sender.send(StreamMessage::Done);
-        Self {
-            receiver: Some(receiver),
-            worker: None,
-            terminal: false,
-        }
-    }
-
     fn spawn<F>(worker: F) -> Self
     where
         F: FnOnce(&SyncSender<StreamMessage>) -> anyhow::Result<()> + Send + 'static,
@@ -231,22 +221,40 @@ where
     R: Read,
     V: StrictBedRecordValidator,
 {
-    let mut reader = BufReader::new(bgzf::Reader::new(reader));
+    let header = index.header().expect("open_region requires a tabix header");
+    let comment_prefix = header.line_comment_prefix();
+    let line_skip_count = u64::from(header.line_skip_count());
+    let limited = bgzf::Reader::new(reader).take(ZERO_CHUNK_VALIDATION_MAX_DECOMPRESSED_BYTES + 1);
+    let mut reader = BufReader::new(limited);
     let mut bytes = Vec::new();
+    let mut decoded_bytes = 0u64;
+    let mut line_number = 0u64;
+    let mut source_records = 0u64;
+
+    // A zero-chunk result cannot use the ordinary indexed query to establish
+    // compatibility. Within a strict diagnostic budget, decode through BGZF
+    // EOF so a valid first record cannot hide later corruption, and interpret
+    // headers exactly as declared by the TBI metadata. Larger objects fail at
+    // the budget rather than turning an already doomed zero-chunk request into
+    // an unbounded scan. None of this proves that the index belongs to the
+    // source, so D0 always refuses completion below until an external immutable
+    // exact source+index binding token is implemented.
     loop {
         bytes.clear();
         let count = reader
             .read_until(b'\n', &mut bytes)
             .context("zero-chunk BGZF validation read failed")?;
         if count == 0 {
-            if reader.get_ref().virtual_position().compressed() == 0 {
-                bail!("zero-chunk source is empty or lacks a decodable BGZF container");
-            }
-            if index.last_first_record_start_position().is_some() {
-                bail!("tabix index advertises records but the BGZF source has none");
-            }
-            return Ok(());
+            break;
         }
+        decoded_bytes += count as u64;
+        if decoded_bytes > ZERO_CHUNK_VALIDATION_MAX_DECOMPRESSED_BYTES {
+            bail!(
+                "zero-chunk validation exceeded its {}-byte decompressed diagnostic budget",
+                ZERO_CHUNK_VALIDATION_MAX_DECOMPRESSED_BYTES
+            );
+        }
+        line_number += 1;
         if !bytes.ends_with(b"\n") {
             bail!("truncated nonempty BED line in zero-chunk BGZF source");
         }
@@ -254,34 +262,44 @@ where
         if bytes.ends_with(b"\r") {
             bytes.pop();
         }
-        if bytes.is_empty() {
+        if line_number <= line_skip_count
+            || bytes.is_empty()
+            || bytes.first().copied() == Some(comment_prefix)
+        {
             continue;
         }
+
         let line = std::str::from_utf8(&bytes).context("BED line is not valid UTF-8")?;
-        if line.starts_with('#') {
-            continue;
-        }
         let record = validator.validate(line)?;
-        if index.last_first_record_start_position().is_none() {
-            bail!("BGZF source has records but the tabix index advertises none");
-        }
-        let indexed_chrom = index
-            .header()
-            .expect("open_region requires a tabix header")
-            .reference_sequence_names()
-            .iter()
-            .any(|name| {
-                let bytes: &[u8] = name.as_ref();
-                bytes == record.chrom.as_bytes()
-            });
+        source_records += 1;
+        let indexed_chrom = header.reference_sequence_names().iter().any(|name| {
+            let bytes: &[u8] = name.as_ref();
+            bytes == record.chrom.as_bytes()
+        });
         if !indexed_chrom {
             bail!(
-                "first BGZF source record chromosome {} is absent from the tabix index",
+                "BGZF source record chromosome {} is absent from the tabix index",
                 record.chrom
             );
         }
-        return Ok(());
     }
+
+    if reader.get_ref().get_ref().virtual_position().compressed() == 0 {
+        bail!("zero-chunk source is empty or lacks a decodable BGZF container");
+    }
+    if line_number < line_skip_count {
+        bail!("tabix line-skip metadata exceeds the BGZF source line count");
+    }
+    match (
+        source_records,
+        index.last_first_record_start_position().is_some(),
+    ) {
+        (0, true) => bail!("tabix index advertises records but the BGZF source has none"),
+        (1.., false) => bail!("BGZF source has records but the tabix index advertises none"),
+        _ => {}
+    }
+
+    bail!("zero-chunk completion requires an immutable exact source+index binding token; no such runtime binding is implemented")
 }
 
 fn stream_records<R, V>(
@@ -290,6 +308,7 @@ fn stream_records<R, V>(
     expected_chrom: &str,
     source_start0: u32,
     source_end0: u32,
+    line_comment_prefix: u8,
     validator: &V,
 ) -> anyhow::Result<()>
 where
@@ -317,7 +336,7 @@ where
             continue;
         }
         let line = std::str::from_utf8(&bytes).context("BED line is not valid UTF-8")?;
-        if line.starts_with('#') {
+        if bytes.first().copied() == Some(line_comment_prefix) {
             continue;
         }
 
@@ -393,15 +412,17 @@ mod tests {
                 "chr22",
                 99,
                 200,
+                b'#',
                 &total_validator(),
             )
         })
         .collect()
     }
 
-    fn indexed_fixture_with_records(
+    fn indexed_fixture_with_header(
         label: &str,
         index_chrom: &str,
+        header: noodles::csi::binning_index::index::Header,
         records: &[(u32, u32, &str)],
     ) -> (PathBuf, PathBuf) {
         let bed_path = temp_path(label).with_extension("bed.gz");
@@ -409,7 +430,7 @@ mod tests {
         let file = std::fs::File::create(&bed_path).unwrap();
         let mut writer = bgzf::Writer::new(file);
         let mut indexer = tabix::index::Indexer::default();
-        indexer.set_header(noodles::csi::binning_index::index::header::Builder::bed().build());
+        indexer.set_header(header);
         let mut chunk_start = writer.virtual_position();
         for (start0, end0, line) in records {
             writeln!(writer, "{line}").unwrap();
@@ -432,6 +453,19 @@ mod tests {
         let mut index_writer = tabix::io::Writer::new(file);
         index_writer.write_index(&index).unwrap();
         (bed_path, index_path)
+    }
+
+    fn indexed_fixture_with_records(
+        label: &str,
+        index_chrom: &str,
+        records: &[(u32, u32, &str)],
+    ) -> (PathBuf, PathBuf) {
+        indexed_fixture_with_header(
+            label,
+            index_chrom,
+            noodles::csi::binning_index::index::header::Builder::bed().build(),
+            records,
+        )
     }
 
     fn indexed_fixture(label: &str) -> (PathBuf, PathBuf) {
@@ -599,9 +633,9 @@ mod tests {
     }
 
     #[test]
-    fn valid_zero_chunk_query_decodes_bgzf_and_returns_no_rows() {
+    fn zero_chunk_query_is_not_completion_without_an_exact_binding() {
         let (bed_path, index_path) = indexed_fixture("valid-empty-region");
-        let rows: Vec<_> = StrictBedStream::open_region(
+        let error = StrictBedStream::open_region(
             bed_path.to_str().unwrap(),
             index_path.to_str().unwrap(),
             "chr22",
@@ -609,12 +643,155 @@ mod tests {
             10_010_000,
             total_validator(),
         )
-        .unwrap()
-        .records()
-        .collect::<anyhow::Result<_>>()
-        .unwrap();
+        .err()
+        .expect("unbound zero-chunk query unexpectedly completed");
         remove_fixture(&bed_path, &index_path);
-        assert!(rows.is_empty());
+        assert!(format!("{error:#}").contains("immutable exact source+index binding token"));
+    }
+
+    #[test]
+    fn stale_same_chromosome_index_cannot_complete_a_zero_chunk_query() {
+        let (source_path, source_index) = indexed_fixture_with_records(
+            "stale-same-chrom-source",
+            "chr22",
+            &[(99, 100, "chr22\t99\t100\t80\tTotal\t2\t1\t1\t50")],
+        );
+        let (stale_source, stale_index) = indexed_fixture_with_records(
+            "stale-same-chrom-index",
+            "chr22",
+            &[(999, 1000, "chr22\t999\t1000\t80\tTotal\t2\t1\t1\t50")],
+        );
+        let error = StrictBedStream::open_region(
+            source_path.to_str().unwrap(),
+            stale_index.to_str().unwrap(),
+            "chr22",
+            10_000_000,
+            10_010_000,
+            total_validator(),
+        )
+        .err()
+        .expect("stale same-chromosome index unexpectedly completed");
+        remove_fixture(&source_path, &source_index);
+        remove_fixture(&stale_source, &stale_index);
+        assert!(format!("{error:#}").contains("immutable exact source+index binding token"));
+    }
+
+    #[test]
+    fn in_range_source_with_a_zero_chunk_index_is_rejected() {
+        let (source_path, source_index) = indexed_fixture_with_records(
+            "in-range-zero-index-source",
+            "chr22",
+            &[(99, 100, "chr22\t99\t100\t80\tTotal\t2\t1\t1\t50")],
+        );
+        let (stale_source, stale_index) = indexed_fixture_with_records(
+            "in-range-zero-index-index",
+            "chr22",
+            &[(
+                10_000_000,
+                10_000_001,
+                "chr22\t10000000\t10000001\t80\tTotal\t2\t1\t1\t50",
+            )],
+        );
+        let error = StrictBedStream::open_region(
+            source_path.to_str().unwrap(),
+            stale_index.to_str().unwrap(),
+            "chr22",
+            100,
+            100,
+            total_validator(),
+        )
+        .err()
+        .expect("in-range source with zero index chunks unexpectedly completed");
+        remove_fixture(&source_path, &source_index);
+        remove_fixture(&stale_source, &stale_index);
+        assert!(format!("{error:#}").contains("immutable exact source+index binding token"));
+    }
+
+    #[test]
+    fn zero_chunk_scan_honors_tbi_line_skip_and_comment_metadata() {
+        let header = noodles::csi::binning_index::index::header::Builder::bed()
+            .set_line_comment_prefix(b'@')
+            .set_line_skip_count(1)
+            .build();
+        let (bed_path, index_path) = indexed_fixture_with_header(
+            "declared-header",
+            "chr22",
+            header,
+            &[(99, 100, "chr22\t99\t100\t80\tTotal\t2\t1\t1\t50")],
+        );
+        let file = std::fs::File::create(&bed_path).unwrap();
+        let mut writer = bgzf::Writer::new(file);
+        writeln!(writer, "track name=declared-by-line-skip").unwrap();
+        writeln!(writer, "@declared comment").unwrap();
+        writeln!(writer, "chr22\t99\t100\t80\tTotal\t2\t1\t1\t50").unwrap();
+        writer.finish().unwrap();
+
+        let error = StrictBedStream::open_region(
+            bed_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            10_000_000,
+            10_010_000,
+            total_validator(),
+        )
+        .err()
+        .expect("unbound declared-header source unexpectedly completed");
+        remove_fixture(&bed_path, &index_path);
+        assert!(format!("{error:#}").contains("immutable exact source+index binding token"));
+    }
+
+    #[test]
+    fn late_bgzf_corruption_is_detected_before_zero_chunk_refusal() {
+        let (bed_path, index_path) = indexed_fixture("late-corruption");
+        let mut bytes = std::fs::read(&bed_path).unwrap();
+        let first_block_size = usize::from(u16::from_le_bytes([bytes[16], bytes[17]])) + 1;
+        let second_block_size = usize::from(u16::from_le_bytes([
+            bytes[first_block_size + 16],
+            bytes[first_block_size + 17],
+        ])) + 1;
+        let second_crc = first_block_size + second_block_size - 8;
+        bytes[second_crc] ^= 0x01;
+        std::fs::write(&bed_path, bytes).unwrap();
+
+        let error = StrictBedStream::open_region(
+            bed_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            10_000_000,
+            10_010_000,
+            total_validator(),
+        )
+        .err()
+        .expect("late-corrupt zero-chunk source unexpectedly completed");
+        remove_fixture(&bed_path, &index_path);
+        let detail = format!("{error:#}");
+        assert!(detail.contains("zero-chunk BGZF validation read failed"));
+        assert!(!detail.contains("immutable exact source+index binding token"));
+    }
+
+    #[test]
+    fn zero_chunk_validation_has_a_bounded_decompressed_scan_budget() {
+        let (bed_path, index_path) = indexed_fixture("bounded-zero-chunk-scan");
+        let file = std::fs::File::create(&bed_path).unwrap();
+        let mut writer = bgzf::Writer::new(file);
+        let comment = format!("#{}", "x".repeat(1023));
+        for _ in 0..=ZERO_CHUNK_VALIDATION_MAX_DECOMPRESSED_BYTES / 1024 {
+            writeln!(writer, "{comment}").unwrap();
+        }
+        writer.finish().unwrap();
+
+        let error = StrictBedStream::open_region(
+            bed_path.to_str().unwrap(),
+            index_path.to_str().unwrap(),
+            "chr22",
+            10_000_000,
+            10_010_000,
+            total_validator(),
+        )
+        .err()
+        .expect("oversized zero-chunk diagnostic unexpectedly completed");
+        remove_fixture(&bed_path, &index_path);
+        assert!(format!("{error:#}").contains("decompressed diagnostic budget"));
     }
 
     #[test]
