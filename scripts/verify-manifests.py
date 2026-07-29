@@ -37,6 +37,9 @@ y1_tables = {
     "lr_y1_coverage",
     "lr_y1_methylation_staging",
     "lr_y1_methylation",
+    "lr_y1_methylation_phased_staging",
+    "lr_y1_methylation_phased",
+    "lr_y1_methylation_availability",
     "lr_y1_methylation_summary",
     "lr_y1_str_histograms_staging",
     "lr_y1_str_histograms",
@@ -69,7 +72,8 @@ for table in ["lr_y1_summaries", "lr_y1_alleles", "lr_y1_frequencies", "lr_y1_ca
 for table in [
     "lr_y1_coverage_staging", "lr_y1_coverage",
     "lr_y1_methylation_staging", "lr_y1_methylation",
-    "lr_y1_methylation_summary", "lr_y1_str_histograms_staging",
+    "lr_y1_methylation_phased_staging", "lr_y1_methylation_phased",
+    "lr_y1_methylation_availability", "lr_y1_methylation_summary", "lr_y1_str_histograms_staging",
     "lr_y1_str_histograms",
 ]:
     ddl = (y1_sql_dir / f"{table}.sql").read_text()
@@ -80,5 +84,49 @@ for table in [
 active_ancillary = (y1_sql_dir / "lr_y1_active_ancillary.sql").read_text()
 assert "ORDER BY (release, cohort, reference_genome, modality)" in active_ancillary
 
+storage = (ROOT / "src" / "y1" / "storage.rs").read_text()
+assert "pub const Y1_SCHEMA_VERSION: u16 = 4;" in storage
+for table in [
+    "lr_y1_methylation_phased_staging",
+    "lr_y1_methylation_phased",
+    "lr_y1_methylation_availability",
+]:
+    assert f'include_str!("../../sql/y1/{table}.sql")' in storage
+
+source_measures = {
+    "methylation Float32",
+    "coverage UInt32",
+    "estimated_modified_count UInt32",
+    "estimated_unmodified_count UInt32",
+    "discretized_methylation Float32",
+}
+for table in ["lr_y1_methylation_staging", "lr_y1_methylation"]:
+    ddl = (y1_sql_dir / f"{table}.sql").read_text()
+    assert all(measure in ddl for measure in source_measures)
+    assert "combined" in ddl.lower() or "Total" in ddl
+
+for table in ["lr_y1_methylation_phased_staging", "lr_y1_methylation_phased"]:
+    ddl = (y1_sql_dir / f"{table}.sql").read_text()
+    assert "source_haplotype UInt8" in ddl
+    assert "vcf_strand" not in ddl
+    assert all(measure in ddl for measure in source_measures)
+    assert "sample_id, source_haplotype" in ddl
+
+availability = (y1_sql_dir / "lr_y1_methylation_availability.sql").read_text()
+for column in [
+    "inventory_status", "load_status", "source_rows", "canonical_rows", "reason",
+    "orientation_status", "queryable_raw", "joinable_to_vcf", "source_manifest_hash",
+]:
+    assert column in availability
+assert "source_haplotype Nullable(UInt8)" in availability
+
+attempts = (y1_sql_dir / "lr_y1_ancillary_task_attempts.sql").read_text()
+for column in [
+    "lease_id", "sample_id", "data_layer", "source_haplotype", "manifest_entry_id",
+    "source_object_slot", "source_generation", "source_size_bytes", "source_checksum",
+    "key_hash", "content_hash",
+]:
+    assert column in attempts
+
 exec((ROOT / "scripts" / "verify-y1-ancillary-manifests.py").read_text(), {"__name__": "__main__", "__file__": str(ROOT / "scripts" / "verify-y1-ancillary-manifests.py")})
-print("Manifests verified: legacy smoke is isolated and Y1 DDL is versioned separately")
+print("Manifests verified: legacy smoke is isolated and Y1 schema v4 phased methylation remains unjoined")

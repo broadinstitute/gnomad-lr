@@ -5,7 +5,7 @@ use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const Y1_SCHEMA_VERSION: u16 = 3;
+pub const Y1_SCHEMA_VERSION: u16 = 4;
 
 const SUMMARY_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, ref_allele, alts, allele_type, qual, filters, ac, an, af, allele_lengths, length_provenance, source_allele_length, source_svlen, source_svlen_present, frequencies_json, source_info_json";
 const ALLELE_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, reference_end, xpos, source_variant_id, alt_index, ref_allele, alt, allele_type, qual, filters, ac, an, af, allele_length, length_provenance, rsids, cadd_phred, phylop, major_consequence, short_read_match_id, short_read_match_type, short_read_match_source";
@@ -74,6 +74,18 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
         (
             "lr_y1_methylation",
             include_str!("../../sql/y1/lr_y1_methylation.sql"),
+        ),
+        (
+            "lr_y1_methylation_phased_staging",
+            include_str!("../../sql/y1/lr_y1_methylation_phased_staging.sql"),
+        ),
+        (
+            "lr_y1_methylation_phased",
+            include_str!("../../sql/y1/lr_y1_methylation_phased.sql"),
+        ),
+        (
+            "lr_y1_methylation_availability",
+            include_str!("../../sql/y1/lr_y1_methylation_availability.sql"),
         ),
         (
             "lr_y1_methylation_summary",
@@ -148,7 +160,7 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
     }
 
     // CREATE TABLE IF NOT EXISTS does not evolve an existing pilot database.
-    // Keep additive migrations idempotent so schema v3 can be rehearsed in place.
+    // Keep additive migrations idempotent so schema v4 can be rehearsed in place.
     for table in ["lr_y1_alleles_staging", "lr_y1_alleles"] {
         for (column, column_type) in [
             ("rsids", "Array(String)"),
@@ -164,6 +176,46 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
                     "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"
                 ))
                 .with_context(|| format!("failed to add Y1 annotation column {table}.{column}"))?;
+        }
+    }
+    for (column, column_type) in [
+        ("lease_id", "String"),
+        ("sample_id", "LowCardinality(String)"),
+        ("data_layer", "LowCardinality(String)"),
+        ("source_haplotype", "Nullable(UInt8)"),
+        ("manifest_entry_id", "String"),
+        ("source_object_slot", "LowCardinality(String)"),
+        ("source_uri", "String"),
+        ("source_generation", "String"),
+        ("source_size_bytes", "UInt64"),
+        ("source_checksum_algorithm", "LowCardinality(String)"),
+        ("source_checksum", "String"),
+        ("key_hash", "FixedString(64)"),
+    ] {
+        target
+            .execute(&format!(
+                "ALTER TABLE lr_y1_ancillary_task_attempts ADD COLUMN IF NOT EXISTS {column} {column_type}"
+            ))
+            .with_context(|| format!("failed to add Y1 ancillary attempt column {column}"))?;
+    }
+    for table in ["lr_y1_methylation_staging", "lr_y1_methylation"] {
+        target
+            .execute(&format!(
+                "ALTER TABLE {table} MODIFY COLUMN coverage UInt32"
+            ))
+            .with_context(|| format!("failed to widen {table}.coverage to UInt32"))?;
+        for (column, column_type) in [
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ] {
+            target
+                .execute(&format!(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}"
+                ))
+                .with_context(|| {
+                    format!("failed to add Y1 methylation measure {table}.{column}")
+                })?;
         }
     }
     Ok(())
