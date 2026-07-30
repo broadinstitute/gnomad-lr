@@ -85,5 +85,8 @@ assert run_manifest["task_count"] == 462 and run_manifest["task_manifest_sha256"
 with (ROOT / "genohype.phased-canary.toml").open("rb") as handle:
     profile = tomllib.load(handle)["pools"]["lr-phased-chr22-canary"]
 assert profile["starting_workers"] == 0 and profile["workers"] == 1
+assert profile["public_ip"] is False and profile["manage_firewall"] is False
+assert profile["service_account"] == "gnomad-lr-sa@gnomadev.iam.gserviceaccount.com"
+assert profile["coordinator_service_account"] == profile["service_account"]
 assert profile["worker_binary"] == "target/release/gnomad-lr-worker"
 print(f"phased mirror canary tests passed: 462 tasks, sha256 {manifest_sha256}")
