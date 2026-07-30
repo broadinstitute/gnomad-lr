@@ -14,6 +14,8 @@ use std::time::Instant;
 pub struct PoolY1TargetSpec {
     pub endpoint: String,
     pub database: String,
+    /// Exact dedicated ClickHouse user that the finalizer will set read-only.
+    pub worker_principal: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,6 +111,9 @@ impl PoolY1JobSpec {
         }
         if self.batch_records == 0 {
             bail!("batch_records must be greater than zero");
+        }
+        if self.target.worker_principal.trim().is_empty() {
+            bail!("strict Y1 jobs require the dedicated ClickHouse worker_principal");
         }
         Ok(())
     }
@@ -679,6 +684,22 @@ mod tests {
             retry_attempt_id: None,
             controlled_fail_once: None,
         }
+    }
+
+    #[test]
+    fn worker_job_contract_requires_a_dedicated_principal() {
+        let mut job = PoolY1JobSpec {
+            action: "load_y1_interval".into(),
+            target: PoolY1TargetSpec {
+                endpoint: "http://10.0.0.2:8123".into(),
+                database: "gnomad_lr_y1_scratch_v5_fresh".into(),
+                worker_principal: "gnomad_lr_y1_worker".into(),
+            },
+            batch_records: 250,
+        };
+        job.validate().unwrap();
+        job.target.worker_principal.clear();
+        assert!(job.validate().is_err());
     }
 
     #[test]

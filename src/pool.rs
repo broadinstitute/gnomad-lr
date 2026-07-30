@@ -227,10 +227,15 @@ async fn handle_y1_interval_tasks(
         &job.target.endpoint,
         &job.target.database,
         crate::y1::TargetKind::Scratch,
-        crate::y1::AuthSource::PrivateNetwork,
+        crate::y1::AuthSource::Environment {
+            username_variable: crate::y1::Y1_WORKER_USERNAME_ENV.to_string(),
+            password_variable: crate::y1::Y1_WORKER_PASSWORD_ENV.to_string(),
+        },
         true,
         false,
     )?;
+    target.attest_current_user(&job.target.worker_principal)?;
+    target.attest_synchronous_inserts()?;
     let worker_identity = worker_identity();
     let build_identity = WORKER_BUILD_IDENTITY;
     let backend_revision = BACKEND_REVISION;

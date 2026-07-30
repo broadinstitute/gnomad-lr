@@ -13,8 +13,7 @@ compile_error!("gnomad-lr requires the default `clickhouse` feature");
 use clap::Parser;
 use cli::{
     parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
-    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1MaterializeArgs, Y1PrimaryPointerArgs,
-    Y1TargetKindArg,
+    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
@@ -56,36 +55,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::FinalizeY1Chr22(args) => {
             tokio::task::spawn_blocking(move || run_y1_finalization(args, true)).await??;
-        }
-        Commands::MaterializeY1Contig(args) => {
-            tokio::task::spawn_blocking(move || run_y1_materialization(args, false)).await??;
-        }
-        Commands::MaterializeY1Chr22(args) => {
-            tokio::task::spawn_blocking(move || run_y1_materialization(args, true)).await??;
-        }
-        Commands::ActivateY1Contig(args) => {
-            tokio::task::spawn_blocking(move || {
-                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Activate, false)
-            })
-            .await??;
-        }
-        Commands::ActivateY1Chr22(args) => {
-            tokio::task::spawn_blocking(move || {
-                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Activate, true)
-            })
-            .await??;
-        }
-        Commands::RollbackY1Contig(args) => {
-            tokio::task::spawn_blocking(move || {
-                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Rollback, false)
-            })
-            .await??;
-        }
-        Commands::RollbackY1Chr22(args) => {
-            tokio::task::spawn_blocking(move || {
-                run_y1_primary_pointer(args, y1::PrimaryPointerAction::Rollback, true)
-            })
-            .await??;
         }
         Commands::ReconcileY1Metadata(args) => {
             tokio::task::spawn_blocking(move || {
@@ -176,18 +145,40 @@ fn y1_target(args: &Y1InitArgs) -> anyhow::Result<y1::ClickHouseTarget> {
     )
 }
 
-fn cohort(value: Y1CohortArg) -> y1::Cohort {
-    match value {
-        Y1CohortArg::HgsvcHprc => y1::Cohort::HgsvcHprc,
-        Y1CohortArg::Aou => y1::Cohort::Aou,
-    }
+fn worker_target(
+    args: &Y1InitArgs,
+    username_env: &str,
+    password_env: &str,
+) -> anyhow::Result<y1::ClickHouseTarget> {
+    let kind = match args.target_kind {
+        Y1TargetKindArg::Scratch => y1::TargetKind::Scratch,
+        Y1TargetKindArg::Serving => y1::TargetKind::Serving,
+    };
+    y1::ClickHouseTarget::new(
+        &args.endpoint,
+        &args.database,
+        kind,
+        y1::AuthSource::Environment {
+            username_variable: username_env.to_string(),
+            password_variable: password_env.to_string(),
+        },
+        args.allow_remote,
+        args.allow_serving,
+    )
 }
 
 fn run_y1_finalization(args: Y1FinalizeArgs, chr22_compatibility: bool) -> anyhow::Result<()> {
     let target = y1_target(&args.target)?;
+    let worker = worker_target(
+        &args.target,
+        &args.worker_username_env,
+        &args.worker_password_env,
+    )?;
+    let fence = y1::WorkerWriteFence::new(&target, worker, &args.worker_principal)?;
     let report = if chr22_compatibility {
         y1::finalizer::finalize_chr22_run(
             &target,
+            &fence,
             &args.manifest,
             &args.independent_counts,
             &args.operator_identity,
@@ -195,98 +186,10 @@ fn run_y1_finalization(args: Y1FinalizeArgs, chr22_compatibility: bool) -> anyho
     } else {
         y1::finalizer::finalize_contig_run(
             &target,
+            &fence,
             &args.manifest,
             &args.independent_counts,
             &args.operator_identity,
-        )?
-    };
-    write_json_report(&args.report, &report)
-}
-
-fn run_y1_materialization(
-    args: Y1MaterializeArgs,
-    chr22_compatibility: bool,
-) -> anyhow::Result<()> {
-    let target = y1_target(&args.target)?;
-    let report = if chr22_compatibility {
-        if args.chrom.as_deref().is_some_and(|chrom| chrom != "chr22") {
-            anyhow::bail!("legacy materialization accepts only --chrom chr22");
-        }
-        y1::materialize_serving_candidate(
-            &target,
-            &args.scratch_database,
-            &args.run_id,
-            cohort(args.cohort),
-            &args.operator_identity,
-        )?
-    } else {
-        let chrom = args
-            .chrom
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("generic materialization requires --chrom"))?;
-        y1::materialize_contig_serving_candidate(
-            &target,
-            &args.scratch_database,
-            &args.run_id,
-            cohort(args.cohort),
-            chrom,
-            &args.operator_identity,
-        )?
-    };
-    write_json_report(&args.report, &report)
-}
-
-fn run_y1_primary_pointer(
-    args: Y1PrimaryPointerArgs,
-    action: y1::PrimaryPointerAction,
-    chr22_compatibility: bool,
-) -> anyhow::Result<()> {
-    let target = y1_target(&args.target)?;
-    let acceptance: y1::ServingAcceptance =
-        serde_json::from_slice(&std::fs::read(&args.acceptance)?)?;
-    let expected = if args.expect_no_current {
-        y1::ExpectedPointer::Absent
-    } else {
-        y1::ExpectedPointer::Current {
-            run_id: args.expected_current_run_id.ok_or_else(|| anyhow::anyhow!(
-                "supply --expected-current-run-id/--expected-current-revision or --expect-no-current"
-            ))?,
-            revision: args.expected_current_revision.ok_or_else(|| anyhow::anyhow!(
-                "--expected-current-revision is required with --expected-current-run-id"
-            ))?,
-        }
-    };
-    let report = if chr22_compatibility {
-        if args.chrom.as_deref().is_some_and(|chrom| chrom != "chr22") {
-            anyhow::bail!("legacy primary-pointer commands accept only --chrom chr22");
-        }
-        y1::change_primary_pointer(
-            &target,
-            &args.run_id,
-            cohort(args.cohort),
-            &acceptance,
-            &expected,
-            &args.operator_identity,
-            action,
-            args.restore_absence,
-            args.dry_run,
-        )?
-    } else {
-        let chrom = args
-            .chrom
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("generic primary-pointer commands require --chrom"))?;
-        y1::change_contig_primary_pointer(
-            &target,
-            &args.run_id,
-            cohort(args.cohort),
-            chrom,
-            &acceptance,
-            &expected,
-            &args.operator_identity,
-            action,
-            args.restore_absence,
-            args.dry_run,
         )?
     };
     write_json_report(&args.report, &report)
@@ -309,10 +212,16 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
     if args.batch_records == 0 {
         anyhow::bail!("--batch-records must be greater than zero");
     }
-    let target = y1_target(&args.target)?;
+    let target = worker_target(
+        &args.target,
+        &args.worker_username_env,
+        &args.worker_password_env,
+    )?;
     if target.kind() != y1::TargetKind::Scratch {
         anyhow::bail!("bounded Y1 source loads are restricted to scratch targets");
     }
+    target.attest_current_user(&args.worker_principal)?;
+    target.attest_synchronous_inserts()?;
 
     let cohort = match args.cohort {
         Y1CohortArg::HgsvcHprc => y1::Cohort::HgsvcHprc,

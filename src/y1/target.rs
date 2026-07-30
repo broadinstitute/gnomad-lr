@@ -5,9 +5,15 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::net::IpAddr;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const CLICKHOUSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+const WORKER_INSERT_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
+const WORKER_INSERT_DRAIN_POLL: Duration = Duration::from_millis(100);
+
+pub const Y1_WORKER_USERNAME_ENV: &str = "Y1_CLICKHOUSE_WORKER_USER";
+pub const Y1_WORKER_PASSWORD_ENV: &str = "Y1_CLICKHOUSE_WORKER_PASSWORD";
 
 const SCRATCH_DATABASE_PREFIX: &str = "gnomad_lr_y1_scratch_";
 const FULL_PROTOTYPE_SCRATCH_DATABASE_PREFIX: &str = "gnomad_lr_y1_full_prototype_scratch_";
@@ -168,6 +174,42 @@ impl ClickHouseTarget {
         )
     }
 
+    pub(crate) fn same_destination(&self, other: &Self) -> bool {
+        self.endpoint == other.endpoint
+            && self.database == other.database
+            && self.kind == other.kind
+    }
+
+    pub(crate) fn uses_environment_auth(&self) -> bool {
+        matches!(self.auth, AuthSource::Environment { .. })
+    }
+
+    pub fn attest_current_user(&self, expected: &str) -> anyhow::Result<()> {
+        validate_identifier(expected, "ClickHouse principal")?;
+        let current = self.query_text("SELECT currentUser() FORMAT TabSeparated", &[])?;
+        if current.trim() != expected {
+            bail!(
+                "configured ClickHouse principal {:?} does not match authenticated principal {:?}",
+                expected,
+                current.trim()
+            );
+        }
+        Ok(())
+    }
+
+    pub fn attest_synchronous_inserts(&self) -> anyhow::Result<()> {
+        let value = self.query_text(
+            "SELECT value FROM system.settings WHERE name = 'async_insert' FORMAT TabSeparated",
+            &[],
+        )?;
+        if value.trim() != "0" {
+            bail!(
+                "Y1 workers require async_insert = 0 so the database fence can drain every insert"
+            );
+        }
+        Ok(())
+    }
+
     pub fn execute(&self, query: &str) -> anyhow::Result<()> {
         self.execute_with_params(query, &[])
     }
@@ -245,7 +287,10 @@ impl ClickHouseTarget {
         }
 
         let mut url = self.request_url(&[])?;
-        url.query_pairs_mut().append_pair("query", &query);
+        url.query_pairs_mut()
+            .append_pair("query", &query)
+            .append_pair("async_insert", "0")
+            .append_pair("wait_for_async_insert", "1");
         let response = self
             .authorized(clickhouse_client()?.post(url))?
             .header("Content-Type", "application/x-ndjson")
@@ -287,6 +332,105 @@ impl ClickHouseTarget {
                 Ok(request.basic_auth(username, Some(password)))
             }
         }
+    }
+}
+
+/// Database-enforced fence for the one dedicated principal allowed to perform
+/// Y1 worker inserts. The administrator target remains separate so freezing a
+/// worker cannot freeze the finalizer itself.
+#[derive(Debug, Clone)]
+pub struct WorkerWriteFence {
+    worker: ClickHouseTarget,
+    principal: String,
+}
+
+impl WorkerWriteFence {
+    pub fn new(
+        administrator: &ClickHouseTarget,
+        worker: ClickHouseTarget,
+        principal: &str,
+    ) -> anyhow::Result<Self> {
+        if administrator.kind() != TargetKind::Scratch || !administrator.same_destination(&worker) {
+            bail!("worker fence requires distinct credentials for the same scratch destination");
+        }
+        if !worker.uses_environment_auth() {
+            bail!(
+                "worker fence requires a dedicated environment-authenticated ClickHouse principal"
+            );
+        }
+        validate_identifier(principal, "worker principal")?;
+        Ok(Self {
+            worker,
+            principal: principal.to_string(),
+        })
+    }
+
+    pub fn principal(&self) -> &str {
+        &self.principal
+    }
+
+    pub fn attest_identity(&self) -> anyhow::Result<()> {
+        self.worker.attest_current_user(&self.principal)
+    }
+
+    pub fn apply_and_drain(&self, administrator: &ClickHouseTarget) -> anyhow::Result<()> {
+        self.validate_administrator(administrator)?;
+        self.attest_identity()?;
+        self.worker.attest_synchronous_inserts()?;
+        let found = administrator.query_text(
+            "SELECT count() FROM system.users WHERE name = {principal:String} FORMAT TabSeparated",
+            &[("principal", self.principal())],
+        )?;
+        if found.trim() != "1" {
+            bail!("dedicated ClickHouse worker principal is absent or ambiguous");
+        }
+        administrator.execute(&format!(
+            "ALTER USER {} SETTINGS readonly = 1, async_insert = 0",
+            self.principal
+        ))?;
+        self.attest_fenced_and_drained(administrator)
+    }
+
+    pub fn attest_fenced_and_drained(
+        &self,
+        administrator: &ClickHouseTarget,
+    ) -> anyhow::Result<()> {
+        self.validate_administrator(administrator)?;
+        self.attest_identity()?;
+        let settings = self.worker.query_text(
+            "SELECT name, value FROM system.settings WHERE name IN ('readonly', 'async_insert') ORDER BY name FORMAT TabSeparated",
+            &[],
+        )?;
+        if settings.trim() != "async_insert\t0\nreadonly\t1" {
+            bail!("dedicated ClickHouse worker principal is not durably read-only with synchronous inserts");
+        }
+
+        let started = Instant::now();
+        loop {
+            let active = administrator.query_text(
+                "SELECT count() FROM system.processes WHERE user = {principal:String} AND positionCaseInsensitive(query, 'INSERT') = 1 FORMAT TabSeparated",
+                &[("principal", self.principal())],
+            )?;
+            if active.trim() == "0" {
+                return Ok(());
+            }
+            if started.elapsed() >= WORKER_INSERT_DRAIN_TIMEOUT {
+                bail!("timed out draining active ClickHouse worker inserts after writer fence");
+            }
+            thread::sleep(WORKER_INSERT_DRAIN_POLL);
+        }
+    }
+
+    fn validate_administrator(&self, administrator: &ClickHouseTarget) -> anyhow::Result<()> {
+        if !administrator.same_destination(&self.worker) {
+            bail!("worker fence administrator and worker targets differ");
+        }
+        let administrator_principal =
+            administrator.query_text("SELECT currentUser() FORMAT TabSeparated", &[])?;
+        if administrator_principal.trim() == self.principal {
+            bail!("finalizer administrator must be distinct from the dedicated worker principal");
+        }
+        Ok(())
     }
 }
 
@@ -388,6 +532,35 @@ mod tests {
         assert_ne!(
             format!("{:x}", first.finalize()),
             format!("{:x}", changed.finalize())
+        );
+    }
+
+    #[test]
+    fn writer_fence_requires_a_separate_environment_authenticated_principal() {
+        let administrator =
+            scratch("http://127.0.0.1:8123", "gnomad_lr_y1_scratch_v5_unit").unwrap();
+        let unauthenticated_worker = administrator.clone();
+        assert!(WorkerWriteFence::new(
+            &administrator,
+            unauthenticated_worker,
+            "gnomad_lr_y1_worker"
+        )
+        .is_err());
+
+        let other_database = ClickHouseTarget::new(
+            "http://127.0.0.1:8123",
+            "gnomad_lr_y1_scratch_v5_other",
+            TargetKind::Scratch,
+            AuthSource::Environment {
+                username_variable: Y1_WORKER_USERNAME_ENV.into(),
+                password_variable: Y1_WORKER_PASSWORD_ENV.into(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(
+            WorkerWriteFence::new(&administrator, other_database, "gnomad_lr_y1_worker").is_err()
         );
     }
 

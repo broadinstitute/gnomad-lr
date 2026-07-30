@@ -45,15 +45,25 @@ target/debug/gnomad-lr init-y1 \
   --auth-source none
 ```
 
-Remote targets require `--allow-remote --auth-source environment`; credentials are read from `Y1_CLICKHOUSE_USER` and `Y1_CLICKHOUSE_PASSWORD` by default. Serving-class schema operations additionally require `--allow-serving`. These acknowledgements do not make surveyed Y1 writes acceptable before the remaining acceptance gates pass.
+Remote targets require `--allow-remote --auth-source environment`; administrator/finalizer credentials are read from `Y1_CLICKHOUSE_USER` and `Y1_CLICKHOUSE_PASSWORD` by default. Serving-class schema operations additionally require `--allow-serving`. These acknowledgements do not make surveyed Y1 writes acceptable before the remaining acceptance gates pass.
+
+Every v5 primary writer must use one dedicated ClickHouse principal. Its exact username is supplied as `--worker-principal` (and as `target.worker_principal` in a pool payload), while its credentials are read from `Y1_CLICKHOUSE_WORKER_USER` and `Y1_CLICKHOUSE_WORKER_PASSWORD`. The authenticated username must match exactly or loading/finalization fails closed. Provisioning must grant that user only the `SELECT, INSERT` access needed on the fresh candidate database; the separate finalizer administrator must be able to `ALTER USER` and read `system.users`/`system.processes`. For example (password and administrator grants remain secret/infrastructure-managed):
+
+```sql
+CREATE USER gnomad_lr_y1_worker IDENTIFIED WITH sha256_password BY 'REPLACE_SECRET' SETTINGS async_insert = 0;
+GRANT SELECT, INSERT ON gnomad_lr_y1_scratch_v5_fresh.* TO gnomad_lr_y1_worker;
+```
+
+Finalization appends `freezing`, attests that task leases are terminal, executes `ALTER USER <worker> SETTINGS readonly = 1, async_insert = 0`, verifies those settings through the worker credentials, drains that principal's active `INSERT` queries from `system.processes`, and reattests terminal leases before any snapshot. The worker fence is never lifted by this binary. A missing principal, credential, privilege, or fence attestation stops finalization without a snapshot.
 
 The bounded source path is scratch-only, requires an adjacent TBI plus immutable source metadata, writes a machine-readable report, and publishes only when every source record produces one summary with zero structured rejects:
 
 ```bash
 target/debug/gnomad-lr load-y1-interval \
   --endpoint http://127.0.0.1:8126 \
-  --database gnomad_lr_y1_scratch_demo \
-  --target-kind scratch --auth-source none \
+  --database gnomad_lr_y1_scratch_v5_demo \
+  --target-kind scratch --auth-source environment \
+  --worker-principal gnomad_lr_y1_worker \
   --cohort aou \
   --vcf gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.chr22.vcf.gz \
   --source-generation GENERATION --source-checksum MD5_BASE64 \
@@ -63,9 +73,9 @@ target/debug/gnomad-lr load-y1-interval \
   --report-path /tmp/aou-10kb.json
 ```
 
-Records are transformed and inserted directly into the canonical attempt-scoped tables in bounded batches (250 records by default). Full-run finalization first fences new writers, verifies every terminal attempt and physical count, synchronously removes nonaccepted retry rows, computes ordered RowBinary SHA-256 digests, durably freezes the run, rereads the same rows, and only then records `accepted_frozen`. It never copies rows into a second primary table set. This prevents a 1 Mb genotype-rich interval from being materialized as one multi-gigabyte client-side insert. Complete source INFO JSON is stored once on the source-record summary; ALT-expanded rows reference the same run/cohort/source identity instead of duplicating multi-megabyte record payloads for every ALT.
+Records are transformed and inserted directly into the canonical attempt-scoped tables in bounded batches (250 records by default). Full-run finalization database-fences the dedicated writer, verifies every terminal attempt and physical count, synchronously removes all strictly attributable nonaccepted-attempt rows (including partial table writes), computes ordered RowBinary SHA-256 digests, durably freezes the run, rereads the same rows, and only then records `accepted_frozen`. A retry from `frozen` or `accepted_frozen` revalidates the exact manifest, independent counts, counts, receipt, and digests; accepted retries return the persisted machine report. It never copies rows into a second primary table set. This prevents a 1 Mb genotype-rich interval from being materialized as one multi-gigabyte client-side insert. Complete source INFO JSON is stored once on the source-record summary; ALT-expanded rows reference the same run/cohort/source identity instead of duplicating multi-megabyte record payloads for every ALT.
 
-A rejected attempt remains visible in the immutable attempt ledger; its primary rows are deleted before a full run can be accepted. Interval runs cannot activate a serving partition. Environment-level endpoint cutover is a later, explicitly authorized operation; finalization neither activates serving nor applies Terraform. Existing instances remain the rollback environment.
+A rejected attempt remains visible in the immutable attempt ledger; its primary rows are deleted before a full run can be accepted. The schema-v5 binary does not compile primary materialize/activate/rollback commands or export their legacy `published` acceptance route. Environment-level endpoint cutover is a later, separately authorized external operation that must consume exact `accepted_frozen` evidence; finalization neither activates serving nor applies Terraform. Existing instances remain the rollback environment.
 
 Recommended promotion path:
 

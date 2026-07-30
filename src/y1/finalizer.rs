@@ -1,7 +1,7 @@
 use super::{
     contig::grch38_contig_length, record_load_run, storage::delete_attempt_rows, ClickHouseTarget,
     LoadRunLedgerRow, LoadScope, PoolY1TaskSpec, ReferenceGenome, Release, StagedCounts,
-    TargetKind, Y1_SCHEMA_VERSION,
+    TargetKind, WorkerWriteFence, Y1_SCHEMA_VERSION,
 };
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,7 @@ pub struct CanonicalTableCount {
 pub struct LoadAcceptanceReceipt {
     pub contract_version: u8,
     pub schema_version: u16,
+    pub worker_principal: String,
     pub run_id: String,
     pub cohort: String,
     pub chrom: String,
@@ -111,7 +112,7 @@ pub struct LoadAcceptanceReceipt {
     pub canonical_digests: Vec<CanonicalContentDigest>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalizationReport {
     pub run_id: String,
     pub cohort: String,
@@ -197,44 +198,52 @@ const TABLES: [TableSpec; 5] = [
     },
 ];
 
-/// Backward-compatible chr22-only entry point with its original signature.
+/// Backward-compatible chr22-only entry point with its original command name.
 pub fn finalize_chr22_run(
     target: &ClickHouseTarget,
+    fence: &WorkerWriteFence,
     manifest_path: &Path,
     expected_path: &Path,
     operator_identity: &str,
 ) -> anyhow::Result<FinalizationReport> {
     finalize_contig_run_inner(
         target,
+        fence,
         manifest_path,
         expected_path,
         operator_identity,
         Some("chr22"),
+        false,
     )
 }
 
 /// Freeze and accept exactly one complete canonical GRCh38 contig in place.
 pub fn finalize_contig_run(
     target: &ClickHouseTarget,
+    fence: &WorkerWriteFence,
     manifest_path: &Path,
     expected_path: &Path,
     operator_identity: &str,
 ) -> anyhow::Result<FinalizationReport> {
     finalize_contig_run_inner(
         target,
+        fence,
         manifest_path,
         expected_path,
         operator_identity,
         None,
+        false,
     )
 }
 
 fn finalize_contig_run_inner(
     target: &ClickHouseTarget,
+    fence: &WorkerWriteFence,
     manifest_path: &Path,
     expected_path: &Path,
     operator_identity: &str,
     required_chrom: Option<&str>,
+    stop_after_frozen: bool,
 ) -> anyhow::Result<FinalizationReport> {
     if target.kind() != TargetKind::Scratch {
         bail!("contig candidate finalization is restricted to an isolated scratch target");
@@ -260,7 +269,38 @@ fn finalize_contig_run_inner(
     validate_independent_reconciliation(&expected, &run)?;
     let independent_counts_sha256 = format!("{:x}", Sha256::digest(&expected_bytes));
 
-    ensure_freeze_transition(target, &run.run_id)?;
+    let durable = read_durable_report(target, &run.run_id)?;
+    if let Some((state, persisted)) = durable {
+        fence.attest_fenced_and_drained(target)?;
+        attest_no_active_task_leases(target, &run.run_id)?;
+        let verified = rebuild_report(
+            target,
+            fence,
+            &run,
+            &tasks,
+            &expected,
+            operator_identity,
+            manifest_sha256,
+            independent_counts_sha256,
+        )?;
+        if persisted != verified {
+            bail!("durable frozen machine report differs from exact manifest/count/digest revalidation");
+        }
+        if state == "accepted_frozen" {
+            return Ok(persisted);
+        }
+        record_report_state(
+            target,
+            &run,
+            &expected,
+            tasks.len(),
+            "accepted_frozen",
+            &persisted,
+        )?;
+        validate_persisted_report(target, &run.run_id, "accepted_frozen", &persisted)?;
+        return Ok(persisted);
+    }
+
     record_state(
         target,
         &run,
@@ -272,137 +312,205 @@ fn finalize_contig_run_inner(
     )?;
 
     let result = (|| -> anyhow::Result<FinalizationReport> {
-        // The freezing row is the application-level writer fence. Every primary
-        // batch checks it before insertion. All attempt claims must now be terminal.
+        // The ledger marker blocks cooperative writers. It is not the database
+        // fence: terminal leases are attested before and after the dedicated
+        // worker principal is made read-only, then already-running inserts drain.
+        attest_no_active_task_leases(target, &run.run_id)?;
+        fence.apply_and_drain(target)?;
+        attest_no_active_task_leases(target, &run.run_id)?;
+
         let before = validate_ledger_coverage(target, &run, &tasks, PhysicalPhase::BeforeCleanup)?;
         validate_expected_counts(&before.counts, expected.counts)?;
-
-        // Fresh-instance retries are resolved in place. Failed attempt rows are
-        // removed synchronously; no accepted rows are copied to another table.
         for (task_id, attempt_id) in &before.nonaccepted {
             delete_attempt_rows(target, &run.run_id, task_id, attempt_id)?;
         }
 
-        let frozen = validate_ledger_coverage(target, &run, &tasks, PhysicalPhase::Frozen)?;
-        validate_expected_counts(&frozen.counts, expected.counts)?;
-        let digests = read_canonical_digests(target, &run, &frozen.accepted, &frozen.counts)?;
-        let acceptance = build_acceptance_receipt(
-            &run,
-            &expected,
-            &frozen,
-            manifest_sha256.clone(),
-            independent_counts_sha256.clone(),
-            digests,
-        );
-        let acceptance_json = serde_json::to_string(&acceptance)?;
-        let acceptance_receipt_sha256 = format!("{:x}", Sha256::digest(acceptance_json.as_bytes()));
-
-        record_state(
+        let report = rebuild_report(
             target,
+            fence,
             &run,
+            &tasks,
             &expected,
-            tasks.len(),
-            revision_now()?,
-            "frozen",
-            &acceptance_json,
+            operator_identity,
+            manifest_sha256,
+            independent_counts_sha256,
         )?;
-        validate_persisted_receipt(target, &run.run_id, "frozen", &acceptance_json)?;
-
-        // Reread the exact same canonical rows after the durable frozen marker.
-        // Any late ledger contribution, row, deletion, or same-count mutation
-        // changes this snapshot and fails before acceptance.
-        let reread = validate_ledger_coverage(target, &run, &tasks, PhysicalPhase::Frozen)?;
-        validate_expected_counts(&reread.counts, expected.counts)?;
-        let reread_digests =
-            read_canonical_digests(target, &run, &reread.accepted, &reread.counts)?;
-        let reread_receipt = build_acceptance_receipt(
-            &run,
-            &expected,
-            &reread,
-            manifest_sha256.clone(),
-            independent_counts_sha256.clone(),
-            reread_digests,
-        );
-        if reread_receipt != acceptance {
-            bail!("canonical rows or attempt ledger changed after the run was frozen");
+        record_report_state(target, &run, &expected, tasks.len(), "frozen", &report)?;
+        validate_persisted_report(target, &run.run_id, "frozen", &report)?;
+        if stop_after_frozen {
+            bail!("test stop after durable frozen state");
         }
 
-        record_state(
+        let reread = rebuild_report(
+            target,
+            fence,
+            &run,
+            &tasks,
+            &expected,
+            operator_identity,
+            report.manifest_sha256.clone(),
+            report.independent_counts_sha256.clone(),
+        )?;
+        if reread != report {
+            bail!("canonical rows, ledger, inputs, or digests changed after durable freeze");
+        }
+        record_report_state(
             target,
             &run,
             &expected,
             tasks.len(),
-            revision_now()?,
             "accepted_frozen",
-            &acceptance_json,
+            &report,
         )?;
-        validate_persisted_receipt(target, &run.run_id, "accepted_frozen", &acceptance_json)?;
-
-        Ok(FinalizationReport {
-            run_id: run.run_id.clone(),
-            cohort: run.cohort.clone(),
-            chrom: run.chrom.clone(),
-            operator_identity: operator_identity.to_string(),
-            manifest_tasks: tasks.len(),
-            manifest_sha256,
-            accepted_attempts: frozen.accepted,
-            failed_attempts: frozen.failed,
-            expected_counts: expected.counts,
-            independent_evidence_uri: expected.evidence_uri.clone(),
-            independent_counts_sha256,
-            acceptance_receipt_sha256,
-            acceptance,
-            accepted: true,
-            frozen: true,
-            published: false,
-        })
+        validate_persisted_report(target, &run.run_id, "accepted_frozen", &report)?;
+        Ok(report)
     })();
 
     if let Err(error) = &result {
-        let _ = record_state(
-            target,
-            &run,
-            &expected,
-            tasks.len(),
-            revision_now()?,
-            "finalization_failed",
-            &format!("{operator_identity}: {error:#}"),
-        );
+        let latest = latest_run_state(target, &run.run_id).unwrap_or_default();
+        if !matches!(latest.as_str(), "frozen" | "accepted_frozen") {
+            let _ = record_state(
+                target,
+                &run,
+                &expected,
+                tasks.len(),
+                revision_now()?,
+                "finalization_failed",
+                &format!("{operator_identity}: {error:#}"),
+            );
+        }
     }
     result
 }
 
-fn ensure_freeze_transition(target: &ClickHouseTarget, run_id: &str) -> anyhow::Result<()> {
-    let body = target.query_text(
-        "SELECT state FROM lr_y1_load_runs WHERE run_id = {run_id:String} ORDER BY revision DESC LIMIT 1 FORMAT TabSeparated",
-        &[("run_id", run_id)],
-    )?;
-    match body.trim() {
-        "accepted_frozen" | "frozen" => {
-            bail!("run is already frozen; immutable acceptance cannot be repeated in place")
-        }
-        _ => Ok(()),
-    }
+#[allow(clippy::too_many_arguments)]
+fn rebuild_report(
+    target: &ClickHouseTarget,
+    fence: &WorkerWriteFence,
+    run: &PoolY1TaskSpec,
+    tasks: &[PoolY1TaskSpec],
+    expected: &IndependentExpectedCounts,
+    operator_identity: &str,
+    manifest_sha256: String,
+    independent_counts_sha256: String,
+) -> anyhow::Result<FinalizationReport> {
+    fence.attest_fenced_and_drained(target)?;
+    attest_no_active_task_leases(target, &run.run_id)?;
+    let frozen = validate_ledger_coverage(target, run, tasks, PhysicalPhase::Frozen)?;
+    validate_expected_counts(&frozen.counts, expected.counts)?;
+    let digests = read_canonical_digests(target, run, &frozen.accepted, &frozen.counts)?;
+    let acceptance = build_acceptance_receipt(
+        run,
+        expected,
+        &frozen,
+        fence.principal(),
+        manifest_sha256.clone(),
+        independent_counts_sha256.clone(),
+        digests,
+    );
+    let acceptance_json = serde_json::to_string(&acceptance)?;
+    let acceptance_receipt_sha256 = format!("{:x}", Sha256::digest(acceptance_json.as_bytes()));
+    Ok(FinalizationReport {
+        run_id: run.run_id.clone(),
+        cohort: run.cohort.clone(),
+        chrom: run.chrom.clone(),
+        operator_identity: operator_identity.to_string(),
+        manifest_tasks: tasks.len(),
+        manifest_sha256,
+        accepted_attempts: frozen.accepted,
+        failed_attempts: frozen.failed,
+        expected_counts: expected.counts,
+        independent_evidence_uri: expected.evidence_uri.clone(),
+        independent_counts_sha256,
+        acceptance_receipt_sha256,
+        acceptance,
+        accepted: true,
+        frozen: true,
+        published: false,
+    })
 }
 
-fn validate_persisted_receipt(
+fn latest_run_state(target: &ClickHouseTarget, run_id: &str) -> anyhow::Result<String> {
+    Ok(target
+        .query_text(
+            "SELECT state FROM lr_y1_load_runs WHERE run_id = {run_id:String} ORDER BY revision DESC LIMIT 1 FORMAT TabSeparated",
+            &[("run_id", run_id)],
+        )?
+        .trim()
+        .to_string())
+}
+
+fn read_durable_report(
     target: &ClickHouseTarget,
     run_id: &str,
-    state: &str,
-    receipt: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<(String, FinalizationReport)>> {
+    let state = latest_run_state(target, run_id)?;
+    if !matches!(state.as_str(), "frozen" | "accepted_frozen") {
+        return Ok(None);
+    }
     let body = target.query_text(
         "SELECT message FROM lr_y1_load_runs WHERE run_id = {run_id:String} AND state = {state:String} ORDER BY revision DESC LIMIT 1 FORMAT JSONEachRow",
-        &[("run_id", run_id), ("state", state)],
+        &[("run_id", run_id), ("state", &state)],
     )?;
     #[derive(Deserialize)]
     struct Row {
         message: String,
     }
     let row: Row = serde_json::from_str(body.trim())
-        .context("durable freeze/acceptance receipt is missing or malformed")?;
-    if row.message != receipt {
-        bail!("durable freeze/acceptance receipt differs from the verified receipt");
+        .context("durable frozen machine report row is missing or malformed")?;
+    let report = serde_json::from_str(&row.message)
+        .context("durable frozen machine report JSON is malformed")?;
+    Ok(Some((state, report)))
+}
+
+fn validate_persisted_report(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    state: &str,
+    report: &FinalizationReport,
+) -> anyhow::Result<()> {
+    let persisted = read_durable_report(target, run_id)?
+        .filter(|(persisted_state, _)| persisted_state == state)
+        .map(|(_, report)| report)
+        .context("durable frozen machine report is missing")?;
+    if persisted != *report {
+        bail!("durable frozen machine report differs from the verified report");
+    }
+    Ok(())
+}
+
+fn record_report_state(
+    target: &ClickHouseTarget,
+    run: &PoolY1TaskSpec,
+    expected: &IndependentExpectedCounts,
+    task_count: usize,
+    state: &str,
+    report: &FinalizationReport,
+) -> anyhow::Result<()> {
+    record_state(
+        target,
+        run,
+        expected,
+        task_count,
+        revision_now()?,
+        state,
+        &serde_json::to_string(report)?,
+    )
+}
+
+fn attest_no_active_task_leases(target: &ClickHouseTarget, run_id: &str) -> anyhow::Result<()> {
+    let active = target.query_text(
+        r#"SELECT count() FROM (
+SELECT task_id, attempt_id, argMax(state, revision) AS state
+FROM lr_y1_task_attempts
+WHERE run_id = {run_id:String}
+GROUP BY task_id, attempt_id
+HAVING state = 'running'
+) FORMAT TabSeparated"#,
+        &[("run_id", run_id)],
+    )?;
+    if active.trim() != "0" {
+        bail!("active Y1 task leases remain; refusing canonical snapshot");
     }
     Ok(())
 }
@@ -494,13 +602,15 @@ fn build_acceptance_receipt(
     run: &PoolY1TaskSpec,
     expected: &IndependentExpectedCounts,
     ledger: &LedgerCoverage,
+    worker_principal: &str,
     manifest_sha256: String,
     independent_counts_sha256: String,
     canonical_digests: Vec<CanonicalContentDigest>,
 ) -> LoadAcceptanceReceipt {
     LoadAcceptanceReceipt {
-        contract_version: 2,
+        contract_version: 3,
         schema_version: Y1_SCHEMA_VERSION,
+        worker_principal: worker_principal.to_string(),
         run_id: run.run_id.clone(),
         cohort: run.cohort.clone(),
         chrom: run.chrom.clone(),
@@ -984,13 +1094,14 @@ fn validate_physical_attempts(
                     .checked_add(rows)
                     .context("canonical row total exceeds UInt64")?;
             } else {
-                let valid = match phase {
-                    PhysicalPhase::BeforeCleanup => rows == 0 || rows == expected,
-                    PhysicalPhase::Frozen => rows == 0,
-                };
-                if !valid {
+                // A failed request can commit any strict prefix of the five
+                // table inserts, including a server commit whose response was
+                // lost before its ledger counters advanced. Identity, task
+                // bounds, terminal-attempt ownership, and uniqueness were all
+                // checked above; only accepted attempts require count parity.
+                if phase == PhysicalPhase::Frozen && rows != 0 {
                     bail!(
-                        "nonaccepted canonical {} rows are partial or survived the freeze cleanup",
+                        "nonaccepted canonical {} rows survived synchronous freeze cleanup",
                         spec.label
                     );
                 }
@@ -1317,7 +1428,8 @@ mod tests {
     }
 
     #[test]
-    fn physical_acceptance_rejects_missing_duplicate_partial_stale_and_cross_identity_rows() {
+    fn physical_acceptance_allows_attributable_partial_failure_but_rejects_stale_and_cross_identity_rows(
+    ) {
         let (tasks, accepted, counts, states, physical) = snapshot();
         assert!(validate_physical_attempts(
             &tasks,
@@ -1370,6 +1482,15 @@ mod tests {
             &states,
             &partial,
             PhysicalPhase::BeforeCleanup
+        )
+        .is_ok());
+        assert!(validate_physical_attempts(
+            &tasks,
+            &accepted,
+            &counts,
+            &states,
+            &partial,
+            PhysicalPhase::Frozen
         )
         .is_err());
     }
@@ -1478,6 +1599,37 @@ mod tests {
         )
         .unwrap();
         super::super::init_schema(&target).unwrap();
+        let worker_principal = format!("gnomad_lr_y1_worker_{}", std::process::id());
+        let worker_password = format!("local_test_{}", std::process::id());
+        target
+            .execute(&format!("DROP USER IF EXISTS {worker_principal}"))
+            .unwrap();
+        target
+            .execute(&format!(
+                "CREATE USER {worker_principal} IDENTIFIED WITH plaintext_password BY '{worker_password}' SETTINGS async_insert = 0"
+            ))
+            .unwrap();
+        target
+            .execute(&format!(
+                "GRANT SELECT, INSERT ON {}.* TO {worker_principal}",
+                target.database()
+            ))
+            .unwrap();
+        std::env::set_var(super::super::Y1_WORKER_USERNAME_ENV, &worker_principal);
+        std::env::set_var(super::super::Y1_WORKER_PASSWORD_ENV, &worker_password);
+        let worker = ClickHouseTarget::new(
+            &endpoint,
+            &database,
+            TargetKind::Scratch,
+            super::super::AuthSource::Environment {
+                username_variable: super::super::Y1_WORKER_USERNAME_ENV.to_string(),
+                password_variable: super::super::Y1_WORKER_PASSWORD_ENV.to_string(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        let fence = WorkerWriteFence::new(&target, worker.clone(), &worker_principal).unwrap();
 
         let fixture = include_str!("../../tests/fixtures/y1/aou_summary_only_ins.vcf");
         let header = super::super::Y1Header::parse(fixture, super::super::Cohort::Aou).unwrap();
@@ -1498,16 +1650,25 @@ mod tests {
             interval_start: task.start,
             interval_end: task.stop,
         };
-        let failed_counts = super::super::stage_attempt(&target, &base, &batch).unwrap();
-        record_terminal_fixture_attempt(&target, &task, &base, failed_counts, &batch.report, false);
+        super::super::stage_attempt(&worker, &base, &batch).unwrap();
+        // Model a request that committed physical rows but failed before its
+        // per-table counters advanced in the terminal report.
+        record_terminal_fixture_attempt(
+            &worker,
+            &task,
+            &base,
+            StagedCounts::default(),
+            &batch.report,
+            false,
+        );
         let accepted_context = super::super::AttemptContext {
             attempt_id: "accepted".into(),
             ..base.clone()
         };
         let accepted_counts =
-            super::super::stage_attempt(&target, &accepted_context, &batch).unwrap();
+            super::super::stage_attempt(&worker, &accepted_context, &batch).unwrap();
         record_terminal_fixture_attempt(
-            &target,
+            &worker,
             &task,
             &accepted_context,
             accepted_counts,
@@ -1530,9 +1691,60 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&expected_path, serde_json::to_vec(&expected).unwrap()).unwrap();
-        let report =
-            finalize_contig_run(&target, &manifest_path, &expected_path, "integration-test")
-                .unwrap();
+        // This precheck intentionally happens before the database fence. The
+        // delayed INSERT below is issued only after the durable acceptance.
+        super::super::storage::ensure_run_accepts_primary_writes(&worker, &task.run_id).unwrap();
+        let stopped = finalize_contig_run_inner(
+            &target,
+            &fence,
+            &manifest_path,
+            &expected_path,
+            "integration-test",
+            None,
+            true,
+        );
+        let stopped = stopped.unwrap_err();
+        assert!(stopped.to_string().contains("test stop"), "{stopped:#}");
+        assert_eq!(latest_run_state(&target, &task.run_id).unwrap(), "frozen");
+        assert!(finalize_contig_run(
+            &target,
+            &fence,
+            &manifest_path,
+            &expected_path,
+            "mismatched-operator",
+        )
+        .is_err());
+        assert_eq!(latest_run_state(&target, &task.run_id).unwrap(), "frozen");
+
+        let report = finalize_contig_run(
+            &target,
+            &fence,
+            &manifest_path,
+            &expected_path,
+            "integration-test",
+        )
+        .unwrap();
+        let accepted_retry = finalize_contig_run(
+            &target,
+            &fence,
+            &manifest_path,
+            &expected_path,
+            "integration-test",
+        )
+        .unwrap();
+        assert_eq!(accepted_retry, report);
+        assert!(finalize_contig_run(
+            &target,
+            &fence,
+            &manifest_path,
+            &expected_path,
+            "mismatched-operator",
+        )
+        .is_err());
+        assert_eq!(
+            latest_run_state(&target, &task.run_id).unwrap(),
+            "accepted_frozen"
+        );
         let _ = std::fs::remove_file(manifest_path);
         let _ = std::fs::remove_file(expected_path);
         assert!(report.accepted && report.frozen && !report.published);
@@ -1547,10 +1759,18 @@ mod tests {
             &[("run_id", &task.run_id)],
         ).unwrap();
         assert_eq!(rows.trim(), "0\t1");
-        let late_context = super::super::AttemptContext {
-            attempt_id: "late".into(),
-            ..accepted_context
-        };
-        assert!(super::super::stage_attempt(&target, &late_context, &batch).is_err());
+        let delayed = worker.execute_with_params(
+            "INSERT INTO lr_y1_summaries SELECT * FROM lr_y1_summaries WHERE run_id = {run_id:String} LIMIT 1",
+            &[("run_id", &task.run_id)],
+        );
+        assert!(
+            delayed.is_err(),
+            "database fence accepted a delayed worker insert"
+        );
+        target
+            .execute(&format!("DROP USER IF EXISTS {worker_principal}"))
+            .unwrap();
+        std::env::remove_var(super::super::Y1_WORKER_USERNAME_ENV);
+        std::env::remove_var(super::super::Y1_WORKER_PASSWORD_ENV);
     }
 }

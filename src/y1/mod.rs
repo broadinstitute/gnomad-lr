@@ -24,14 +24,14 @@ pub use model::*;
 pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};
 pub(crate) use storage::delete_attempt_rows;
 pub use storage::{
-    activate_published_run, change_contig_primary_pointer, change_primary_pointer, init_schema,
-    materialize_contig_serving_candidate, materialize_serving_candidate, record_load_run,
-    record_task_attempt, stage_attempt, stage_attempt_tracked, AttemptContext, AttemptState,
-    ContentSignature, ExpectedPointer, InsertStats, LoadRunLedgerRow, LoadScope,
-    PrimaryPointerAction, PrimaryPointerReport, PublicationRequest, ServingAcceptance,
-    StagedCounts, TaskAttemptLedgerRow, Y1_SCHEMA_VERSION,
+    init_schema, record_load_run, record_task_attempt, stage_attempt, stage_attempt_tracked,
+    AttemptContext, AttemptState, InsertStats, LoadRunLedgerRow, LoadScope, StagedCounts,
+    TaskAttemptLedgerRow, Y1_SCHEMA_VERSION,
 };
-pub use target::{AuthSource, ClickHouseTarget, TargetKind};
+pub use target::{
+    AuthSource, ClickHouseTarget, TargetKind, WorkerWriteFence, Y1_WORKER_PASSWORD_ENV,
+    Y1_WORKER_USERNAME_ENV,
+};
 
 #[cfg(test)]
 mod tests;
