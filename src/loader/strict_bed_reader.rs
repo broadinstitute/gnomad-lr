@@ -173,7 +173,7 @@ impl StrictBedStream {
             let mut bgzf_data = bgzf::Reader::new(reader);
             let query = noodles::csi::io::Query::new(&mut bgzf_data, chunks);
             let mut buffered = BufReader::new(query);
-            stream_records(
+            let tail = stream_records(
                 &mut buffered,
                 sender,
                 &chrom,
@@ -181,7 +181,21 @@ impl StrictBedStream {
                 source_end0,
                 line_comment_prefix,
                 &validator,
-            )
+            )?;
+            drop(buffered);
+            if let Some(tail) = tail {
+                finish_indexed_tail(
+                    &mut bgzf_data,
+                    tail,
+                    sender,
+                    &chrom,
+                    source_start0,
+                    source_end0,
+                    line_comment_prefix,
+                    &validator,
+                )?;
+            }
+            Ok(())
         });
         Ok(Self { lines })
     }
@@ -367,7 +381,7 @@ fn stream_records<R, V>(
     source_end0: u32,
     line_comment_prefix: u8,
     validator: &V,
-) -> anyhow::Result<()>
+) -> anyhow::Result<Option<Vec<u8>>>
 where
     R: BufRead,
     V: StrictBedRecordValidator,
@@ -379,67 +393,96 @@ where
             .read_until(b'\n', &mut bytes)
             .context("BGZF/tabix line read failed")?;
         if count == 0 {
-            return Ok(());
+            return Ok(None);
         }
         if !bytes.ends_with(b"\n") {
-            // A CSI query can end at a virtual chunk boundary in the middle of
-            // a spill record after the requested interval. Ignore only a tail
-            // whose chromosome and start coordinate alone prove that it cannot
-            // belong to the requested interval. Every in-range, ambiguous, or
-            // malformed non-newline tail remains a hard truncation error.
-            if truncated_tail_is_after_interval(&bytes, expected_chrom, source_end0)? {
-                return Ok(());
-            }
-            bail!("truncated nonempty BED line at end of indexed stream");
+            // CSI Query stops exactly at its virtual chunk end, which may be
+            // in the middle of the first spill record after the interval. The
+            // caller must read through the next newline from the underlying
+            // BGZF stream before this record can be validated or discarded.
+            return Ok(Some(bytes));
         }
         bytes.pop();
-        if bytes.ends_with(b"\r") {
-            bytes.pop();
-        }
-        if bytes.is_empty() {
-            // noodles can expose one exact empty separator where BGZF chunks meet.
-            continue;
-        }
-        let line = std::str::from_utf8(&bytes).context("BED line is not valid UTF-8")?;
-        if bytes.first().copied() == Some(line_comment_prefix) {
-            continue;
-        }
-
-        // Validate the entire source-specific record before considering whether
-        // it is an off-interval chunk spill row.
-        let record = validator.validate(line)?;
-        if record.chrom != expected_chrom
-            || record.start0 < source_start0
-            || record.start0 >= source_end0
-        {
-            continue;
-        }
-        sender
-            .send(StreamMessage::Line(line.to_string()))
-            .map_err(|_| anyhow::anyhow!("strict BED receiver dropped before completion"))?;
+        process_record_bytes(
+            &mut bytes,
+            sender,
+            expected_chrom,
+            source_start0,
+            source_end0,
+            line_comment_prefix,
+            validator,
+        )?;
     }
 }
 
-fn truncated_tail_is_after_interval(
-    bytes: &[u8],
+fn finish_indexed_tail<R, V>(
+    reader: &mut R,
+    mut bytes: Vec<u8>,
+    sender: &SyncSender<StreamMessage>,
     expected_chrom: &str,
+    source_start0: u32,
     source_end0: u32,
-) -> anyhow::Result<bool> {
-    let line = std::str::from_utf8(bytes).context("truncated BED tail is not valid UTF-8")?;
-    let mut fields = line.split('\t');
-    if fields.next() != Some(expected_chrom) {
-        return Ok(false);
+    line_comment_prefix: u8,
+    validator: &V,
+) -> anyhow::Result<()>
+where
+    R: BufRead,
+    V: StrictBedRecordValidator,
+{
+    let count = reader
+        .read_until(b'\n', &mut bytes)
+        .context("BGZF indexed-tail completion read failed")?;
+    if count == 0 || !bytes.ends_with(b"\n") {
+        bail!("truncated nonempty BED line at end of indexed stream");
     }
-    let Some(start0) = fields.next() else {
-        return Ok(false);
-    };
-    if start0.is_empty() || !start0.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Ok(false);
+    bytes.pop();
+    process_record_bytes(
+        &mut bytes,
+        sender,
+        expected_chrom,
+        source_start0,
+        source_end0,
+        line_comment_prefix,
+        validator,
+    )
+}
+
+fn process_record_bytes<V>(
+    bytes: &mut Vec<u8>,
+    sender: &SyncSender<StreamMessage>,
+    expected_chrom: &str,
+    source_start0: u32,
+    source_end0: u32,
+    line_comment_prefix: u8,
+    validator: &V,
+) -> anyhow::Result<()>
+where
+    V: StrictBedRecordValidator,
+{
+    if bytes.ends_with(b"\r") {
+        bytes.pop();
     }
-    Ok(start0
-        .parse::<u32>()
-        .ok()
-        .is_some_and(|start0| start0 >= source_end0))
+    if bytes.is_empty() {
+        // noodles can expose one exact empty separator where BGZF chunks meet.
+        return Ok(());
+    }
+    let line = std::str::from_utf8(bytes).context("BED line is not valid UTF-8")?;
+    if bytes.first().copied() == Some(line_comment_prefix) {
+        return Ok(());
+    }
+
+    // Validate the entire source-specific record before considering whether it
+    // is an off-interval chunk spill row.
+    let record = validator.validate(line)?;
+    if record.chrom != expected_chrom
+        || record.start0 < source_start0
+        || record.start0 >= source_end0
+    {
+        return Ok(());
+    }
+    sender
+        .send(StreamMessage::Line(line.to_string()))
+        .map_err(|_| anyhow::anyhow!("strict BED receiver dropped before completion"))
 }
 
 #[cfg(test)]
@@ -506,7 +549,7 @@ mod tests {
     fn collect_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
         let owned = bytes.to_vec();
         StrictBedLines::spawn(move |sender| {
-            stream_records(
+            let tail = stream_records(
                 &mut Cursor::new(owned),
                 sender,
                 "chr22",
@@ -514,7 +557,11 @@ mod tests {
                 200,
                 b'#',
                 &total_validator(),
-            )
+            )?;
+            if tail.is_some() {
+                bail!("truncated nonempty BED line at end of indexed stream");
+            }
+            Ok(())
         })
         .collect()
     }
@@ -666,19 +713,38 @@ mod tests {
     }
 
     #[test]
-    fn truncated_chunk_tail_is_ignored_only_when_start_is_proven_after_interval() {
-        // CSI Query can stop at its virtual chunk end in the middle of the
-        // first spill row after the requested interval.
-        let rows =
-            collect_from_bytes(b"chr22\t149\t150\t25\tTotal\t4\t1\t3\t25\nchr22\t20022211\t20")
-                .unwrap();
-        assert_eq!(
-            rows,
-            vec!["chr22\t149\t150\t25\tTotal\t4\t1\t3\t25".to_string()]
+    fn indexed_chunk_tail_is_completed_before_spill_filtering() {
+        let (sender, receiver) = mpsc::sync_channel(4);
+        finish_indexed_tail(
+            &mut Cursor::new(b"7005001\t47005002\t90\tTotal\t20\t18\t2\t90\n"),
+            b"chr22\t4".to_vec(),
+            &sender,
+            "chr22",
+            47_039_999,
+            47_050_000,
+            b'#',
+            &total_validator(),
+        )
+        .unwrap();
+        drop(sender);
+        assert!(
+            receiver.recv().is_err(),
+            "post-interval spill row was emitted"
         );
 
-        let in_range = collect_from_bytes(b"chr22\t199\t20").unwrap_err();
-        assert!(in_range.to_string().contains("truncated nonempty BED line"));
+        let (sender, _) = mpsc::sync_channel(1);
+        let error = finish_indexed_tail(
+            &mut Cursor::new(b"7004999\t47005000\t90\tTotal\t20"),
+            b"chr22\t4".to_vec(),
+            &sender,
+            "chr22",
+            47_039_999,
+            47_050_000,
+            b'#',
+            &total_validator(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("truncated nonempty BED line"));
     }
 
     #[test]
