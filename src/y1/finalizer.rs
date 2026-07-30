@@ -1,7 +1,9 @@
 use super::{
-    contig::grch38_contig_length, publish_staged_run, record_load_run, ClickHouseTarget, Cohort,
-    LoadRunLedgerRow, LoadScope, PoolY1TaskSpec, PublicationRequest, ReferenceGenome, Release,
-    StagedCounts, TargetKind, Y1_SCHEMA_VERSION,
+    contig::grch38_contig_length,
+    record_load_run,
+    storage::{publish_accepted_staged_run, validate_load_acceptance_receipt},
+    ClickHouseTarget, Cohort, LoadRunLedgerRow, LoadScope, PoolY1TaskSpec, PublicationRequest,
+    ReferenceGenome, Release, StagedCounts, TargetKind, Y1_SCHEMA_VERSION,
 };
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndependentExpectedCounts {
     pub contract_version: u8,
@@ -25,7 +27,7 @@ pub struct IndependentExpectedCounts {
     pub facts: IndependentReconciliationFacts,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndependentReconciliationFacts {
     pub source_records: u64,
@@ -42,7 +44,7 @@ pub struct IndependentReconciliationFacts {
     pub annotation_content_sha256: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct AttemptView {
     task_id: String,
     attempt_id: String,
@@ -59,9 +61,54 @@ struct AttemptView {
     report_json: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct PhysicalAttemptView {
+    table: String,
+    task_id: String,
+    attempt_id: String,
+    rows: u64,
+    unique_keys: u64,
+    identity_violations: u64,
+    min_position: u32,
+    max_position: u32,
+    signature: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagingContentSignature {
+    pub table: String,
+    pub rows: u64,
+    pub signature: u64,
+}
+
 struct LedgerCoverage {
     accepted: BTreeMap<String, String>,
     failed: BTreeMap<String, Vec<String>>,
+    staging_signatures: Vec<StagingContentSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadAcceptanceReceipt {
+    pub contract_version: u8,
+    pub schema_version: u16,
+    pub run_id: String,
+    pub cohort: String,
+    pub chrom: String,
+    pub manifest_sha256: String,
+    pub independent_counts_sha256: String,
+    pub source_uri: String,
+    pub source_generation: String,
+    pub source_checksum: String,
+    pub source_index_uri: String,
+    pub source_index_generation: String,
+    pub source_index_checksum: String,
+    pub accepted_attempts: BTreeMap<String, String>,
+    pub failed_attempts: BTreeMap<String, Vec<String>>,
+    pub expected_counts: StagedCounts,
+    pub source_content_sha256: String,
+    pub genotype_content_sha256: String,
+    pub annotation_content_sha256: String,
+    pub staging_signatures: Vec<StagingContentSignature>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +124,8 @@ pub struct FinalizationReport {
     pub expected_counts: StagedCounts,
     pub independent_evidence_uri: String,
     pub independent_counts_sha256: String,
+    pub acceptance_receipt_sha256: String,
+    pub acceptance: LoadAcceptanceReceipt,
     pub published: bool,
 }
 
@@ -134,44 +183,57 @@ fn finalize_contig_run_inner(
         bail!("the legacy chr22 finalizer accepts only chr22 manifests");
     }
     let contig_length = grch38_contig_length(&run.chrom)?;
+    let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
 
     let expected_bytes = std::fs::read(expected_path)
         .with_context(|| format!("failed to read {}", expected_path.display()))?;
     let expected: IndependentExpectedCounts = serde_json::from_slice(&expected_bytes)
         .with_context(|| format!("invalid independent counts {}", expected_path.display()))?;
-    if expected.contract_version != 1
-        || expected.run_id != run.run_id
-        || expected.cohort != run.cohort
-        || expected.chrom != run.chrom
-        || expected.source_generation != run.source_generation
-        || expected.source_checksum != run.source_checksum
-    {
-        bail!("independent reconciliation identity does not match the manifest run/source");
-    }
-    if expected.evidence_uri.trim().is_empty()
-        || expected.producer.trim().is_empty()
-        || expected.counts.source_records == 0
-        || expected.facts.source_records != expected.counts.source_records
-        || expected.facts.alt_alleles != expected.counts.alleles
-        || expected.facts.frequency_rows != expected.counts.frequencies
-        || expected.facts.carrier_alt_copies != expected.counts.carriers
-        || (run.cohort == "hgsvc_hprc" && expected.facts.called_alleles == 0)
-        || expected.facts.source_content_sha256.len() != 64
-        || expected.facts.genotype_content_sha256.len() != 64
-        || expected.facts.annotation_content_sha256.len() != 64
-    {
-        bail!(
-            "independent reconciliation facts are incomplete or inconsistent with expected counts"
-        );
-    }
-    if expected.counts.rejects != 0 || expected.counts.summaries != expected.counts.source_records {
-        bail!("independent counts require zero rejects and one summary per source record");
-    }
-    if run.cohort == "aou" && expected.counts.carriers != 0 {
-        bail!("AoU independent counts must contain zero carriers");
-    }
+    validate_independent_reconciliation(&expected, &run)?;
+    let independent_counts_sha256 = format!("{:x}", Sha256::digest(&expected_bytes));
 
     let ledger = validate_ledger_coverage(target, &run.run_id, &run.chrom, &tasks)?;
+    validate_expected_staging_counts(&ledger.staging_signatures, expected.counts)?;
+    let acceptance = build_acceptance_receipt(
+        &run,
+        &expected,
+        &ledger,
+        manifest_sha256.clone(),
+        independent_counts_sha256.clone(),
+    );
+    let acceptance_json = serde_json::to_string(&acceptance)?;
+    let acceptance_receipt_sha256 = format!("{:x}", Sha256::digest(acceptance_json.as_bytes()));
+    let accepted_revision = revision_now()?;
+    record_state(
+        target,
+        &run,
+        &expected,
+        tasks.len(),
+        accepted_revision,
+        "accepted",
+        &acceptance_json,
+    )?;
+
+    // Re-read both the durable receipt and the complete physical staging set.
+    // Full-contig publication receives a capability only after both still match.
+    let persisted_acceptance = validate_load_acceptance_receipt(
+        target,
+        &run.run_id,
+        &acceptance_json,
+        &acceptance_receipt_sha256,
+    )?;
+    let current_ledger = validate_ledger_coverage(target, &run.run_id, &run.chrom, &tasks)?;
+    validate_expected_staging_counts(&current_ledger.staging_signatures, expected.counts)?;
+    let current_acceptance = build_acceptance_receipt(
+        &run,
+        &expected,
+        &current_ledger,
+        manifest_sha256.clone(),
+        independent_counts_sha256.clone(),
+    );
+    if current_acceptance != acceptance {
+        bail!("staging or attempt ledger changed after the durable load acceptance was recorded");
+    }
     let cohort = parse_cohort(&run.cohort)?;
     let request = PublicationRequest {
         run_id: run.run_id.clone(),
@@ -199,7 +261,7 @@ fn finalize_contig_run_inner(
         "finalizing",
         operator_identity,
     )?;
-    if let Err(error) = publish_staged_run(target, &request) {
+    if let Err(error) = publish_accepted_staged_run(target, &request, &persisted_acceptance) {
         let _ = record_state(
             target,
             &run,
@@ -227,14 +289,130 @@ fn finalize_contig_run_inner(
         chrom: run.chrom,
         operator_identity: operator_identity.to_string(),
         manifest_tasks: tasks.len(),
-        manifest_sha256: format!("{:x}", Sha256::digest(&manifest_bytes)),
+        manifest_sha256,
         accepted_attempts: ledger.accepted,
         failed_attempts: ledger.failed,
         expected_counts: expected.counts,
         independent_evidence_uri: expected.evidence_uri,
-        independent_counts_sha256: format!("{:x}", Sha256::digest(&expected_bytes)),
+        independent_counts_sha256,
+        acceptance_receipt_sha256,
+        acceptance,
         published: true,
     })
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_independent_reconciliation(
+    expected: &IndependentExpectedCounts,
+    run: &PoolY1TaskSpec,
+) -> anyhow::Result<()> {
+    if expected.contract_version != 1
+        || expected.run_id != run.run_id
+        || expected.cohort != run.cohort
+        || expected.chrom != run.chrom
+        || expected.source_generation != run.source_generation
+        || expected.source_checksum != run.source_checksum
+    {
+        bail!("independent reconciliation identity does not match the manifest run/source");
+    }
+    let facts = &expected.facts;
+    if expected.evidence_uri.trim().is_empty()
+        || expected.producer.trim().is_empty()
+        || expected.counts.source_records == 0
+        || facts.source_records != expected.counts.source_records
+        || facts.alt_alleles != expected.counts.alleles
+        || facts.frequency_rows != expected.counts.frequencies
+        || facts.carrier_alt_copies != expected.counts.carriers
+        || facts.fully_missing_genotypes > facts.genotype_calls
+        || facts.partially_called_genotypes > facts.genotype_calls
+        || facts
+            .fully_missing_genotypes
+            .checked_add(facts.partially_called_genotypes)
+            .is_none_or(|value| value > facts.genotype_calls)
+        || facts.annotated_alt_alleles > facts.alt_alleles
+        || facts.carrier_alt_copies > facts.called_alleles
+        || (run.cohort == "hgsvc_hprc" && (facts.genotype_calls == 0 || facts.called_alleles == 0))
+        || !valid_sha256(&facts.source_content_sha256)
+        || !valid_sha256(&facts.genotype_content_sha256)
+        || !valid_sha256(&facts.annotation_content_sha256)
+    {
+        bail!(
+            "independent reconciliation facts are incomplete or inconsistent with expected counts"
+        );
+    }
+    if expected.counts.rejects != 0 || expected.counts.summaries != expected.counts.source_records {
+        bail!("independent counts require zero rejects and one summary per source record");
+    }
+    if run.cohort == "aou"
+        && (expected.counts.carriers != 0
+            || facts.genotype_calls != 0
+            || facts.called_alleles != 0
+            || facts.carrier_alt_copies != 0
+            || facts.fully_missing_genotypes != 0
+            || facts.partially_called_genotypes != 0)
+    {
+        bail!("AoU independent reconciliation must contain no genotype or carrier observations");
+    }
+    Ok(())
+}
+
+fn validate_expected_staging_counts(
+    signatures: &[StagingContentSignature],
+    expected: StagedCounts,
+) -> anyhow::Result<()> {
+    let rows = |table: &str| {
+        signatures
+            .iter()
+            .find(|signature| signature.table == table)
+            .map(|signature| signature.rows)
+            .with_context(|| format!("acceptance snapshot is missing {table}"))
+    };
+    let observed = StagedCounts {
+        source_records: rows("summaries")?,
+        summaries: rows("summaries")?,
+        alleles: rows("alleles")?,
+        frequencies: rows("frequencies")?,
+        carriers: rows("carriers")?,
+        rejects: rows("rejects")?,
+    };
+    if observed != expected {
+        bail!("physical accepted staging counts {observed:?} do not equal independent expected counts {expected:?}");
+    }
+    Ok(())
+}
+
+fn build_acceptance_receipt(
+    run: &PoolY1TaskSpec,
+    expected: &IndependentExpectedCounts,
+    ledger: &LedgerCoverage,
+    manifest_sha256: String,
+    independent_counts_sha256: String,
+) -> LoadAcceptanceReceipt {
+    LoadAcceptanceReceipt {
+        contract_version: 1,
+        schema_version: Y1_SCHEMA_VERSION,
+        run_id: run.run_id.clone(),
+        cohort: run.cohort.clone(),
+        chrom: run.chrom.clone(),
+        manifest_sha256,
+        independent_counts_sha256,
+        source_uri: run.source_uri.clone(),
+        source_generation: run.source_generation.clone(),
+        source_checksum: run.source_checksum.clone(),
+        source_index_uri: run.source_index_uri.clone(),
+        source_index_generation: run.source_index_generation.clone(),
+        source_index_checksum: run.source_index_checksum.clone(),
+        accepted_attempts: ledger.accepted.clone(),
+        failed_attempts: ledger.failed.clone(),
+        expected_counts: expected.counts,
+        source_content_sha256: expected.facts.source_content_sha256.clone(),
+        genotype_content_sha256: expected.facts.genotype_content_sha256.clone(),
+        annotation_content_sha256: expected.facts.annotation_content_sha256.clone(),
+        staging_signatures: ledger.staging_signatures.clone(),
+    }
 }
 
 fn validate_manifest(tasks: &[PoolY1TaskSpec]) -> anyhow::Result<PoolY1TaskSpec> {
@@ -335,14 +513,20 @@ GROUP BY task_id, attempt_id
 FORMAT JSONEachRow
 "#;
     let body = target.query_text(query, &[("run_id", run_id)])?;
+    let physical = read_physical_attempts(target, run_id, &tasks[0].cohort, chrom)?;
     let expected: BTreeMap<&str, (u32, u32)> = tasks
         .iter()
         .map(|task| (task.task_id.as_str(), (task.start, task.stop)))
         .collect();
     let mut accepted = BTreeMap::new();
     let mut failed: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut terminal_counts = BTreeMap::new();
+    let mut terminal_states = BTreeMap::new();
     for line in body.lines().filter(|line| !line.trim().is_empty()) {
         let row: AttemptView = serde_json::from_str(line).context("invalid attempt ledger JSON")?;
+        if row.attempt_id.trim().is_empty() {
+            bail!("attempt ledger contains an empty attempt ID");
+        }
         let Some(bounds) = expected.get(row.task_id.as_str()) else {
             bail!(
                 "run ledger contains task {} absent from the checked manifest",
@@ -381,6 +565,16 @@ FORMAT JSONEachRow
             carriers: row.carrier_rows,
             rejects: row.rejected_records,
         };
+        let attempt_key = (row.task_id.clone(), row.attempt_id.clone());
+        if terminal_counts
+            .insert(attempt_key.clone(), ledger_counts)
+            .is_some()
+            || terminal_states
+                .insert(attempt_key, row.state.clone())
+                .is_some()
+        {
+            bail!("attempt ledger query returned a duplicate terminal attempt");
+        }
         let report_counts: StagedCounts = serde_json::from_value(
             report
                 .get("counts")
@@ -428,11 +622,19 @@ FORMAT JSONEachRow
             bail!("attempt {} report is incomplete or inconsistent with its immutable ledger/source identity", row.attempt_id);
         }
         if row.state == "accepted" {
-            let expected_inserted = row.summary_rows
-                + row.allele_rows
-                + row.frequency_rows
-                + row.carrier_rows
-                + row.rejected_records;
+            let expected_inserted = [
+                row.summary_rows,
+                row.allele_rows,
+                row.frequency_rows,
+                row.carrier_rows,
+                row.rejected_records,
+            ]
+            .into_iter()
+            .try_fold(0u64, |total, value| {
+                total
+                    .checked_add(value)
+                    .context("attempt row total exceeds UInt64")
+            })?;
             if report.get("state").and_then(|value| value.as_str()) != Some("accepted")
                 || !report
                     .get("failure")
@@ -473,6 +675,9 @@ FORMAT JSONEachRow
             );
         }
     }
+    for attempts in failed.values_mut() {
+        attempts.sort();
+    }
     if accepted.len() != tasks.len() {
         bail!(
             "run has {} accepted manifest tasks; expected {}",
@@ -500,7 +705,215 @@ FORMAT JSONEachRow
             bail!("controlled fail-once task {} does not prove failed initial and deterministically accepted retry attempts", task.task_id);
         }
     }
-    Ok(LedgerCoverage { accepted, failed })
+    let staging_signatures = validate_physical_attempts(
+        tasks,
+        &accepted,
+        &terminal_counts,
+        &terminal_states,
+        &physical,
+    )?;
+    Ok(LedgerCoverage {
+        accepted,
+        failed,
+        staging_signatures,
+    })
+}
+
+fn read_physical_attempts(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    cohort: &str,
+    chrom: &str,
+) -> anyhow::Result<Vec<PhysicalAttemptView>> {
+    const TABLES: [(&str, &str, &str); 4] = [
+        (
+            "summaries",
+            "tuple(position, source_variant_id)",
+            "release,cohort,reference_genome,chrom,position,source_variant_id,ref_allele,alts,allele_type,qual,filters,ac,an,af,allele_lengths,length_provenance,source_allele_length,source_svlen,source_svlen_present,frequencies_json,source_info_json",
+        ),
+        (
+            "alleles",
+            "tuple(position, source_variant_id, alt_index)",
+            "release,cohort,reference_genome,chrom,position,reference_end,xpos,source_variant_id,alt_index,ref_allele,alt,allele_type,qual,filters,ac,an,af,allele_length,length_provenance,rsids,cadd_phred,phylop,major_consequence,short_read_match_id,short_read_match_type,short_read_match_source",
+        ),
+        (
+            "frequencies",
+            "tuple(position, source_variant_id, alt_index, division)",
+            "release,cohort,reference_genome,chrom,position,source_variant_id,alt_index,division,ac,an,af,values_available",
+        ),
+        (
+            "carriers",
+            "tuple(position, source_variant_id, alt_index, sample_id, genotype_position)",
+            "release,cohort,reference_genome,chrom,position,source_variant_id,alt_index,alt,sample_id,genotype_position,gt_alleles,gt_phased,genotype_fields_json,position_fields_json",
+        ),
+    ];
+    let mut result = Vec::new();
+    for (table, unique_key, signature_columns) in TABLES {
+        let query = format!(
+            "SELECT '{table}' AS table, task_id, attempt_id, count() AS rows, \
+             uniqExact({unique_key}) AS unique_keys, \
+             countIf(release != 'y1' OR cohort != {{cohort:String}} OR reference_genome != 'GRCh38' OR chrom != {{chrom:String}}) AS identity_violations, \
+             min(position) AS min_position, max(position) AS max_position, \
+             groupBitXor(cityHash64(toJSONString(tuple({signature_columns})))) AS signature \
+             FROM lr_y1_{table}_staging WHERE run_id = {{run_id:String}} \
+             GROUP BY task_id, attempt_id FORMAT JSONEachRow"
+        );
+        let body = target.query_text(
+            &query,
+            &[("run_id", run_id), ("cohort", cohort), ("chrom", chrom)],
+        )?;
+        for line in body.lines().filter(|line| !line.trim().is_empty()) {
+            result.push(
+                serde_json::from_str(line).context("invalid physical staging aggregate JSON")?,
+            );
+        }
+    }
+    let rejects = target.query_text(
+        "SELECT 'rejects' AS table, task_id, attempt_id, count() AS rows, count() AS unique_keys, 0 AS identity_violations, 0 AS min_position, 0 AS max_position, groupBitXor(cityHash64(toJSONString(tuple(record_number, source_variant_id, reject_code, message)))) AS signature FROM lr_y1_rejects_staging WHERE run_id = {run_id:String} GROUP BY task_id, attempt_id FORMAT JSONEachRow",
+        &[("run_id", run_id)],
+    )?;
+    for line in rejects.lines().filter(|line| !line.trim().is_empty()) {
+        result.push(serde_json::from_str(line).context("invalid reject staging aggregate JSON")?);
+    }
+    Ok(result)
+}
+
+fn validate_physical_attempts(
+    tasks: &[PoolY1TaskSpec],
+    accepted: &BTreeMap<String, String>,
+    terminal_counts: &BTreeMap<(String, String), StagedCounts>,
+    terminal_states: &BTreeMap<(String, String), String>,
+    physical: &[PhysicalAttemptView],
+) -> anyhow::Result<Vec<StagingContentSignature>> {
+    const TABLES: [&str; 5] = ["summaries", "alleles", "frequencies", "carriers", "rejects"];
+    let task_bounds: BTreeMap<&str, (u32, u32)> = tasks
+        .iter()
+        .map(|task| (task.task_id.as_str(), (task.start, task.stop)))
+        .collect();
+    if accepted.len() != tasks.len()
+        || tasks
+            .iter()
+            .any(|task| !accepted.contains_key(&task.task_id))
+    {
+        bail!("physical acceptance snapshot lacks exactly one accepted attempt per manifest task");
+    }
+    let accepted_terminal_count = terminal_states
+        .values()
+        .filter(|state| state.as_str() == "accepted")
+        .count();
+    if accepted_terminal_count != tasks.len()
+        || accepted.iter().any(|(task_id, attempt_id)| {
+            terminal_states
+                .get(&(task_id.clone(), attempt_id.clone()))
+                .map(String::as_str)
+                != Some("accepted")
+        })
+    {
+        bail!("terminal ledger contains a missing, duplicate, or inconsistent accepted attempt");
+    }
+    let mut aggregates = BTreeMap::new();
+    for row in physical {
+        if !TABLES.contains(&row.table.as_str()) {
+            bail!("physical staging snapshot contains an unknown table");
+        }
+        let attempt_key = (row.task_id.clone(), row.attempt_id.clone());
+        if !terminal_counts.contains_key(&attempt_key) {
+            bail!(
+                "stale or orphan staging contribution for task {}/attempt {}",
+                row.task_id,
+                row.attempt_id
+            );
+        }
+        let bounds = task_bounds
+            .get(row.task_id.as_str())
+            .context("physical staging row names a task absent from the manifest")?;
+        if row.identity_violations != 0 {
+            bail!(
+                "physical {} staging contains cross-run/cohort/contig identity violations",
+                row.table
+            );
+        }
+        if row.table != "rejects"
+            && row.rows != 0
+            && (row.min_position < bounds.0 || row.max_position > bounds.1)
+        {
+            bail!(
+                "physical {} staging escapes task {} bounds",
+                row.table,
+                row.task_id
+            );
+        }
+        if row.unique_keys != row.rows {
+            bail!(
+                "physical {} staging contains duplicate keys for task {}/attempt {}",
+                row.table,
+                row.task_id,
+                row.attempt_id
+            );
+        }
+        let key = (
+            row.table.clone(),
+            row.task_id.clone(),
+            row.attempt_id.clone(),
+        );
+        if aggregates.insert(key, row).is_some() {
+            bail!("physical staging snapshot contains a duplicate attempt aggregate");
+        }
+    }
+
+    let mut accepted_rows = BTreeMap::new();
+    let mut accepted_signatures = BTreeMap::new();
+    for (attempt_key, counts) in terminal_counts {
+        if counts.summaries.checked_add(counts.rejects) != Some(counts.source_records) {
+            bail!(
+                "terminal attempt counts do not reconcile source records to summaries plus rejects"
+            );
+        }
+        let expected_rows = [
+            counts.summaries,
+            counts.alleles,
+            counts.frequencies,
+            counts.carriers,
+            counts.rejects,
+        ];
+        for (table, expected) in TABLES.into_iter().zip(expected_rows) {
+            let physical = aggregates.get(&(
+                table.to_string(),
+                attempt_key.0.clone(),
+                attempt_key.1.clone(),
+            ));
+            let rows = physical.map_or(0, |row| row.rows);
+            if rows != expected {
+                bail!(
+                    "physical {table} rows disagree with terminal ledger for task {}/attempt {}",
+                    attempt_key.0,
+                    attempt_key.1
+                );
+            }
+            if accepted.get(&attempt_key.0) == Some(&attempt_key.1) {
+                let total = accepted_rows.entry(table).or_insert(0u64);
+                *total = total
+                    .checked_add(rows)
+                    .context("accepted staging row total exceeds UInt64")?;
+                *accepted_signatures.entry(table).or_insert(0u64) ^=
+                    physical.map_or(0, |row| row.signature);
+            }
+        }
+        if terminal_states.get(attempt_key).map(String::as_str) == Some("accepted")
+            && counts.rejects != 0
+        {
+            bail!("accepted terminal attempt contains rejected records");
+        }
+    }
+
+    Ok(TABLES
+        .into_iter()
+        .map(|table| StagingContentSignature {
+            table: table.to_string(),
+            rows: accepted_rows.get(table).copied().unwrap_or(0),
+            signature: accepted_signatures.get(table).copied().unwrap_or(0),
+        })
+        .collect())
 }
 
 fn record_state(
@@ -626,6 +1039,228 @@ mod tests {
         let mut second = task_for("chr2", 1, 11, grch38_contig_length("chr2").unwrap());
         second.run_id = "run".into();
         assert!(validate_manifest(&[task_for("chr1", 0, 1, 10), second]).is_err());
+    }
+
+    fn independent_for(task: &PoolY1TaskSpec) -> IndependentExpectedCounts {
+        IndependentExpectedCounts {
+            contract_version: 1,
+            run_id: task.run_id.clone(),
+            cohort: task.cohort.clone(),
+            chrom: task.chrom.clone(),
+            evidence_uri: "file://independent.json".into(),
+            producer: "independent-test".into(),
+            source_generation: task.source_generation.clone(),
+            source_checksum: task.source_checksum.clone(),
+            counts: StagedCounts {
+                source_records: 1,
+                summaries: 1,
+                alleles: 2,
+                frequencies: 3,
+                carriers: 0,
+                rejects: 0,
+            },
+            facts: IndependentReconciliationFacts {
+                source_records: 1,
+                alt_alleles: 2,
+                frequency_rows: 3,
+                genotype_calls: 0,
+                called_alleles: 0,
+                carrier_alt_copies: 0,
+                fully_missing_genotypes: 0,
+                partially_called_genotypes: 0,
+                annotated_alt_alleles: 2,
+                source_content_sha256: "a".repeat(64),
+                genotype_content_sha256: "b".repeat(64),
+                annotation_content_sha256: "c".repeat(64),
+            },
+        }
+    }
+
+    fn snapshot() -> (
+        Vec<PoolY1TaskSpec>,
+        BTreeMap<String, String>,
+        BTreeMap<(String, String), StagedCounts>,
+        BTreeMap<(String, String), String>,
+        Vec<PhysicalAttemptView>,
+    ) {
+        let length = grch38_contig_length("chr22").unwrap();
+        let task = task_for("chr22", 0, 1, length);
+        let accepted_id = "accepted".to_string();
+        let failed_id = "failed".to_string();
+        let counts = StagedCounts {
+            source_records: 1,
+            summaries: 1,
+            alleles: 2,
+            frequencies: 3,
+            carriers: 0,
+            rejects: 0,
+        };
+        let accepted = BTreeMap::from([(task.task_id.clone(), accepted_id.clone())]);
+        let terminal_counts = BTreeMap::from([
+            ((task.task_id.clone(), accepted_id.clone()), counts),
+            ((task.task_id.clone(), failed_id.clone()), counts),
+        ]);
+        let terminal_states = BTreeMap::from([
+            (
+                (task.task_id.clone(), accepted_id.clone()),
+                "accepted".to_string(),
+            ),
+            (
+                (task.task_id.clone(), failed_id.clone()),
+                "failed".to_string(),
+            ),
+        ]);
+        let mut physical = Vec::new();
+        for attempt in [&accepted_id, &failed_id] {
+            for (table, rows, signature) in [
+                ("summaries", 1, 11),
+                ("alleles", 2, 22),
+                ("frequencies", 3, 33),
+                ("carriers", 0, 0),
+                ("rejects", 0, 0),
+            ] {
+                if rows != 0 {
+                    physical.push(PhysicalAttemptView {
+                        table: table.to_string(),
+                        task_id: task.task_id.clone(),
+                        attempt_id: attempt.clone(),
+                        rows,
+                        unique_keys: rows,
+                        identity_violations: 0,
+                        min_position: 1,
+                        max_position: 1,
+                        signature,
+                    });
+                }
+            }
+        }
+        (
+            vec![task],
+            accepted,
+            terminal_counts,
+            terminal_states,
+            physical,
+        )
+    }
+
+    #[test]
+    fn independent_reconciliation_rejects_malformed_hashes_and_source_drops() {
+        let task = task_for("chr22", 0, 1, grch38_contig_length("chr22").unwrap());
+        let valid = independent_for(&task);
+        assert!(validate_independent_reconciliation(&valid, &task).is_ok());
+
+        let mut malformed = independent_for(&task);
+        malformed.facts.source_content_sha256 = "not-a-sha256".into();
+        assert!(validate_independent_reconciliation(&malformed, &task).is_err());
+
+        let mut dropped = independent_for(&task);
+        dropped.facts.source_records = 2;
+        assert!(validate_independent_reconciliation(&dropped, &task).is_err());
+
+        let mut cross_source = independent_for(&task);
+        cross_source.source_generation = "other-generation".into();
+        assert!(validate_independent_reconciliation(&cross_source, &task).is_err());
+
+        let mut encoded = serde_json::to_value(independent_for(&task)).unwrap();
+        encoded.as_object_mut().unwrap().insert(
+            "unexpected".into(),
+            serde_json::Value::String("field".into()),
+        );
+        assert!(serde_json::from_value::<IndependentExpectedCounts>(encoded).is_err());
+    }
+
+    #[test]
+    fn physical_acceptance_accounts_for_failed_retry_and_is_deterministic() {
+        let (tasks, accepted, counts, states, mut physical) = snapshot();
+        let first =
+            validate_physical_attempts(&tasks, &accepted, &counts, &states, &physical).unwrap();
+        physical.reverse();
+        let second =
+            validate_physical_attempts(&tasks, &accepted, &counts, &states, &physical).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first[0].rows, 1);
+        assert_eq!(first[0].signature, 11);
+    }
+
+    #[test]
+    fn physical_acceptance_rejects_missing_duplicate_and_stale_attempts() {
+        let (tasks, accepted, counts, states, physical) = snapshot();
+        assert!(
+            validate_physical_attempts(&tasks, &BTreeMap::new(), &counts, &states, &physical)
+                .is_err()
+        );
+
+        let mut duplicate_counts = counts.clone();
+        let mut duplicate_states = states.clone();
+        duplicate_counts.insert(
+            (tasks[0].task_id.clone(), "second-accepted".into()),
+            StagedCounts::default(),
+        );
+        duplicate_states.insert(
+            (tasks[0].task_id.clone(), "second-accepted".into()),
+            "accepted".into(),
+        );
+        assert!(validate_physical_attempts(
+            &tasks,
+            &accepted,
+            &duplicate_counts,
+            &duplicate_states,
+            &physical
+        )
+        .is_err());
+
+        let mut stale = physical.clone();
+        let mut orphan = stale[0].clone();
+        orphan.attempt_id = "orphan".into();
+        stale.push(orphan);
+        assert!(validate_physical_attempts(&tasks, &accepted, &counts, &states, &stale).is_err());
+    }
+
+    #[test]
+    fn physical_acceptance_rejects_cross_identity_count_and_signature_changes() {
+        let (tasks, accepted, counts, states, physical) = snapshot();
+        let mut cross_identity = physical.clone();
+        cross_identity[0].identity_violations = 1;
+        assert!(
+            validate_physical_attempts(&tasks, &accepted, &counts, &states, &cross_identity)
+                .is_err()
+        );
+
+        let mut wrong_count = physical.clone();
+        wrong_count[0].rows = 2;
+        wrong_count[0].unique_keys = 2;
+        assert!(
+            validate_physical_attempts(&tasks, &accepted, &counts, &states, &wrong_count).is_err()
+        );
+
+        let baseline =
+            validate_physical_attempts(&tasks, &accepted, &counts, &states, &physical).unwrap();
+        let mut changed = physical;
+        changed[0].signature ^= 1;
+        let changed =
+            validate_physical_attempts(&tasks, &accepted, &counts, &states, &changed).unwrap();
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn local_clickhouse_physical_snapshot_queries_compile() {
+        let Ok(endpoint) = std::env::var("GNOMAD_LR_Y1_TEST_ENDPOINT") else {
+            return;
+        };
+        let database = std::env::var("GNOMAD_LR_Y1_TEST_DATABASE")
+            .unwrap_or_else(|_| "gnomad_lr_y1_scratch_v4_ci".to_string());
+        let target = ClickHouseTarget::new(
+            &endpoint,
+            &database,
+            TargetKind::Scratch,
+            super::super::AuthSource::None,
+            false,
+            false,
+        )
+        .unwrap();
+        super::super::init_schema(&target).unwrap();
+        let snapshot = read_physical_attempts(&target, "absent-run", "aou", "chr22").unwrap();
+        assert!(snapshot.is_empty());
     }
 
     #[test]

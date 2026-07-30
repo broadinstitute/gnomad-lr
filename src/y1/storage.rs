@@ -1754,11 +1754,81 @@ struct PublishedTable {
     expected: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct LoadAcceptanceToken {
+    run_id: String,
+    receipt_sha256: String,
+}
+
+/// Resolve a durable load-acceptance ledger receipt into an unforgeable in-process
+/// capability. Full-contig publication requires this token; interval/synthetic
+/// publication remains governed by its existing bounded gates.
+pub(crate) fn validate_load_acceptance_receipt(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    receipt_json: &str,
+    receipt_sha256: &str,
+) -> anyhow::Result<LoadAcceptanceToken> {
+    let actual_sha256 = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(receipt_json.as_bytes())
+    );
+    if receipt_sha256 != actual_sha256 {
+        bail!("load-acceptance receipt SHA-256 does not match its canonical JSON");
+    }
+    let body = target.query_text(
+        "SELECT message FROM lr_y1_load_runs WHERE run_id = {run_id:String} AND state = 'accepted' ORDER BY revision DESC LIMIT 1 FORMAT JSONEachRow",
+        &[("run_id", run_id)],
+    )?;
+    #[derive(Deserialize)]
+    struct ReceiptRow {
+        message: String,
+    }
+    let row: ReceiptRow = serde_json::from_str(body.trim())
+        .context("durable load-acceptance ledger receipt is missing or malformed")?;
+    if row.message != receipt_json {
+        bail!("durable load-acceptance ledger receipt differs from the validated receipt");
+    }
+    Ok(LoadAcceptanceToken {
+        run_id: run_id.to_string(),
+        receipt_sha256: receipt_sha256.to_string(),
+    })
+}
+
 pub fn publish_staged_run(
     target: &ClickHouseTarget,
     request: &PublicationRequest,
 ) -> anyhow::Result<()> {
+    if request.scope == LoadScope::FullChromosome {
+        bail!("full-chromosome publication cannot bypass the finalizer's durable load acceptance");
+    }
+    publish_staged_run_inner(target, request, None)
+}
+
+pub(crate) fn publish_accepted_staged_run(
+    target: &ClickHouseTarget,
+    request: &PublicationRequest,
+    acceptance: &LoadAcceptanceToken,
+) -> anyhow::Result<()> {
+    publish_staged_run_inner(target, request, Some(acceptance))
+}
+
+fn publish_staged_run_inner(
+    target: &ClickHouseTarget,
+    request: &PublicationRequest,
+    acceptance: Option<&LoadAcceptanceToken>,
+) -> anyhow::Result<()> {
     request.validate()?;
+    if request.scope == LoadScope::FullChromosome {
+        let token = acceptance.context(
+            "full-chromosome publication requires a validated durable load-acceptance receipt",
+        )?;
+        if token.run_id != request.run_id || token.receipt_sha256.len() != 64 {
+            bail!("load-acceptance capability is not bound to this publication run");
+        }
+    } else if acceptance.is_some() {
+        bail!("load-acceptance capabilities are reserved for full-chromosome publication");
+    }
     validate_run_contig_isolation(target, target.database(), request, true)?;
     if target.kind() == TargetKind::Serving && request.scope != LoadScope::FullChromosome {
         bail!("interval and synthetic runs cannot be materialized in a serving Y1 target");
@@ -2999,6 +3069,36 @@ mod tests {
 
     const HGSVC_FIXTURE: &str = include_str!("../../tests/fixtures/y1/hgsvc_hprc_trv_13_alt.vcf");
     const AOU_FIXTURE: &str = include_str!("../../tests/fixtures/y1/aou_summary_only_ins.vcf");
+
+    #[test]
+    fn full_contig_publication_cannot_bypass_durable_acceptance() {
+        let target = ClickHouseTarget::new(
+            "http://127.0.0.1:8123",
+            "gnomad_lr_y1_scratch_acceptance_test",
+            TargetKind::Scratch,
+            super::super::AuthSource::None,
+            false,
+            false,
+        )
+        .unwrap();
+        let request = PublicationRequest {
+            run_id: "run".into(),
+            scope: LoadScope::FullChromosome,
+            release: Release::Y1,
+            cohort: Cohort::Aou,
+            reference_genome: ReferenceGenome::Grch38,
+            chrom: "chr22".into(),
+            interval_start: 1,
+            interval_end: grch38_contig_length("chr22").unwrap(),
+            expected_tasks: 1,
+            expected_counts: StagedCounts::default(),
+            source_uri: "source".into(),
+            source_generation: "generation".into(),
+            source_checksum: "checksum".into(),
+        };
+        let error = publish_staged_run(&target, &request).unwrap_err();
+        assert!(error.to_string().contains("cannot bypass"));
+    }
 
     fn fixture_batch(fixture: &str, cohort: Cohort) -> TransformationBatch {
         let header = super::super::parser::Y1Header::parse(fixture, cohort).unwrap();
