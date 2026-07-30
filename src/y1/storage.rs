@@ -1,6 +1,6 @@
 use super::interval::PoolY1AttemptReport;
 use super::model::*;
-use super::target::ClickHouseTarget;
+use super::target::{ClickHouseTarget, TargetKind};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -66,86 +66,6 @@ macro_rules! columns {
 }
 
 const EMPTY_KEY: &[&str] = &[];
-const METHYLATION_TOTAL_COLUMNS: &[ColumnContract] = columns![
-    ("ancillary_run_id", "String"),
-    ("task_id", "String"),
-    ("attempt_id", "String"),
-    ("lease_id", "String"),
-    ("release", "LowCardinality(String)"),
-    ("cohort", "LowCardinality(String)"),
-    ("reference_genome", "LowCardinality(String)"),
-    ("modality", "LowCardinality(String)"),
-    ("source_version", "String"),
-    ("source_manifest_hash", "FixedString(64)"),
-    ("manifest_entry_id", "String"),
-    ("chrom", "LowCardinality(String)"),
-    ("source_start0", "UInt32"),
-    ("source_end0", "UInt32"),
-    ("position", "UInt32"),
-    ("sample_id", "LowCardinality(String)"),
-    ("methylation", "Float32"),
-    ("coverage", "UInt32"),
-    ("estimated_modified_count", "UInt32"),
-    ("estimated_unmodified_count", "UInt32"),
-    ("discretized_methylation", "Float32"),
-];
-const METHYLATION_PHASED_COLUMNS: &[ColumnContract] = columns![
-    ("ancillary_run_id", "String"),
-    ("task_id", "String"),
-    ("attempt_id", "String"),
-    ("lease_id", "String"),
-    ("release", "LowCardinality(String)"),
-    ("cohort", "LowCardinality(String)"),
-    ("reference_genome", "LowCardinality(String)"),
-    ("modality", "LowCardinality(String)"),
-    ("source_version", "String"),
-    ("source_manifest_hash", "FixedString(64)"),
-    ("manifest_entry_id", "String"),
-    ("chrom", "LowCardinality(String)"),
-    ("source_start0", "UInt32"),
-    ("source_end0", "UInt32"),
-    ("position", "UInt32"),
-    ("sample_id", "LowCardinality(String)"),
-    ("source_haplotype", "UInt8"),
-    ("methylation", "Float32"),
-    ("coverage", "UInt32"),
-    ("estimated_modified_count", "UInt32"),
-    ("estimated_unmodified_count", "UInt32"),
-    ("discretized_methylation", "Float32"),
-];
-const METHYLATION_TOTAL_SORTING_KEY: &[&str] = &[
-    "ancillary_run_id",
-    "task_id",
-    "attempt_id",
-    "lease_id",
-    "chrom",
-    "position",
-    "sample_id",
-];
-const METHYLATION_PHASED_SORTING_KEY: &[&str] = &[
-    "ancillary_run_id",
-    "task_id",
-    "attempt_id",
-    "lease_id",
-    "chrom",
-    "position",
-    "sample_id",
-    "source_haplotype",
-];
-const fn methylation_columns(phased: bool) -> &'static [ColumnContract] {
-    if phased {
-        METHYLATION_PHASED_COLUMNS
-    } else {
-        METHYLATION_TOTAL_COLUMNS
-    }
-}
-const fn methylation_sorting_key(phased: bool) -> &'static [&'static str] {
-    if phased {
-        METHYLATION_PHASED_SORTING_KEY
-    } else {
-        METHYLATION_TOTAL_SORTING_KEY
-    }
-}
 const METHYLATION_PARTITION_KEY: &[&str] = &[
     "release",
     "cohort",
@@ -154,7 +74,7 @@ const METHYLATION_PARTITION_KEY: &[&str] = &[
     "ancillary_run_id",
 ];
 
-const Y1_RUNTIME_TABLES: &[TableContract] = &[
+const METHYLATION_V4_TABLES: &[TableContract] = &[
     TableContract {
         name: "lr_y1_schema_versions",
         engine: "ReplacingMergeTree",
@@ -179,23 +99,16 @@ const Y1_RUNTIME_TABLES: &[TableContract] = &[
             ("cohort", "LowCardinality(String)"),
             ("reference_genome", "LowCardinality(String)"),
             ("modality", "LowCardinality(String)"),
-            ("data_layer", "LowCardinality(String)"),
-            ("chrom", "LowCardinality(String)"),
             ("source_version", "String"),
-            ("source_manifest_id", "String"),
             ("source_manifest_hash", "FixedString(64)"),
             ("scope", "LowCardinality(String)"),
             ("state", "LowCardinality(String)"),
-            ("expected_tasks", "UInt32"),
             ("source_rows", "UInt64"),
             ("canonical_rows", "UInt64"),
             ("reject_rows", "UInt64"),
-            ("key_hash", "FixedString(64)"),
             ("content_hash", "FixedString(64)"),
-            ("worker_principal", "String"),
             ("peak_rss_bytes", "UInt64"),
-            ("frozen_at_ms", "UInt64"),
-            ("report_json", "String"),
+            ("created_at", "DateTime64(3, 'UTC')"),
             ("revision", "UInt64"),
         ],
         partition_key: EMPTY_KEY,
@@ -204,8 +117,6 @@ const Y1_RUNTIME_TABLES: &[TableContract] = &[
             "cohort",
             "reference_genome",
             "modality",
-            "data_layer",
-            "chrom",
             "ancillary_run_id",
         ],
         must_be_empty_before_upgrade: true,
@@ -230,7 +141,7 @@ const Y1_RUNTIME_TABLES: &[TableContract] = &[
     },
     TableContract {
         name: "lr_y1_ancillary_task_attempts",
-        engine: "MergeTree",
+        engine: "ReplacingMergeTree",
         columns: columns![
             ("ancillary_run_id", "String"),
             ("modality", "LowCardinality(String)"),
@@ -238,16 +149,9 @@ const Y1_RUNTIME_TABLES: &[TableContract] = &[
             ("task_id", "String"),
             ("attempt_id", "String"),
             ("lease_id", "String"),
-            ("lease_expires_at_ms", "UInt64"),
-            ("worker_principal", "String"),
-            ("release", "LowCardinality(String)"),
-            ("cohort", "LowCardinality(String)"),
-            ("reference_genome", "LowCardinality(String)"),
             ("sample_id", "LowCardinality(String)"),
             ("data_layer", "LowCardinality(String)"),
             ("source_haplotype", "Nullable(UInt8)"),
-            ("source_manifest_id", "String"),
-            ("source_manifest_hash", "FixedString(64)"),
             ("manifest_entry_id", "String"),
             ("source_object_slot", "LowCardinality(String)"),
             ("source_uri", "String"),
@@ -255,12 +159,6 @@ const Y1_RUNTIME_TABLES: &[TableContract] = &[
             ("source_size_bytes", "UInt64"),
             ("source_checksum_algorithm", "LowCardinality(String)"),
             ("source_checksum", "String"),
-            ("source_index_object_slot", "LowCardinality(String)"),
-            ("source_index_uri", "String"),
-            ("source_index_generation", "String"),
-            ("source_index_size_bytes", "UInt64"),
-            ("source_index_checksum_algorithm", "LowCardinality(String)"),
-            ("source_index_checksum", "String"),
             ("interval_start", "UInt32"),
             ("interval_end", "UInt32"),
             ("state", "LowCardinality(String)"),
@@ -270,8 +168,7 @@ const Y1_RUNTIME_TABLES: &[TableContract] = &[
             ("key_hash", "FixedString(64)"),
             ("content_hash", "FixedString(64)"),
             ("error", "Nullable(String)"),
-            ("started_at_ms", "UInt64"),
-            ("finished_at_ms", "UInt64"),
+            ("created_at", "DateTime64(3, 'UTC')"),
             ("revision", "UInt64"),
         ],
         partition_key: EMPTY_KEY,
@@ -281,40 +178,130 @@ const Y1_RUNTIME_TABLES: &[TableContract] = &[
             "chrom",
             "task_id",
             "attempt_id",
-            "lease_id",
         ],
         must_be_empty_before_upgrade: true,
     },
     TableContract {
         name: "lr_y1_methylation_staging",
         engine: "MergeTree",
-        columns: methylation_columns(false),
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("attempt_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt32"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ],
         partition_key: METHYLATION_PARTITION_KEY,
-        sorting_key: methylation_sorting_key(false),
+        sorting_key: &[
+            "ancillary_run_id",
+            "attempt_id",
+            "chrom",
+            "position",
+            "sample_id",
+        ],
         must_be_empty_before_upgrade: true,
     },
     TableContract {
         name: "lr_y1_methylation",
         engine: "MergeTree",
-        columns: methylation_columns(false),
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt32"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ],
         partition_key: METHYLATION_PARTITION_KEY,
-        sorting_key: methylation_sorting_key(false),
+        sorting_key: &["ancillary_run_id", "chrom", "position", "sample_id"],
         must_be_empty_before_upgrade: true,
     },
     TableContract {
         name: "lr_y1_methylation_phased_staging",
         engine: "MergeTree",
-        columns: methylation_columns(true),
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("attempt_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("source_haplotype", "UInt8"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt32"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ],
         partition_key: METHYLATION_PARTITION_KEY,
-        sorting_key: methylation_sorting_key(true),
+        sorting_key: &[
+            "ancillary_run_id",
+            "attempt_id",
+            "chrom",
+            "position",
+            "sample_id",
+            "source_haplotype",
+        ],
         must_be_empty_before_upgrade: true,
     },
     TableContract {
         name: "lr_y1_methylation_phased",
         engine: "MergeTree",
-        columns: methylation_columns(true),
+        columns: columns![
+            ("ancillary_run_id", "String"),
+            ("release", "LowCardinality(String)"),
+            ("cohort", "LowCardinality(String)"),
+            ("reference_genome", "LowCardinality(String)"),
+            ("modality", "LowCardinality(String)"),
+            ("source_version", "String"),
+            ("chrom", "LowCardinality(String)"),
+            ("source_start0", "UInt32"),
+            ("source_end0", "UInt32"),
+            ("position", "UInt32"),
+            ("sample_id", "LowCardinality(String)"),
+            ("source_haplotype", "UInt8"),
+            ("methylation", "Float32"),
+            ("coverage", "UInt32"),
+            ("estimated_modified_count", "UInt32"),
+            ("estimated_unmodified_count", "UInt32"),
+            ("discretized_methylation", "Float32"),
+        ],
         partition_key: METHYLATION_PARTITION_KEY,
-        sorting_key: methylation_sorting_key(true),
+        sorting_key: &[
+            "ancillary_run_id",
+            "chrom",
+            "position",
+            "sample_id",
+            "source_haplotype",
+        ],
         must_be_empty_before_upgrade: true,
     },
     TableContract {
@@ -408,6 +395,26 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
     init_schema_with_backend(target)
 }
 
+/// Read-only attestation of the exact versioned Y1 schema-v5 table and receipt
+/// contract. This proves shape only and never authorizes a load or finalization.
+pub fn attest_exact_y1_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
+    if target.kind() != TargetKind::Scratch {
+        bail!("Y1 schema-v5 runtime attestation is restricted to scratch targets");
+    }
+    attest_exact_y1_schema_with_backend(target)
+}
+
+fn attest_exact_y1_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()> {
+    if !backend.database().split('_').any(|part| part == "v5") {
+        bail!("Y1 runtime access requires an isolated database name containing the version token _v5_");
+    }
+    validate_exact_y1_table_set(&read_database_table_names(backend)?)?;
+    validate_exact_y1_semantic_schema(backend)?;
+    let inventory = read_methylation_schema_inventory(backend)?;
+    validate_exact_methylation_v4_schema(&inventory)?;
+    require_applied_schema_receipt(backend, &inventory)
+}
+
 fn init_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()> {
     let disposition = preflight_y1_v5_initialization(backend)?;
     if disposition == SchemaDisposition::AlreadyAttested {
@@ -428,7 +435,7 @@ fn init_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()>
     validate_exact_y1_table_set(&read_database_table_names(backend)?)?;
     validate_exact_y1_semantic_schema(backend)?;
     let post_ddl = read_methylation_schema_inventory(backend)?;
-    validate_exact_y1_runtime_schema(&post_ddl)?;
+    validate_exact_methylation_v4_schema(&post_ddl)?;
     if disposition == SchemaDisposition::FreshIsolatedV5 {
         require_empty_attestation_tables(&post_ddl)?;
         backend
@@ -444,7 +451,7 @@ fn init_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()>
     // semantic attestation. It is evidence of shape, never load authorization.
     validate_exact_y1_semantic_schema(backend)?;
     let verified = read_methylation_schema_inventory(backend)?;
-    validate_exact_y1_runtime_schema(&verified)?;
+    validate_exact_methylation_v4_schema(&verified)?;
     require_applied_schema_receipt(backend, &verified)?;
     Ok(())
 }
@@ -526,7 +533,7 @@ fn preflight_y1_v5_initialization<B: SchemaBackend>(
             }
             validate_exact_y1_table_set(&database_tables)?;
             validate_exact_y1_semantic_schema(backend)?;
-            validate_exact_y1_runtime_schema(&inventory)?;
+            validate_exact_methylation_v4_schema(&inventory)?;
             Ok(SchemaDisposition::AlreadyAttested)
         }
         None => {
@@ -621,7 +628,7 @@ fn read_database_table_names<B: SchemaBackend>(backend: &B) -> anyhow::Result<Ve
 fn read_methylation_schema_inventory<B: SchemaBackend>(
     backend: &B,
 ) -> anyhow::Result<SchemaInventory> {
-    let table_names = Y1_RUNTIME_TABLES
+    let table_names = METHYLATION_V4_TABLES
         .iter()
         .map(|table| format!("'{}'", table.name))
         .collect::<Vec<_>>()
@@ -636,7 +643,9 @@ fn read_methylation_schema_inventory<B: SchemaBackend>(
     for line in table_rows.lines().filter(|line| !line.is_empty()) {
         let row: TableCatalogRow = serde_json::from_str(line)
             .context("system.tables schema inventory returned malformed JSON")?;
-        if !Y1_RUNTIME_TABLES.iter().any(|table| table.name == row.name)
+        if !METHYLATION_V4_TABLES
+            .iter()
+            .any(|table| table.name == row.name)
             || inventory.contains_key(&row.name)
         {
             bail!("system.tables schema inventory returned an unexpected table row");
@@ -766,7 +775,7 @@ fn require_applied_schema_receipt<B: SchemaBackend>(
 }
 
 fn require_empty_attestation_tables(inventory: &SchemaInventory) -> anyhow::Result<()> {
-    for contract in Y1_RUNTIME_TABLES
+    for contract in METHYLATION_V4_TABLES
         .iter()
         .filter(|table| table.must_be_empty_before_upgrade)
     {
@@ -782,14 +791,14 @@ fn require_empty_attestation_tables(inventory: &SchemaInventory) -> anyhow::Resu
     Ok(())
 }
 
-fn validate_exact_y1_runtime_schema(inventory: &SchemaInventory) -> anyhow::Result<()> {
-    for contract in Y1_RUNTIME_TABLES {
+fn validate_exact_methylation_v4_schema(inventory: &SchemaInventory) -> anyhow::Result<()> {
+    for contract in METHYLATION_V4_TABLES {
         let table = inventory
             .get(contract.name)
-            .ok_or_else(|| anyhow::anyhow!("Y1 schema v5 is missing table {}", contract.name))?;
+            .ok_or_else(|| anyhow::anyhow!("Y1 schema v4 is missing table {}", contract.name))?;
         if !table_matches_contract(table, contract) {
             bail!(
-                "Y1 schema v5 runtime table {} does not match its exact semantic catalog/SHOW CREATE contract",
+                "Y1 methylation schema v4 table {} does not match its exact semantic catalog/SHOW CREATE contract",
                 contract.name
             );
         }
@@ -843,7 +852,7 @@ fn catalog_flag(value: u8) -> anyhow::Result<bool> {
     }
 }
 
-fn y1_runtime_ddl(table: &str) -> &'static str {
+fn methylation_v4_ddl(table: &str) -> &'static str {
     y1_schema_ddl(table)
 }
 
@@ -900,7 +909,7 @@ fn y1_schema_ddl(table: &str) -> &'static str {
 }
 
 fn expected_normalized_create_statement(table: &str) -> String {
-    let mut expected = normalize_create_statement(y1_runtime_ddl(table), table);
+    let mut expected = normalize_create_statement(methylation_v4_ddl(table), table);
     // ClickHouse 26.3 renders this effective default into create_table_query.
     // Pinning it makes a different granularity fail attestation rather than
     // normalizing the semantic setting away.
@@ -1825,7 +1834,7 @@ mod tests {
         }
 
         fn historical_v3() -> Self {
-            let contract = Y1_RUNTIME_TABLES
+            let contract = METHYLATION_V4_TABLES
                 .iter()
                 .find(|table| table.name == "lr_y1_methylation")
                 .unwrap();
@@ -1854,15 +1863,15 @@ mod tests {
             }
         }
 
-        fn exact_v5_with_receipt() -> Self {
+        fn exact_v4_with_receipt() -> Self {
             let mut tables = SchemaInventory::new();
-            for contract in Y1_RUNTIME_TABLES {
+            for contract in METHYLATION_V4_TABLES {
                 tables.insert(
                     contract.name.to_string(),
                     table_inventory_from_contract(contract, 0),
                 );
             }
-            let scoped = Y1_RUNTIME_TABLES
+            let scoped = METHYLATION_V4_TABLES
                 .iter()
                 .map(|table| table.name)
                 .collect::<std::collections::BTreeSet<_>>();
@@ -1902,7 +1911,7 @@ mod tests {
                     if state.tables.contains_key(*name) || state.other_tables.contains_key(*name) {
                         bail!("mock strict CREATE collided with existing table {name}");
                     }
-                    if let Some(contract) = Y1_RUNTIME_TABLES
+                    if let Some(contract) = METHYLATION_V4_TABLES
                         .iter()
                         .find(|contract| contract.name == *name)
                     {
@@ -2092,11 +2101,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_mock_fresh_v5_is_strictly_created_and_receipted_once() {
+    fn schema_mock_fresh_v4_is_strictly_created_and_receipted_once() {
         let backend = MockSchemaBackend::fresh();
         init_schema_with_backend(&backend).unwrap();
         let state = backend.state.borrow();
-        validate_exact_y1_runtime_schema(&state.tables).unwrap();
+        validate_exact_methylation_v4_schema(&state.tables).unwrap();
         assert_eq!(
             state.receipt,
             Some(("applied".into(), Y1_SCHEMA_CONTRACT.into()))
@@ -2115,8 +2124,22 @@ mod tests {
 
     #[test]
     fn schema_mock_exact_attested_retry_executes_nothing() {
-        let backend = MockSchemaBackend::exact_v5_with_receipt();
+        let backend = MockSchemaBackend::exact_v4_with_receipt();
         init_schema_with_backend(&backend).unwrap();
+        assert!(backend.state.borrow().executed.is_empty());
+    }
+
+    #[test]
+    fn exact_v5_runtime_attestation_is_read_only_and_receipt_bound() {
+        let backend = MockSchemaBackend::exact_v4_with_receipt();
+        attest_exact_y1_schema_with_backend(&backend).unwrap();
+        assert!(backend.state.borrow().executed.is_empty());
+
+        backend.state.borrow_mut().receipt = None;
+        let error = attest_exact_y1_schema_with_backend(&backend).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("lacks its exact full-schema attestation receipt"));
         assert!(backend.state.borrow().executed.is_empty());
     }
 
@@ -2137,7 +2160,7 @@ mod tests {
         assert!(error.to_string().contains("refusing in-place"));
         assert!(partial.state.borrow().executed.is_empty());
 
-        let unreceipted = MockSchemaBackend::exact_v5_with_receipt();
+        let unreceipted = MockSchemaBackend::exact_v4_with_receipt();
         unreceipted.state.borrow_mut().receipt = None;
         let error = init_schema_with_backend(&unreceipted).unwrap_err();
         assert!(error.to_string().contains("refusing in-place"));
@@ -2145,7 +2168,7 @@ mod tests {
     }
 
     #[test]
-    fn applied_v5_receipt_never_bypasses_full_semantic_attestation() {
+    fn applied_v4_receipt_never_bypasses_full_semantic_attestation() {
         for mutation in [
             "columns",
             "types",
@@ -2157,7 +2180,7 @@ mod tests {
             "sampling",
             "constraint",
         ] {
-            let backend = MockSchemaBackend::exact_v5_with_receipt();
+            let backend = MockSchemaBackend::exact_v4_with_receipt();
             {
                 let mut state = backend.state.borrow_mut();
                 let table = state.tables.get_mut("lr_y1_methylation_phased").unwrap();
@@ -2208,7 +2231,7 @@ mod tests {
 
     #[test]
     fn full_receipt_rejects_a_non_methylation_table_semantic_change() {
-        let backend = MockSchemaBackend::exact_v5_with_receipt();
+        let backend = MockSchemaBackend::exact_v4_with_receipt();
         backend
             .state
             .borrow_mut()

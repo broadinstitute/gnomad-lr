@@ -111,7 +111,7 @@ for table in ["lr_y1_methylation_staging", "lr_y1_methylation"]:
     assert all(measure in ddl for measure in source_measures)
     assert "combined" in ddl.lower() or "Total" in ddl
 assert "METHYLATION_V3_TABLES" not in storage
-assert "validate_exact_y1_runtime_schema" in storage
+assert "validate_exact_methylation_v4_schema" in storage
 for semantic_catalog_field in [
     "create_table_query", "default_kind", "default_expression",
     "compression_codec", "sampling_key", "validate_exact_y1_semantic_schema",

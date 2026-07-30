@@ -33,11 +33,12 @@ counts = manifest["roster"]["classification_counts"]
 assert counts == {"source_present": 231, "no_methylation_output": 60, "source_marked_skip": 1}
 assert 292 == counts["source_present"] + counts["no_methylation_output"] + counts["source_marked_skip"]
 assert manifest["load_readiness"] == {
-    "status": "load_ready_for_fenced_raw_smoke",
-    "load_authorized": True,
+    "status": "blocked_pending_atomic_attempt_ledger",
+    "load_authorized": False,
     "immutable_source_reads_ready": True,
-    "blockers": [],
-    "authorization_scope": "fresh isolated schema-v5 scratch raw loading only; no pointer activation or joined serving",
+    "blockers": [
+        "atomic methylation attempt/lease ledger and direct-canonical finalizer are not implemented"
+    ],
 }
 assert "pending" not in manifest["source_version"]
 assert manifest["terra_entity_snapshot"]["entity_snapshot_sha256"] == "1c3314f2f1ea2e99374a31b8e858d5851021e3913e216574fd2ac83656879485"
@@ -50,10 +51,10 @@ assert len(present) == 231
 for entry in present:
     for slot in ("hap1_bed", "hap1_bed_index", "hap2_bed", "hap2_bed_index"):
         assert entry["objects"][slot]["discovery_uri"]
-    assert entry["authorized_object_count"] == 6
+    assert entry["authorized_object_count"] == 0
     assert all(obj["immutable_identity"] for obj in entry["objects"].values())
     assert all(obj["immutable_identity"]["updated_at"] for obj in entry["objects"].values())
-    assert all(obj["load_authorized"] for obj in entry["objects"].values())
+    assert all(not obj["load_authorized"] for obj in entry["objects"].values())
 skip = next(entry for entry in manifest["samples"] if entry["sample_id"] == "HG00272")
 assert skip["inventory_status"] == "source_marked_skip"
 assert skip["authorized_object_count"] == 0

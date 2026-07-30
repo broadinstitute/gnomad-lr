@@ -12,21 +12,19 @@ pub use interval::{
     run_pool_interval_attempt, PoolY1AttemptReport, PoolY1JobSpec, PoolY1TargetSpec, PoolY1TaskSpec,
 };
 pub use methylation::{
-    finalize_methylation_run, open_prepared_methylation_records, parse_methylation_record,
-    plan_methylation_finalization, plan_methylation_finalization_from_snapshot,
-    prepare_methylation_attempt, run_methylation_interval_attempt,
-    AuthoritativeMethylationLedgerSnapshot, FrozenMethylationAttempt, ImmutableObjectIdentity,
-    MethylationAttemptCounts, MethylationAttemptReport, MethylationDataLayer,
-    MethylationFinalizationPlan, MethylationFinalizationReport, MethylationLeaseOwnership,
-    MethylationLedgerState, MethylationRecord, MethylationResolvedAttempt, MethylationSourceType,
+    open_prepared_methylation_records, parse_methylation_record, plan_methylation_finalization,
+    plan_methylation_finalization_from_snapshot, prepare_methylation_attempt,
+    AuthoritativeMethylationLedgerSnapshot, ImmutableObjectIdentity, MethylationDataLayer,
+    MethylationFinalizationPlan, MethylationLeaseOwnership, MethylationLedgerState,
+    MethylationRecord, MethylationResolvedAttempt, MethylationSourceType,
     MethylationTaskOwnerIdentity, PreparedMethylationAttempt, SourceHaplotype,
     Y1MethylationFinalizationSpec, Y1MethylationTaskSpec,
 };
 pub use model::*;
 pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};
 pub use storage::{
-    init_schema, record_load_run, stage_attempt, stage_attempt_tracked, AttemptContext,
-    InsertStats, LoadRunLedgerRow, LoadScope, StagedCounts, Y1_SCHEMA_VERSION,
+    attest_exact_y1_schema, init_schema, record_load_run, stage_attempt, stage_attempt_tracked,
+    AttemptContext, InsertStats, LoadRunLedgerRow, LoadScope, StagedCounts, Y1_SCHEMA_VERSION,
 };
 pub use target::{
     AuthSource, ClickHouseTarget, TargetKind, WorkerWriteFence, Y1_WORKER_PASSWORD_ENV,

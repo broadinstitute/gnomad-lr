@@ -5,8 +5,8 @@ The checked narrow discovery TSV establishes only sample membership and four
 phased paths. The repository-owned normalized Terra snapshot and accepted GCS
 metadata ledger bind all six objects per source-present sample, including the
 independently discovered combined BED index. The Terra wide entity-table
-response is never an accepted input. Loading is authorized only for the fenced
-fresh-v5 raw path; pointer activation and joined serving remain blocked.
+response is never an accepted input, and loading remains blocked on the
+separate atomic attempt-ledger/finalizer milestone.
 """
 
 from __future__ import annotations
@@ -42,9 +42,9 @@ OBJECT_SLOTS = {
     "hap2_bed": "cpg_hap2_bed",
     "hap2_bed_index": "cpg_hap2_bed_idx",
 }
-RAW_LOAD_AUTHORIZATION_SCOPE = (
-    "fresh isolated schema-v5 scratch raw loading only; no pointer activation or joined serving"
-)
+LOAD_BLOCKERS = [
+    "atomic methylation attempt/lease ledger and direct-canonical finalizer are not implemented"
+]
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -304,11 +304,10 @@ def generate(
         raise SystemExit("normalized Terra snapshot did not resolve all 231 source-present samples")
     metadata_ledger = read_metadata_ledger(gcs_metadata_ledger, immutable)
     readiness = {
-        "status": "load_ready_for_fenced_raw_smoke",
-        "load_authorized": True,
+        "status": "blocked_pending_atomic_attempt_ledger",
+        "load_authorized": False,
         "immutable_source_reads_ready": True,
-        "blockers": [],
-        "authorization_scope": RAW_LOAD_AUTHORIZATION_SCOPE,
+        "blockers": LOAD_BLOCKERS,
     }
 
     entries = []
@@ -319,7 +318,7 @@ def generate(
             discovered: dict[str, str | None] = {}
         elif sample_id in discovery:
             status = "source_present"
-            reason = "complete frozen six-object generation/size/MD5 identity; authorized only for fenced fresh-v5 raw loading"
+            reason = "complete frozen six-object generation/size/MD5 identity; loading remains blocked pending the atomic attempt ledger"
             discovered = discovered_objects(discovery[sample_id])
         else:
             status = "no_methylation_output"

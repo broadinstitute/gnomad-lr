@@ -1,11 +1,10 @@
--- Direct-canonical raw source-phased rows. source_haplotype is the immutable
--- BED hap1/hap2 label (1/2), never a VCF strand or interpreted phase.
+-- Inactive canonical raw phased rows. source_haplotype is constrained by the
+-- loader/finalizer contract to 1 or 2 and must not be interpreted as VCF strand.
 CREATE TABLE IF NOT EXISTS lr_y1_methylation_phased (
-    ancillary_run_id String, task_id String, attempt_id String, lease_id String,
+    ancillary_run_id String,
     release LowCardinality(String), cohort LowCardinality(String),
     reference_genome LowCardinality(String), modality LowCardinality(String),
-    source_version String, source_manifest_hash FixedString(64),
-    manifest_entry_id String, chrom LowCardinality(String),
+    source_version String, chrom LowCardinality(String),
     source_start0 UInt32, source_end0 UInt32, position UInt32,
     sample_id LowCardinality(String), source_haplotype UInt8,
     methylation Float32, coverage UInt32,
@@ -13,4 +12,4 @@ CREATE TABLE IF NOT EXISTS lr_y1_methylation_phased (
     discretized_methylation Float32
 ) ENGINE = MergeTree()
 PARTITION BY (release, cohort, reference_genome, chrom, ancillary_run_id)
-ORDER BY (ancillary_run_id, task_id, attempt_id, lease_id, chrom, position, sample_id, source_haplotype);
+ORDER BY (ancillary_run_id, chrom, position, sample_id, source_haplotype);

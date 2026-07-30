@@ -182,23 +182,24 @@ for entry in samples:
     else:
         assert all(obj["discovery_uri"] is None for obj in entry["objects"].values())
 
-# Exact immutable reads are enabled only for the fenced fresh-v5 raw path.
-# Pointer activation and joined serving remain separate blocked capabilities.
+# Runtime immutable reads are ready, while overall loading remains blocked on
+# the explicitly separate atomic attempt-ledger/finalizer milestone.
 assert v2["load_readiness"] == {
-    "status": "load_ready_for_fenced_raw_smoke",
-    "load_authorized": True,
+    "status": "blocked_pending_atomic_attempt_ledger",
+    "load_authorized": False,
     "immutable_source_reads_ready": True,
-    "blockers": [],
-    "authorization_scope": "fresh isolated schema-v5 scratch raw loading only; no pointer activation or joined serving",
+    "blockers": [
+        "atomic methylation attempt/lease ledger and direct-canonical finalizer are not implemented"
+    ],
 }
 assert v2["terra_entity_snapshot"]["entity_snapshot_sha256"] == "1c3314f2f1ea2e99374a31b8e858d5851021e3913e216574fd2ac83656879485"
 assert v2["gcs_object_metadata_ledger"]["sha256"] == "9250ef5a4df19d03621c6db6f06d7065f12ca6727baf2513b086d54bba18908c"
 assert "pending" not in v2["source_version"]
 for entry in by_status["source_present"]:
-    assert entry["authorized_object_count"] == 6
+    assert entry["authorized_object_count"] == 0
     for obj in entry["objects"].values():
         immutable = obj["immutable_identity"]
-        assert obj["load_authorized"] is True
+        assert obj["load_authorized"] is False
         require_fields(
             immutable,
             {"uri", "generation", "byte_size", "checksum", "created_at", "updated_at", "immutable_read_uri"},
@@ -224,11 +225,7 @@ assert v2["allowed_serving_mode"]["per_haplotype_methylation"] == "blocked_join_
 
 serialized = json.dumps(v2)
 assert "LR_sample.tsv" not in serialized and "entities.tsv" not in serialized
-v2_pointer = next(
-    source
-    for source in ancillary["sources"]
-    if source["id"] == "hgsvc-hprc-phased-methylation-v2-raw-smoke-ready"
-)
+v2_pointer = next(source for source in ancillary["sources"] if source["id"] == "hgsvc-hprc-phased-methylation-v2-blocked")
 assert v2_pointer["uri"] == "methylation-phased-source-manifest.json"
 assert v2_pointer["checksum"] == {"algorithm": "canonical_json_sha256", "value": v2_hash}
 assert v2_pointer["byte_size"] == (SOURCES / v2_pointer["uri"]).stat().st_size
@@ -238,4 +235,4 @@ assert all(source["allowed_serving_mode"] != "accepted_y1" for source in ancilla
     "inventory unexpectedly authorizes Y1 ancillary serving before acceptance"
 )
 
-print("Y1 ancillary manifests verified: v2 is frozen 292=231+60+1 and fenced raw-smoke ready; joined serving remains blocked")
+print("Y1 ancillary manifests verified: v2 is frozen 292=231+60+1, immutable reads ready, and loading blocked on atomic ledger")

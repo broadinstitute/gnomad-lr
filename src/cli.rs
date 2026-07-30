@@ -29,10 +29,6 @@ pub enum Commands {
     InitY1(Y1InitArgs),
     /// Strict bounded Y1 source load into an isolated scratch database
     LoadY1Interval(Y1IntervalArgs),
-    /// Load one exact typed phased-methylation interval into inactive canonical raw storage
-    LoadY1Methylation(Y1MethylationLoadArgs),
-    /// Fence and freeze typed methylation raw intervals without activation or joined serving
-    FinalizeY1Methylation(Y1MethylationFinalizeArgs),
     /// Fence, verify, digest, and freeze one canonical Y1 GRCh38 chr1-22/X/Y candidate in place
     FinalizeY1Contig(Y1FinalizeArgs),
     /// Backward-compatible chr22-only finalization command
@@ -166,70 +162,6 @@ pub struct Y1IntervalArgs {
     /// Machine-readable validation report destination
     #[arg(long)]
     pub report_path: std::path::PathBuf,
-}
-
-#[derive(Args, Clone)]
-pub struct Y1MethylationLoadArgs {
-    #[command(flatten)]
-    pub target: Y1InitArgs,
-
-    /// Dedicated ClickHouse writer principal recorded from currentUser()
-    #[arg(long)]
-    pub worker_principal: String,
-
-    #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_USER")]
-    pub worker_username_env: String,
-
-    #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_PASSWORD")]
-    pub worker_password_env: String,
-
-    /// One deny-unknown-fields Y1MethylationTaskSpec JSON document
-    #[arg(long)]
-    pub task: std::path::PathBuf,
-
-    /// Repository-owned frozen v2 phased-methylation source manifest
-    #[arg(
-        long,
-        default_value = "sources/y1/methylation-phased-source-manifest.json"
-    )]
-    pub source_manifest: std::path::PathBuf,
-
-    #[arg(long, default_value_t = 1000)]
-    pub batch_records: usize,
-
-    #[arg(long)]
-    pub report: std::path::PathBuf,
-}
-
-#[derive(Args, Clone)]
-pub struct Y1MethylationFinalizeArgs {
-    #[command(flatten)]
-    pub target: Y1InitArgs,
-
-    #[arg(long)]
-    pub worker_principal: String,
-
-    #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_USER")]
-    pub worker_username_env: String,
-
-    #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_PASSWORD")]
-    pub worker_password_env: String,
-
-    /// Exact expected typed task set (JSON array)
-    #[arg(long)]
-    pub task_manifest: std::path::PathBuf,
-
-    #[arg(
-        long,
-        default_value = "sources/y1/methylation-phased-source-manifest.json"
-    )]
-    pub source_manifest: std::path::PathBuf,
-
-    #[arg(long)]
-    pub operator_identity: String,
-
-    #[arg(long)]
-    pub report: std::path::PathBuf,
 }
 
 #[derive(Args, Clone)]
@@ -600,8 +532,10 @@ mod tests {
     }
 
     #[test]
-    fn primary_copy_and_pointer_cli_surface_is_absent() {
+    fn unsafe_primary_copy_pointer_and_methylation_cli_surfaces_are_absent() {
         for command in [
+            "load-y1-methylation",
+            "finalize-y1-methylation",
             "materialize-y1-contig",
             "materialize-y1-chr22",
             "activate-y1-contig",
@@ -617,6 +551,8 @@ mod tests {
         let mut help = Vec::new();
         Cli::command().write_long_help(&mut help).unwrap();
         let help = String::from_utf8(help).unwrap();
+        assert!(!help.contains("load-y1-methylation"));
+        assert!(!help.contains("finalize-y1-methylation"));
         assert!(!help.contains("materialize-y1"));
         assert!(!help.contains("activate-y1-contig"));
         assert!(!help.contains("rollback-y1-contig"));

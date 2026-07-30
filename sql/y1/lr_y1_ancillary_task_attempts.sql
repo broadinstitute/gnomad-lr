@@ -1,6 +1,3 @@
--- Append-only physical running/terminal receipts. Writers/finalizers resolve
--- ownership from explicit revision-qualified rows and reject maximum-revision
--- ties; no merge may erase an earlier running or failed receipt.
 CREATE TABLE IF NOT EXISTS lr_y1_ancillary_task_attempts (
     ancillary_run_id String,
     modality LowCardinality(String),
@@ -8,16 +5,9 @@ CREATE TABLE IF NOT EXISTS lr_y1_ancillary_task_attempts (
     task_id String,
     attempt_id String,
     lease_id String,
-    lease_expires_at_ms UInt64,
-    worker_principal String,
-    release LowCardinality(String),
-    cohort LowCardinality(String),
-    reference_genome LowCardinality(String),
     sample_id LowCardinality(String),
     data_layer LowCardinality(String),
     source_haplotype Nullable(UInt8),
-    source_manifest_id String,
-    source_manifest_hash FixedString(64),
     manifest_entry_id String,
     source_object_slot LowCardinality(String),
     source_uri String,
@@ -25,12 +15,6 @@ CREATE TABLE IF NOT EXISTS lr_y1_ancillary_task_attempts (
     source_size_bytes UInt64,
     source_checksum_algorithm LowCardinality(String),
     source_checksum String,
-    source_index_object_slot LowCardinality(String),
-    source_index_uri String,
-    source_index_generation String,
-    source_index_size_bytes UInt64,
-    source_index_checksum_algorithm LowCardinality(String),
-    source_index_checksum String,
     interval_start UInt32,
     interval_end UInt32,
     state LowCardinality(String),
@@ -40,8 +24,7 @@ CREATE TABLE IF NOT EXISTS lr_y1_ancillary_task_attempts (
     key_hash FixedString(64),
     content_hash FixedString(64),
     error Nullable(String),
-    started_at_ms UInt64,
-    finished_at_ms UInt64,
+    created_at DateTime64(3, 'UTC'),
     revision UInt64
-) ENGINE = MergeTree()
-ORDER BY (ancillary_run_id, modality, chrom, task_id, attempt_id, lease_id);
+) ENGINE = ReplacingMergeTree(revision)
+ORDER BY (ancillary_run_id, modality, chrom, task_id, attempt_id);
