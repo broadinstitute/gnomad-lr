@@ -95,6 +95,8 @@ pub struct PoolY1AttemptReport {
     pub worker_identity: String,
     pub worker_build_version: String,
     pub backend_revision: String,
+    /// Exact ClickHouse principal authenticated before this immutable attempt.
+    pub worker_principal: String,
     pub state: String,
     pub failure: Option<StructuredAttemptFailure>,
     pub published: bool,
@@ -183,8 +185,12 @@ pub fn run_pool_interval_attempt(
     worker_identity: &str,
     worker_build_version: &str,
     backend_revision: &str,
+    expected_worker_principal: &str,
 ) -> anyhow::Result<PoolY1AttemptReport> {
     task.validate(&task.coordinator_task_id)?;
+    let authenticated_worker_principal = target
+        .attest_current_user(expected_worker_principal)
+        .context("failed to bind Y1 attempt to its authenticated ClickHouse principal")?;
     if target.kind() != super::TargetKind::Scratch {
         bail!("pool interval attempts may write only to a scratch target");
     }
@@ -216,6 +222,7 @@ pub fn run_pool_interval_attempt(
         worker_identity,
         worker_build_version,
         backend_revision,
+        &authenticated_worker_principal,
     )?;
 
     let started_at_revision = revision_now()?;
@@ -349,6 +356,7 @@ pub fn run_pool_interval_attempt(
         worker_identity: worker_identity.to_string(),
         worker_build_version: worker_build_version.to_string(),
         backend_revision: backend_revision.to_string(),
+        worker_principal: authenticated_worker_principal.to_string(),
         state: if accepted { "accepted" } else { "failed" }.to_string(),
         failure,
         published: false,
@@ -490,6 +498,7 @@ fn claim_attempt(
     worker_identity: &str,
     worker_build_version: &str,
     backend_revision: &str,
+    authenticated_worker_principal: &str,
 ) -> anyhow::Result<u64> {
     if let Some(existing) = latest_attempt(
         target,
@@ -534,6 +543,7 @@ fn claim_attempt(
         worker_identity: worker_identity.to_string(),
         worker_build_version: worker_build_version.to_string(),
         backend_revision: backend_revision.to_string(),
+        worker_principal: authenticated_worker_principal.to_string(),
         state: "running".to_string(),
         failure: None,
         published: false,

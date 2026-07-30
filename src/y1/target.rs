@@ -184,17 +184,18 @@ impl ClickHouseTarget {
         matches!(self.auth, AuthSource::Environment { .. })
     }
 
-    pub fn attest_current_user(&self, expected: &str) -> anyhow::Result<()> {
+    pub fn attest_current_user(&self, expected: &str) -> anyhow::Result<String> {
         validate_identifier(expected, "ClickHouse principal")?;
         let current = self.query_text("SELECT currentUser() FORMAT TabSeparated", &[])?;
-        if current.trim() != expected {
+        let current = current.trim();
+        if current != expected {
             bail!(
                 "configured ClickHouse principal {:?} does not match authenticated principal {:?}",
                 expected,
-                current.trim()
+                current
             );
         }
-        Ok(())
+        Ok(current.to_string())
     }
 
     pub fn attest_synchronous_inserts(&self) -> anyhow::Result<()> {
@@ -370,7 +371,7 @@ impl WorkerWriteFence {
     }
 
     pub fn attest_identity(&self) -> anyhow::Result<()> {
-        self.worker.attest_current_user(&self.principal)
+        self.worker.attest_current_user(&self.principal).map(|_| ())
     }
 
     pub fn apply_and_drain(&self, administrator: &ClickHouseTarget) -> anyhow::Result<()> {

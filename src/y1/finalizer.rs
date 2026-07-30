@@ -59,6 +59,12 @@ struct AttemptView {
     report_json: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TerminalAttemptPrincipalView {
+    attempt_id: String,
+    report_json: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct PhysicalAttemptView {
     table: String,
@@ -271,6 +277,7 @@ fn finalize_contig_run_inner(
 
     let durable = read_durable_report(target, &run.run_id)?;
     if let Some((state, persisted)) = durable {
+        validate_terminal_worker_principals(target, &run.run_id, fence.principal())?;
         fence.attest_fenced_and_drained(target)?;
         attest_no_active_task_leases(target, &run.run_id)?;
         let verified = rebuild_report(
@@ -316,10 +323,19 @@ fn finalize_contig_run_inner(
         // fence: terminal leases are attested before and after the dedicated
         // worker principal is made read-only, then already-running inserts drain.
         attest_no_active_task_leases(target, &run.run_id)?;
+        // Reject missing, mixed, or A-load/B-finalize identity before changing
+        // any ClickHouse principal. Coverage validates it again after the fence.
+        validate_terminal_worker_principals(target, &run.run_id, fence.principal())?;
         fence.apply_and_drain(target)?;
         attest_no_active_task_leases(target, &run.run_id)?;
 
-        let before = validate_ledger_coverage(target, &run, &tasks, PhysicalPhase::BeforeCleanup)?;
+        let before = validate_ledger_coverage(
+            target,
+            &run,
+            &tasks,
+            fence.principal(),
+            PhysicalPhase::BeforeCleanup,
+        )?;
         validate_expected_counts(&before.counts, expected.counts)?;
         for (task_id, attempt_id) in &before.nonaccepted {
             delete_attempt_rows(target, &run.run_id, task_id, attempt_id)?;
@@ -396,7 +412,8 @@ fn rebuild_report(
 ) -> anyhow::Result<FinalizationReport> {
     fence.attest_fenced_and_drained(target)?;
     attest_no_active_task_leases(target, &run.run_id)?;
-    let frozen = validate_ledger_coverage(target, run, tasks, PhysicalPhase::Frozen)?;
+    let frozen =
+        validate_ledger_coverage(target, run, tasks, fence.principal(), PhysicalPhase::Frozen)?;
     validate_expected_counts(&frozen.counts, expected.counts)?;
     let digests = read_canonical_digests(target, run, &frozen.accepted, &frozen.counts)?;
     let acceptance = build_acceptance_receipt(
@@ -511,6 +528,42 @@ HAVING state = 'running'
     )?;
     if active.trim() != "0" {
         bail!("active Y1 task leases remain; refusing canonical snapshot");
+    }
+    Ok(())
+}
+
+fn validate_terminal_worker_principals(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    expected_worker_principal: &str,
+) -> anyhow::Result<()> {
+    let body = target.query_text(
+        r#"SELECT attempt_id, argMax(report_json, revision) AS report_json
+FROM lr_y1_task_attempts
+WHERE run_id = {run_id:String}
+GROUP BY task_id, attempt_id
+HAVING argMax(state, revision) IN ('accepted', 'failed')
+FORMAT JSONEachRow"#,
+        &[("run_id", run_id)],
+    )?;
+    validate_terminal_worker_principal_rows(&body, expected_worker_principal)
+}
+
+fn validate_terminal_worker_principal_rows(
+    body: &str,
+    expected_worker_principal: &str,
+) -> anyhow::Result<()> {
+    let mut terminal_attempts = 0usize;
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        let row: TerminalAttemptPrincipalView =
+            serde_json::from_str(line).context("invalid terminal attempt principal JSON")?;
+        let report: serde_json::Value = serde_json::from_str(&row.report_json)
+            .context("invalid durable terminal attempt report JSON")?;
+        validate_worker_provenance(&report, &row.attempt_id, expected_worker_principal)?;
+        terminal_attempts += 1;
+    }
+    if terminal_attempts == 0 {
+        bail!("run has no terminal attempt principal provenance");
     }
     Ok(())
 }
@@ -672,7 +725,11 @@ fn validate_manifest(tasks: &[PoolY1TaskSpec]) -> anyhow::Result<PoolY1TaskSpec>
     Ok(first.clone())
 }
 
-fn validate_worker_provenance(report: &serde_json::Value, attempt_id: &str) -> anyhow::Result<()> {
+fn validate_worker_provenance(
+    report: &serde_json::Value,
+    attempt_id: &str,
+    expected_worker_principal: &str,
+) -> anyhow::Result<()> {
     let field = |name: &str| {
         report
             .get(name)
@@ -684,6 +741,12 @@ fn validate_worker_provenance(report: &serde_json::Value, attempt_id: &str) -> a
     let worker_identity = field("worker_identity")?;
     let build_identity = field("worker_build_version")?;
     let backend_revision = field("backend_revision")?;
+    let worker_principal = field("worker_principal")?;
+    if worker_principal != expected_worker_principal {
+        bail!(
+            "attempt {attempt_id} ClickHouse principal {worker_principal:?} does not equal fenced principal {expected_worker_principal:?}"
+        );
+    }
     if matches!(worker_identity, "unknown" | "unknown-worker")
         || matches!(
             build_identity,
@@ -707,6 +770,7 @@ fn validate_ledger_coverage(
     target: &ClickHouseTarget,
     run: &PoolY1TaskSpec,
     tasks: &[PoolY1TaskSpec],
+    expected_worker_principal: &str,
     phase: PhysicalPhase,
 ) -> anyhow::Result<LedgerCoverage> {
     let body = target.query_text(
@@ -758,7 +822,7 @@ FORMAT JSONEachRow
         }
         let report: serde_json::Value = serde_json::from_str(&row.report_json)
             .context("invalid durable attempt report JSON")?;
-        validate_worker_provenance(&report, &row.attempt_id)?;
+        validate_worker_provenance(&report, &row.attempt_id, expected_worker_principal)?;
         let manifest_task = tasks
             .iter()
             .find(|task| task.task_id == row.task_id)
@@ -1516,14 +1580,53 @@ mod tests {
             "worker_identity": "worker-7",
             "worker_build_version": format!("gnomad-lr/{revision}/x86_64-linux-release"),
             "backend_revision": revision,
+            "worker_principal": "writer_a",
         });
-        assert!(validate_worker_provenance(&valid, "attempt-7").is_ok());
+        assert!(validate_worker_provenance(&valid, "attempt-7", "writer_a").is_ok());
         let invalid = serde_json::json!({
             "worker_identity": "unknown-worker",
             "worker_build_version": format!("gnomad-lr/{revision}/x86_64-linux-release"),
             "backend_revision": revision,
+            "worker_principal": "writer_a",
         });
-        assert!(validate_worker_provenance(&invalid, "attempt-7").is_err());
+        assert!(validate_worker_provenance(&invalid, "attempt-7", "writer_a").is_err());
+    }
+
+    #[test]
+    fn a_load_b_finalize_and_missing_principal_fail_closed() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let mut report = serde_json::json!({
+            "worker_identity": "worker-7",
+            "worker_build_version": format!("gnomad-lr/{revision}/x86_64-linux-release"),
+            "backend_revision": revision,
+            "worker_principal": "writer_a",
+        });
+        assert!(validate_worker_provenance(&report, "attempt-a", "writer_b").is_err());
+        report.as_object_mut().unwrap().remove("worker_principal");
+        assert!(validate_worker_provenance(&report, "attempt-a", "writer_a").is_err());
+    }
+
+    #[test]
+    fn mixed_terminal_attempt_principals_fail_closed() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let report = |principal: &str| {
+            serde_json::json!({
+                "worker_identity": "worker-7",
+                "worker_build_version": format!("gnomad-lr/{revision}/x86_64-linux-release"),
+                "backend_revision": revision,
+                "worker_principal": principal,
+            })
+            .to_string()
+        };
+        let body = [
+            serde_json::json!({"attempt_id": "attempt-a", "report_json": report("writer_a")}),
+            serde_json::json!({"attempt_id": "attempt-b", "report_json": report("writer_b")}),
+        ]
+        .into_iter()
+        .map(|row| row.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(validate_terminal_worker_principal_rows(&body, "writer_a").is_err());
     }
 
     fn record_terminal_fixture_attempt(
@@ -1533,6 +1636,7 @@ mod tests {
         counts: StagedCounts,
         transformation: &super::super::TransformationReport,
         accepted: bool,
+        worker_principal: &str,
     ) {
         let revision = revision_now().unwrap();
         let mut ledger = super::super::TaskAttemptLedgerRow::new(
@@ -1574,6 +1678,7 @@ mod tests {
             "worker_identity": "integration-worker",
             "worker_build_version": "gnomad-lr/0123456789abcdef0123456789abcdef01234567/x86_64-linux-release",
             "backend_revision": "0123456789abcdef0123456789abcdef01234567",
+            "worker_principal": worker_principal,
             "state": if accepted { "accepted" } else { "failed" },
             "failure": if accepted { serde_json::Value::Null } else { serde_json::json!({"code":"fixture_retry"}) },
             "published": false
@@ -1660,6 +1765,7 @@ mod tests {
             StagedCounts::default(),
             &batch.report,
             false,
+            &worker_principal,
         );
         let accepted_context = super::super::AttemptContext {
             attempt_id: "accepted".into(),
@@ -1674,6 +1780,7 @@ mod tests {
             accepted_counts,
             &batch.report,
             true,
+            &worker_principal,
         );
 
         let mut expected = independent_for(&task);

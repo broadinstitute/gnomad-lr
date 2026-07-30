@@ -234,11 +234,14 @@ async fn handle_y1_interval_tasks(
         true,
         false,
     )?;
-    target.attest_current_user(&job.target.worker_principal)?;
+    let authenticated_worker_principal =
+        target.attest_current_user(&job.target.worker_principal)?;
     target.attest_synchronous_inserts()?;
     let worker_identity = worker_identity();
     let build_identity = WORKER_BUILD_IDENTITY;
     let backend_revision = BACKEND_REVISION;
+    // Carry the exact currentUser() result into every immutable running and
+    // terminal attempt ledger report.
     let batch_records = job.batch_records;
     let mut reports = Vec::with_capacity(tasks.len());
     let mut processed = 0usize;
@@ -259,6 +262,7 @@ async fn handle_y1_interval_tasks(
             let target = target.clone();
             let worker_identity = worker_identity.clone();
             let task = task.clone();
+            let authenticated_worker_principal = authenticated_worker_principal.clone();
             move || {
                 crate::y1::run_pool_interval_attempt(
                     &target,
@@ -267,6 +271,7 @@ async fn handle_y1_interval_tasks(
                     &worker_identity,
                     build_identity,
                     backend_revision,
+                    &authenticated_worker_principal,
                 )
             }
         })
