@@ -1,3 +1,4 @@
+use super::interval::PoolY1AttemptReport;
 use super::model::*;
 use super::target::ClickHouseTarget;
 use anyhow::{bail, Context};
@@ -1592,7 +1593,7 @@ fn insert_tracked<T: Serialize>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttemptState {
+pub(super) enum AttemptState {
     Running,
     Failed,
     Accepted,
@@ -1609,37 +1610,52 @@ impl AttemptState {
 }
 
 #[derive(Debug, Serialize)]
-pub struct TaskAttemptLedgerRow {
-    pub run_id: String,
-    pub task_id: String,
-    pub attempt_id: String,
-    pub revision: u64,
-    pub state: String,
-    pub chrom: String,
-    pub interval_start: u32,
-    pub interval_end: u32,
-    pub source_records: u64,
-    pub summary_rows: u64,
-    pub allele_rows: u64,
-    pub frequency_rows: u64,
-    pub carrier_rows: u64,
-    pub rejected_records: u64,
-    pub report_json: String,
-    pub started_at_ms: u64,
-    pub updated_at_ms: u64,
-    pub error: String,
+pub(super) struct TaskAttemptLedgerRow {
+    run_id: String,
+    task_id: String,
+    attempt_id: String,
+    revision: u64,
+    state: String,
+    chrom: String,
+    interval_start: u32,
+    interval_end: u32,
+    source_records: u64,
+    summary_rows: u64,
+    allele_rows: u64,
+    frequency_rows: u64,
+    carrier_rows: u64,
+    rejected_records: u64,
+    report_json: String,
+    started_at_ms: u64,
+    updated_at_ms: u64,
+    error: String,
 }
 
 impl TaskAttemptLedgerRow {
-    pub fn new(
+    pub(super) fn new(
         context: &AttemptContext,
         revision: u64,
         state: AttemptState,
         counts: StagedCounts,
-        report: &TransformationReport,
+        report: &PoolY1AttemptReport,
         error: impl Into<String>,
     ) -> anyhow::Result<Self> {
         context.validate()?;
+        if report.worker_principal.trim().is_empty() {
+            bail!("Y1 attempt report requires an authenticated ClickHouse worker_principal");
+        }
+        if report.run_id != context.run_id
+            || report.task_id != context.task_id
+            || report.attempt_id != context.attempt_id
+            || report.cohort != context.cohort
+            || report.chrom != context.chrom
+            || report.start != context.interval_start
+            || report.stop != context.interval_end
+            || report.state != state.as_str()
+            || report.counts != counts
+        {
+            bail!("Y1 attempt report does not match its ledger context, state, or counts");
+        }
         Ok(Self {
             run_id: context.run_id.clone(),
             task_id: context.task_id.clone(),
@@ -1656,14 +1672,14 @@ impl TaskAttemptLedgerRow {
             carrier_rows: counts.carriers,
             rejected_records: counts.rejects,
             report_json: serde_json::to_string(report)?,
-            started_at_ms: revision,
-            updated_at_ms: revision,
+            started_at_ms: report.started_at_ms,
+            updated_at_ms: report.finished_at_ms,
             error: error.into(),
         })
     }
 }
 
-pub fn record_task_attempt(
+pub(super) fn record_task_attempt(
     target: &ClickHouseTarget,
     row: &TaskAttemptLedgerRow,
 ) -> anyhow::Result<()> {

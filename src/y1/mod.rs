@@ -22,11 +22,9 @@ pub use methylation::{
 };
 pub use model::*;
 pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};
-pub(crate) use storage::delete_attempt_rows;
 pub use storage::{
-    init_schema, record_load_run, record_task_attempt, stage_attempt, stage_attempt_tracked,
-    AttemptContext, AttemptState, InsertStats, LoadRunLedgerRow, LoadScope, StagedCounts,
-    TaskAttemptLedgerRow, Y1_SCHEMA_VERSION,
+    init_schema, record_load_run, stage_attempt, stage_attempt_tracked, AttemptContext,
+    InsertStats, LoadRunLedgerRow, LoadScope, StagedCounts, Y1_SCHEMA_VERSION,
 };
 pub use target::{
     AuthSource, ClickHouseTarget, TargetKind, WorkerWriteFence, Y1_WORKER_PASSWORD_ENV,

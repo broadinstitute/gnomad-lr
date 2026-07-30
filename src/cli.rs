@@ -136,6 +136,10 @@ pub struct Y1IntervalArgs {
     #[arg(long)]
     pub source_checksum: String,
 
+    /// Immutable source VCF object size in bytes
+    #[arg(long)]
+    pub source_size_bytes: u64,
+
     #[arg(long)]
     pub index_generation: String,
 

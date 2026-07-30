@@ -14,7 +14,7 @@ const PREFIX_FINGERPRINT_HEX_LEN: usize = 64;
 const ASSIGNMENT_DIGEST_HEX_LEN: usize = 32;
 const MAX_LEASE_TOKEN_LEN: usize = 1024;
 
-const WORKER_BUILD_IDENTITY: &str = match option_env!("GNOMAD_LR_BUILD_IDENTITY") {
+pub(crate) const WORKER_BUILD_IDENTITY: &str = match option_env!("GNOMAD_LR_BUILD_IDENTITY") {
     Some(identity) => identity,
     None => concat!(
         "gnomad-lr/",
@@ -22,7 +22,7 @@ const WORKER_BUILD_IDENTITY: &str = match option_env!("GNOMAD_LR_BUILD_IDENTITY"
         "/development-build"
     ),
 };
-const BACKEND_REVISION: &str = match option_env!("GNOMAD_LR_GIT_SHA") {
+pub(crate) const BACKEND_REVISION: &str = match option_env!("GNOMAD_LR_GIT_SHA") {
     Some(revision) => revision,
     None => "unversioned-development-build",
 };
@@ -44,7 +44,7 @@ fn resolve_worker_identity(
         .unwrap_or_else(|| format!("build:{build_identity}"))
 }
 
-fn worker_identity() -> String {
+pub(crate) fn worker_identity() -> String {
     resolve_worker_identity(
         std::env::var("GNOMAD_LR_WORKER_ID").ok(),
         std::env::var("HOSTNAME").ok(),

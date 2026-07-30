@@ -1,8 +1,10 @@
 use super::contig::{canonical_y1_mirror_uri, grch38_contig_length};
-use super::storage::ensure_run_accepts_primary_writes;
+use super::storage::{
+    ensure_run_accepts_primary_writes, record_task_attempt, AttemptState, TaskAttemptLedgerRow,
+};
 use super::{
-    record_task_attempt, stage_attempt_tracked, AttemptContext, AttemptState, ClickHouseTarget,
-    Cohort, InsertStats, StagedCounts, TaskAttemptLedgerRow, TransformationReport, Y1Header,
+    stage_attempt_tracked, AttemptContext, ClickHouseTarget, Cohort, InsertStats, StagedCounts,
+    TransformationReport, Y1Header,
 };
 use crate::loader::vcf_reader::{read_header_text, VcfStream};
 use anyhow::{bail, Context};
@@ -366,7 +368,7 @@ pub fn run_pool_interval_attempt(
         .as_ref()
         .map(|failure| failure.message.as_str())
         .unwrap_or("");
-    let mut ledger = TaskAttemptLedgerRow::new(
+    let ledger = TaskAttemptLedgerRow::new(
         &context,
         finished_revision,
         if accepted {
@@ -375,12 +377,9 @@ pub fn run_pool_interval_attempt(
             AttemptState::Failed
         },
         total_counts,
-        &total_report,
+        &report,
         error_text,
     )?;
-    ledger.started_at_ms = report.started_at_ms;
-    ledger.updated_at_ms = report.finished_at_ms;
-    ledger.report_json = serde_json::to_string(&report)?;
     record_task_attempt(target, &ledger)
         .context("failed to durably record complete Y1 attempt result")?;
     if let Err(error) = execution {
@@ -548,17 +547,14 @@ fn claim_attempt(
         failure: None,
         published: false,
     };
-    let mut claim = TaskAttemptLedgerRow::new(
+    let claim = TaskAttemptLedgerRow::new(
         context,
         revision,
         AttemptState::Running,
         StagedCounts::default(),
-        &TransformationReport::default(),
+        &claim_report,
         "attempt claimed before staging",
     )?;
-    claim.started_at_ms = claim_report.started_at_ms;
-    claim.updated_at_ms = claim_report.finished_at_ms;
-    claim.report_json = serde_json::to_string(&claim_report)?;
     record_task_attempt(target, &claim).context("failed to claim Y1 attempt before staging")?;
     ensure_attempt_claim(target, context, revision)?;
     ensure_run_accepts_primary_writes(target, &context.run_id)?;
@@ -799,5 +795,58 @@ mod tests {
             revision: 42,
         };
         assert!(validate_claim_snapshot(&terminal, 42).is_err());
+    }
+
+    #[test]
+    fn raw_ledger_constructor_rejects_reports_without_principal_provenance() {
+        let task = valid_task();
+        let context = AttemptContext {
+            run_id: task.run_id.clone(),
+            task_id: task.task_id.clone(),
+            attempt_id: task.attempt_id.clone(),
+            cohort: Cohort::HgsvcHprc,
+            chrom: task.chrom.clone(),
+            interval_start: task.start,
+            interval_end: task.stop,
+        };
+        let report = PoolY1AttemptReport {
+            run_id: task.run_id,
+            task_id: task.task_id,
+            attempt_id: task.attempt_id,
+            cohort: Cohort::HgsvcHprc,
+            chrom: task.chrom,
+            start: task.start,
+            stop: task.stop,
+            source_uri: task.source_uri,
+            source_generation: task.source_generation,
+            source_size_bytes: task.source_size_bytes,
+            counts: StagedCounts::default(),
+            transformation: TransformationReport::default(),
+            inserted: InsertStats::default(),
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            elapsed_ms: 1,
+            parse_transform_insert_ms: 1,
+            linux_peak_rss_bytes: None,
+            worker_identity: "direct-worker".into(),
+            worker_build_version: "gnomad-lr/0123456789abcdef0123456789abcdef01234567/host-release"
+                .into(),
+            backend_revision: "0123456789abcdef0123456789abcdef01234567".into(),
+            worker_principal: String::new(),
+            state: "accepted".into(),
+            failure: None,
+            published: false,
+        };
+
+        let error = TaskAttemptLedgerRow::new(
+            &context,
+            2,
+            AttemptState::Accepted,
+            StagedCounts::default(),
+            &report,
+            "",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("worker_principal"));
     }
 }

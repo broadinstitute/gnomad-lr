@@ -17,7 +17,7 @@ use cli::{
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 #[tokio::main]
@@ -208,7 +208,6 @@ fn write_json_report<T: serde::Serialize>(
 }
 
 fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
-    let started = Instant::now();
     if args.batch_records == 0 {
         anyhow::bail!("--batch-records must be greater than zero");
     }
@@ -220,7 +219,7 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
     if target.kind() != y1::TargetKind::Scratch {
         anyhow::bail!("bounded Y1 source loads are restricted to scratch targets");
     }
-    target.attest_current_user(&args.worker_principal)?;
+    let authenticated_worker_principal = target.attest_current_user(&args.worker_principal)?;
     target.attest_synchronous_inserts()?;
 
     let cohort = match args.cohort {
@@ -228,11 +227,8 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
         Y1CohortArg::Aou => y1::Cohort::Aou,
     };
     let (chrom, start, stop) = parse_region(&args.region)?;
-    let header_text = loader::vcf_reader::read_header_text(&args.vcf)?;
-    let header = y1::Y1Header::parse(&header_text, cohort)?;
-
     let revision = y1_revision()?;
-    let run_id = args.run_id.unwrap_or_else(|| {
+    let run_id = args.run_id.clone().unwrap_or_else(|| {
         format!(
             "y1-{}-{}-{}-{}-{}",
             cohort.as_str(),
@@ -242,78 +238,53 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
             revision
         )
     });
-    let context = y1::AttemptContext {
+    let task_id = format!("{chrom}-{start}-{stop}");
+    let source_index_uri = format!("{}.tbi", args.vcf);
+    let task = y1::PoolY1TaskSpec {
+        coordinator_task_id: task_id.clone(),
+        label: format!("direct {} {}:{}-{}", cohort.as_str(), chrom, start, stop),
         run_id: run_id.clone(),
-        task_id: format!("{chrom}-{start}-{stop}"),
+        task_id,
         attempt_id: format!("attempt-{revision}"),
-        cohort,
+        release: y1::Release::Y1.as_str().to_string(),
+        cohort: cohort.as_str().to_string(),
+        reference_genome: y1::ReferenceGenome::Grch38.as_str().to_string(),
         chrom: chrom.clone(),
-        interval_start: start,
-        interval_end: stop,
+        start,
+        stop,
+        source_uri: args.vcf.clone(),
+        source_generation: args.source_generation.clone(),
+        source_checksum_algorithm: "md5_base64".to_string(),
+        source_checksum: args.source_checksum.clone(),
+        source_size_bytes: args.source_size_bytes,
+        source_index_uri: source_index_uri.clone(),
+        source_index_generation: args.index_generation.clone(),
+        source_index_checksum_algorithm: "md5_base64".to_string(),
+        source_index_checksum: args.index_checksum.clone(),
+        retry_attempt_id: None,
+        controlled_fail_once: None,
     };
 
-    let mut total_counts = y1::StagedCounts::default();
-    let mut total_report = y1::TransformationReport::default();
-    let mut record_offset = 0usize;
-    let mut record_batch = Vec::with_capacity(args.batch_records);
-    let records =
-        loader::vcf_reader::VcfStream::open_region_required_index(&args.vcf, &chrom, start, stop)?
-            .records();
-
-    for record in records {
-        record_batch.push(record?);
-        if record_batch.len() == args.batch_records {
-            stage_y1_record_batch(
-                &target,
-                &context,
-                &header,
-                &mut record_batch,
-                &mut record_offset,
-                &mut total_counts,
-                &mut total_report,
-            )?;
-        }
-    }
-    if !record_batch.is_empty() {
-        stage_y1_record_batch(
-            &target,
-            &context,
-            &header,
-            &mut record_batch,
-            &mut record_offset,
-            &mut total_counts,
-            &mut total_report,
-        )?;
-    }
-
-    let counts = total_counts;
-    let accepted = counts.rejects == 0 && counts.summaries == counts.source_records;
-    let attempt = y1::TaskAttemptLedgerRow::new(
-        &context,
-        revision,
-        if accepted {
-            y1::AttemptState::Accepted
-        } else {
-            y1::AttemptState::Failed
-        },
-        counts,
-        &total_report,
-        if accepted {
-            ""
-        } else {
-            "transformation validation failed"
-        },
+    // Use the pool loader's claim, re-attestation, staging, and terminal-report
+    // path so every durable direct-loader row has identical principal provenance.
+    let attempt = y1::run_pool_interval_attempt(
+        &target,
+        &task,
+        args.batch_records,
+        &pool::worker_identity(),
+        pool::WORKER_BUILD_IDENTITY,
+        pool::BACKEND_REVISION,
+        &authenticated_worker_principal,
     )?;
-    y1::record_task_attempt(&target, &attempt)?;
-
+    let counts = attempt.counts;
     let run = y1::LoadRunLedgerRow {
         run_id: run_id.clone(),
         revision,
-        state: if accepted { "validated" } else { "rejected" }.to_string(),
+        state: "validated".to_string(),
         load_scope: y1::LoadScope::Interval.as_str().to_string(),
         release: y1::Release::Y1.as_str().to_string(),
         cohort: cohort.as_str().to_string(),
-        reference_genome: header.reference_genome.as_str().to_string(),
+        reference_genome: y1::ReferenceGenome::Grch38.as_str().to_string(),
         chrom: chrom.clone(),
         interval_start: start,
         interval_end: stop,
@@ -321,7 +292,7 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
         source_generation: args.source_generation.clone(),
         source_checksum_algorithm: "md5_base64".to_string(),
         source_checksum: args.source_checksum.clone(),
-        source_index_uri: format!("{}.tbi", args.vcf),
+        source_index_uri: source_index_uri.clone(),
         source_index_generation: args.index_generation.clone(),
         source_index_checksum: args.index_checksum.clone(),
         schema_version: y1::Y1_SCHEMA_VERSION,
@@ -339,75 +310,119 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
     };
     y1::record_load_run(&target, &run)?;
 
-    if !accepted {
-        y1::delete_attempt_rows(&target, &run_id, &context.task_id, &context.attempt_id)?;
-    }
-
-    let report = serde_json::json!({
-        "run_id": run_id,
-        "database": target.database(),
-        "cohort": cohort,
-        "region": { "chrom": chrom, "start": start, "stop": stop },
-        "source": {
-            "uri": args.vcf,
-            "generation": args.source_generation,
-            "checksum_algorithm": "md5_base64",
-            "checksum": args.source_checksum,
-            "index_generation": args.index_generation,
-            "index_checksum": args.index_checksum
-        },
-        "accepted": accepted,
-        "batch_records": args.batch_records,
-        "counts": counts,
-        "transformation": total_report,
-        "elapsed_ms": started.elapsed().as_millis()
-    });
-    std::fs::write(&args.report_path, serde_json::to_vec_pretty(&report)?)?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
-
-    if !accepted {
-        anyhow::bail!("Y1 interval rejected; see {}", args.report_path.display());
-    }
-    Ok(())
+    let report = direct_y1_report(
+        &attempt,
+        target.database(),
+        args.batch_records,
+        &args.source_checksum,
+        &source_index_uri,
+        &args.index_generation,
+        &args.index_checksum,
+    )?;
+    write_json_report(&args.report_path, &report)
 }
 
-fn stage_y1_record_batch(
-    target: &y1::ClickHouseTarget,
-    context: &y1::AttemptContext,
-    header: &y1::Y1Header,
-    records: &mut Vec<String>,
-    record_offset: &mut usize,
-    total_counts: &mut y1::StagedCounts,
-    total_report: &mut y1::TransformationReport,
-) -> anyhow::Result<()> {
-    let mut batch = y1::transform_records(header, records.iter().map(String::as_str));
-    for reject in &mut batch.report.rejects {
-        if let Some(record_number) = &mut reject.record_number {
-            *record_number += *record_offset;
+fn direct_y1_report(
+    attempt: &y1::PoolY1AttemptReport,
+    database: &str,
+    batch_records: usize,
+    source_checksum: &str,
+    source_index_uri: &str,
+    source_index_generation: &str,
+    source_index_checksum: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let mut report = serde_json::to_value(attempt)?;
+    let object = report
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("direct Y1 attempt report must serialize as an object"))?;
+    object.insert("database".to_string(), serde_json::json!(database));
+    object.insert(
+        "accepted".to_string(),
+        serde_json::json!(attempt.state == "accepted"),
+    );
+    object.insert(
+        "batch_records".to_string(),
+        serde_json::json!(batch_records),
+    );
+    object.insert(
+        "region".to_string(),
+        serde_json::json!({ "chrom": attempt.chrom, "start": attempt.start, "stop": attempt.stop }),
+    );
+    object.insert(
+        "source".to_string(),
+        serde_json::json!({
+            "uri": attempt.source_uri,
+            "generation": attempt.source_generation,
+            "size_bytes": attempt.source_size_bytes,
+            "checksum_algorithm": "md5_base64",
+            "checksum": source_checksum,
+            "index_uri": source_index_uri,
+            "index_generation": source_index_generation,
+            "index_checksum_algorithm": "md5_base64",
+            "index_checksum": source_index_checksum
+        }),
+    );
+    Ok(report)
+}
+
+#[cfg(test)]
+mod direct_y1_tests {
+    use super::*;
+
+    #[test]
+    fn direct_loader_report_preserves_principal_bound_attempt_shape() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let attempt = y1::PoolY1AttemptReport {
+            run_id: "run-1".into(),
+            task_id: "chr22-1-10".into(),
+            attempt_id: "attempt-1".into(),
+            cohort: y1::Cohort::HgsvcHprc,
+            chrom: "chr22".into(),
+            start: 1,
+            stop: 10,
+            source_uri: "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr22.vcf.gz".into(),
+            source_generation: "123".into(),
+            source_size_bytes: 456,
+            counts: y1::StagedCounts::default(),
+            transformation: y1::TransformationReport::default(),
+            inserted: y1::InsertStats::default(),
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            elapsed_ms: 1,
+            parse_transform_insert_ms: 1,
+            linux_peak_rss_bytes: None,
+            worker_identity: "direct-worker".into(),
+            worker_build_version: format!("gnomad-lr/{revision}/host-release"),
+            backend_revision: revision.into(),
+            worker_principal: "writer_a".into(),
+            state: "accepted".into(),
+            failure: None,
+            published: false,
+        };
+        let report = direct_y1_report(
+            &attempt,
+            "gnomad_lr_y1_scratch_v5_test",
+            250,
+            "source-md5",
+            "gs://source.vcf.gz.tbi",
+            "124",
+            "index-md5",
+        )
+        .unwrap();
+
+        for field in [
+            "worker_identity",
+            "worker_build_version",
+            "backend_revision",
+            "worker_principal",
+        ] {
+            assert!(report.get(field).and_then(|value| value.as_str()).is_some());
         }
+        assert_eq!(report["worker_principal"], "writer_a");
+        assert_eq!(report["source"]["size_bytes"], 456);
+        assert_eq!(report["source"]["index_generation"], "124");
+        assert_eq!(report["accepted"], true);
     }
-
-    let batch_counts = y1::stage_attempt(target, context, &batch)?;
-    total_counts.source_records += batch_counts.source_records;
-    total_counts.summaries += batch_counts.summaries;
-    total_counts.alleles += batch_counts.alleles;
-    total_counts.frequencies += batch_counts.frequencies;
-    total_counts.carriers += batch_counts.carriers;
-    total_counts.rejects += batch_counts.rejects;
-
-    total_report.source_records += batch.report.source_records;
-    total_report.summary_rows += batch.report.summary_rows;
-    total_report.carrier_rows += batch.report.carrier_rows;
-    total_report.genotype_calls += batch.report.genotype_calls;
-    total_report.missing_genotypes += batch.report.missing_genotypes;
-    total_report.partially_called_genotypes += batch.report.partially_called_genotypes;
-    total_report.reference_genotypes += batch.report.reference_genotypes;
-    total_report.rejected_records += batch.report.rejected_records;
-    total_report.rejects.append(&mut batch.report.rejects);
-
-    *record_offset += batch.report.source_records;
-    records.clear();
-    Ok(())
 }
 
 fn y1_revision() -> anyhow::Result<u64> {

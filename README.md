@@ -67,6 +67,7 @@ target/debug/gnomad-lr load-y1-interval \
   --cohort aou \
   --vcf gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.chr22.vcf.gz \
   --source-generation GENERATION --source-checksum MD5_BASE64 \
+  --source-size-bytes SOURCE_SIZE_BYTES \
   --index-generation TBI_GENERATION --index-checksum TBI_MD5_BASE64 \
   --region chr22:20000000-20010000 \
   --batch-records 250 \

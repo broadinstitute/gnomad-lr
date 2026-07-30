@@ -1639,52 +1639,58 @@ mod tests {
         worker_principal: &str,
     ) {
         let revision = revision_now().unwrap();
-        let mut ledger = super::super::TaskAttemptLedgerRow::new(
-            context,
-            revision,
-            if accepted {
-                super::super::AttemptState::Accepted
-            } else {
-                super::super::AttemptState::Failed
-            },
-            counts,
-            transformation,
-            if accepted { "" } else { "fixture retry" },
-        )
-        .unwrap();
         let inserted_rows = counts.summaries
             + counts.alleles
             + counts.frequencies
             + counts.carriers
             + counts.rejects;
-        ledger.report_json = serde_json::json!({
-            "run_id": task.run_id,
-            "task_id": task.task_id,
-            "attempt_id": context.attempt_id,
-            "cohort": task.cohort,
-            "chrom": task.chrom,
-            "start": task.start,
-            "stop": task.stop,
-            "source_uri": task.source_uri,
-            "source_generation": task.source_generation,
-            "source_size_bytes": task.source_size_bytes,
-            "counts": counts,
-            "inserted": { "rows": inserted_rows, "bytes": 1, "requests": 1 },
-            "started_at_ms": 1,
-            "finished_at_ms": 2,
-            "elapsed_ms": 1,
-            "parse_transform_insert_ms": 1,
-            "linux_peak_rss_bytes": null,
-            "worker_identity": "integration-worker",
-            "worker_build_version": "gnomad-lr/0123456789abcdef0123456789abcdef01234567/x86_64-linux-release",
-            "backend_revision": "0123456789abcdef0123456789abcdef01234567",
-            "worker_principal": worker_principal,
-            "state": if accepted { "accepted" } else { "failed" },
-            "failure": if accepted { serde_json::Value::Null } else { serde_json::json!({"code":"fixture_retry"}) },
-            "published": false
-        })
-        .to_string();
-        super::super::record_task_attempt(target, &ledger).unwrap();
+        let report = super::super::PoolY1AttemptReport {
+            run_id: task.run_id.clone(),
+            task_id: task.task_id.clone(),
+            attempt_id: context.attempt_id.clone(),
+            cohort: context.cohort,
+            chrom: task.chrom.clone(),
+            start: task.start,
+            stop: task.stop,
+            source_uri: task.source_uri.clone(),
+            source_generation: task.source_generation.clone(),
+            source_size_bytes: task.source_size_bytes,
+            counts,
+            transformation: transformation.clone(),
+            inserted: super::super::InsertStats {
+                rows: inserted_rows,
+                bytes: 1,
+                requests: 1,
+            },
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            elapsed_ms: 1,
+            parse_transform_insert_ms: 1,
+            linux_peak_rss_bytes: None,
+            worker_identity: "integration-worker".to_string(),
+            worker_build_version:
+                "gnomad-lr/0123456789abcdef0123456789abcdef01234567/x86_64-linux-release"
+                    .to_string(),
+            backend_revision: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            worker_principal: worker_principal.to_string(),
+            state: if accepted { "accepted" } else { "failed" }.to_string(),
+            failure: None,
+            published: false,
+        };
+        let ledger = super::super::storage::TaskAttemptLedgerRow::new(
+            context,
+            revision,
+            if accepted {
+                super::super::storage::AttemptState::Accepted
+            } else {
+                super::super::storage::AttemptState::Failed
+            },
+            counts,
+            &report,
+            if accepted { "" } else { "fixture retry" },
+        )
+        .unwrap();
+        super::super::storage::record_task_attempt(target, &ledger).unwrap();
     }
 
     #[test]
