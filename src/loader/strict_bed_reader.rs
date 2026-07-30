@@ -382,6 +382,14 @@ where
             return Ok(());
         }
         if !bytes.ends_with(b"\n") {
+            // A CSI query can end at a virtual chunk boundary in the middle of
+            // a spill record after the requested interval. Ignore only a tail
+            // whose chromosome and start coordinate alone prove that it cannot
+            // belong to the requested interval. Every in-range, ambiguous, or
+            // malformed non-newline tail remains a hard truncation error.
+            if truncated_tail_is_after_interval(&bytes, expected_chrom, source_end0)? {
+                return Ok(());
+            }
             bail!("truncated nonempty BED line at end of indexed stream");
         }
         bytes.pop();
@@ -410,6 +418,28 @@ where
             .send(StreamMessage::Line(line.to_string()))
             .map_err(|_| anyhow::anyhow!("strict BED receiver dropped before completion"))?;
     }
+}
+
+fn truncated_tail_is_after_interval(
+    bytes: &[u8],
+    expected_chrom: &str,
+    source_end0: u32,
+) -> anyhow::Result<bool> {
+    let line = std::str::from_utf8(bytes).context("truncated BED tail is not valid UTF-8")?;
+    let mut fields = line.split('\t');
+    if fields.next() != Some(expected_chrom) {
+        return Ok(false);
+    }
+    let Some(start0) = fields.next() else {
+        return Ok(false);
+    };
+    if start0.is_empty() || !start0.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(false);
+    }
+    Ok(start0
+        .parse::<u32>()
+        .ok()
+        .is_some_and(|start0| start0 >= source_end0))
 }
 
 #[cfg(test)]
@@ -623,11 +653,32 @@ mod tests {
             .to_string()
             .contains("truncated nonempty BED line"));
 
+        let ambiguous_tail = collect_from_bytes(b"chr22\tnot-a-position").unwrap_err();
+        assert!(ambiguous_tail
+            .to_string()
+            .contains("truncated nonempty BED line"));
+
         let malformed = collect_from_bytes(b"chr22\tnot-a-position\t100\t80\tTotal\t2\t1\t1\t50\n")
             .unwrap_err();
         assert!(malformed
             .to_string()
             .contains("methylation start0 is not a UInt32"));
+    }
+
+    #[test]
+    fn truncated_chunk_tail_is_ignored_only_when_start_is_proven_after_interval() {
+        // CSI Query can stop at its virtual chunk end in the middle of the
+        // first spill row after the requested interval.
+        let rows =
+            collect_from_bytes(b"chr22\t149\t150\t25\tTotal\t4\t1\t3\t25\nchr22\t20022211\t20")
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec!["chr22\t149\t150\t25\tTotal\t4\t1\t3\t25".to_string()]
+        );
+
+        let in_range = collect_from_bytes(b"chr22\t199\t20").unwrap_err();
+        assert!(in_range.to_string().contains("truncated nonempty BED line"));
     }
 
     #[test]
