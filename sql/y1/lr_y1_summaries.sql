@@ -1,5 +1,7 @@
 CREATE TABLE IF NOT EXISTS lr_y1_summaries (
     run_id String,
+    task_id String,
+    attempt_id String,
     release LowCardinality(String),
     cohort LowCardinality(String),
     reference_genome LowCardinality(String),
@@ -22,5 +24,5 @@ CREATE TABLE IF NOT EXISTS lr_y1_summaries (
     frequencies_json String,
     source_info_json String
 ) ENGINE = MergeTree()
-PARTITION BY (release, cohort, reference_genome, chrom, run_id)
-ORDER BY (release, cohort, reference_genome, chrom, position, source_variant_id, run_id);
+PARTITION BY run_id
+ORDER BY (run_id, task_id, attempt_id, chrom, position, source_variant_id);

@@ -3,6 +3,12 @@
 This is a design/preflight record only. No pool lifecycle command, job submission,
 ClickHouse request, or GCS operation is part of this preparation.
 
+## Fresh-instance candidate topology
+
+Terraform for every major/full Y1 load must provision a new private ClickHouse instance and an empty Y1 v5 database. Treat that entire instance—not a database-local partition or second table set—as the candidate. Workers write attempt-scoped rows directly to the single `lr_y1_{summaries,alleles,frequencies,carriers}` table set. Finalization fences and freezes those tables in place; it performs no `_staging`→canonical `INSERT SELECT`, serving activation, endpoint change, or Terraform apply. A later explicitly authorized environment-level cutover may route serving to the accepted instance, while the prior instance remains rollback. Existing instances must not be reused or mutated for a candidate load.
+
+The repository contains no Terraform module, so the infrastructure implementation of this topology remains outside this checkout. This document is operator intent, not evidence that Terraform has been planned or applied.
+
 ## Safe prerequisites added
 
 - `scripts/convert-y1-full-genome-source-inventory.py` validates a checked
@@ -97,13 +103,6 @@ pinned Genohype revision is updated.
    attempt IDs across all assignments. Then pin both `genohype-core` and
    `genohype-pool` plus the installed CLI to that same reviewed revision.
 
-## Ownership boundary
+## Remaining ownership boundary
 
-At preflight the worktree already had modifications to `Makefile`,
-`genohype.toml`, `src/{cli,main,pool}.rs`, and the Y1
-finalizer/interval/storage modules, plus unrelated methylation and publication
-work and a deleted skill. Those files were preserved and not edited here.
-Consequently generic Rust finalization remains a prerequisite: parameterize the
-current chr22 length/chromosome checks and publication request by the canonical
-GRCh38 contig while retaining the existing chr22 command behavior and tests.
-This must be integrated by the owner of the active finalizer changes.
+Generic per-contig Rust finalization now freezes the canonical v5 tables in place and retains the chr22 compatibility command. Production acceptance is still blocked at the Genohype boundary: the pinned reader resolves bare `gs://` URIs and does not expose generation-qualified VCF/TBI handles plus observed generation, size, and checksum evidence to the worker report. Do not resume a full load until that I/O contract and the coordinator lease work above are implemented and verified against exact object generations.

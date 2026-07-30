@@ -147,7 +147,7 @@ def main() -> int:
         nonce = f"{os.getpid()}_{secrets.token_hex(4)}"
 
         def new_database(case: str) -> str:
-            database = f"gnomad_lr_y1_scratch_v4_semantic_{nonce}_{case}"
+            database = f"gnomad_lr_y1_scratch_v5_semantic_{nonce}_{case}"
             request(endpoint, f"CREATE DATABASE {database}")
             owned_databases.append(database)
             return database
@@ -161,8 +161,8 @@ def main() -> int:
             fresh,
         ).strip()
         assert receipt == (
-            "y1_full\t4\tapplied\t"
-            "y1_full_v4_semantic_schema_attestation_not_load_authorization"
+            "y1_full\t5\tapplied\t"
+            "y1_full_v5_single_primary_copy_schema_attestation_not_load_authorization"
         ), receipt
         rendered = request(
             endpoint,

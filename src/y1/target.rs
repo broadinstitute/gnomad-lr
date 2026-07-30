@@ -2,6 +2,8 @@ use anyhow::{bail, Context};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::Url;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -194,6 +196,38 @@ impl ClickHouseTarget {
         check_response(response, "query")
     }
 
+    /// Hash a deterministically ordered ClickHouse response without buffering a
+    /// full-genome table in process memory. `domain` binds empty and nonempty
+    /// streams to the table/task/attempt identity selected by the caller.
+    pub fn query_sha256(
+        &self,
+        query: &str,
+        parameters: &[(&str, &str)],
+        domain: &[u8],
+    ) -> anyhow::Result<String> {
+        let mut response = self
+            .authorized(clickhouse_client()?.post(self.request_url(parameters)?))?
+            .header("Content-Type", "text/plain")
+            .body(query.to_string())
+            .send()
+            .context("failed to send ClickHouse digest query")?;
+        if !response.status().is_success() {
+            return check_response(response, "digest query").map(|_| unreachable!());
+        }
+        let mut digest = canonical_content_hasher(domain);
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = response
+                .read(&mut buffer)
+                .context("failed while streaming ClickHouse digest response")?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
     pub fn insert_json_each_row<T: Serialize>(
         &self,
         table: &str,
@@ -254,6 +288,14 @@ impl ClickHouseTarget {
             }
         }
     }
+}
+
+fn canonical_content_hasher(domain: &[u8]) -> Sha256 {
+    let mut digest = Sha256::new();
+    digest.update(b"gnomad-lr-y1-canonical-content-v1\0");
+    digest.update(domain);
+    digest.update([0]);
+    digest
 }
 
 fn clickhouse_client() -> anyhow::Result<Client> {
@@ -335,6 +377,18 @@ mod tests {
             false,
             false,
         )
+    }
+
+    #[test]
+    fn same_count_content_mutation_changes_canonical_sha256() {
+        let mut first = canonical_content_hasher(b"summaries\0task\0attempt\x002");
+        first.update(b"row-a\nrow-b\n");
+        let mut changed = canonical_content_hasher(b"summaries\0task\0attempt\x002");
+        changed.update(b"row-a\nrow-c\n");
+        assert_ne!(
+            format!("{:x}", first.finalize()),
+            format!("{:x}", changed.finalize())
+        );
     }
 
     #[test]

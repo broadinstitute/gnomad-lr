@@ -22,11 +22,12 @@ pub use methylation::{
 };
 pub use model::*;
 pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};
+pub(crate) use storage::delete_attempt_rows;
 pub use storage::{
     activate_published_run, change_contig_primary_pointer, change_primary_pointer, init_schema,
-    materialize_contig_serving_candidate, materialize_serving_candidate, publish_staged_run,
-    record_load_run, record_task_attempt, stage_attempt, stage_attempt_tracked, AttemptContext,
-    AttemptState, ContentSignature, ExpectedPointer, InsertStats, LoadRunLedgerRow, LoadScope,
+    materialize_contig_serving_candidate, materialize_serving_candidate, record_load_run,
+    record_task_attempt, stage_attempt, stage_attempt_tracked, AttemptContext, AttemptState,
+    ContentSignature, ExpectedPointer, InsertStats, LoadRunLedgerRow, LoadScope,
     PrimaryPointerAction, PrimaryPointerReport, PublicationRequest, ServingAcceptance,
     StagedCounts, TaskAttemptLedgerRow, Y1_SCHEMA_VERSION,
 };

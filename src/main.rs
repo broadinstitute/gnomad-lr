@@ -430,23 +430,8 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
     };
     y1::record_load_run(&target, &run)?;
 
-    if accepted {
-        let request = y1::PublicationRequest {
-            run_id: run_id.clone(),
-            scope: y1::LoadScope::Interval,
-            release: y1::Release::Y1,
-            cohort,
-            reference_genome: header.reference_genome,
-            chrom: chrom.clone(),
-            interval_start: start,
-            interval_end: stop,
-            expected_tasks: 1,
-            expected_counts: counts,
-            source_uri: args.vcf.clone(),
-            source_generation: args.source_generation.clone(),
-            source_checksum: args.source_checksum.clone(),
-        };
-        y1::publish_staged_run(&target, &request)?;
+    if !accepted {
+        y1::delete_attempt_rows(&target, &run_id, &context.task_id, &context.attempt_id)?;
     }
 
     let report = serde_json::json!({

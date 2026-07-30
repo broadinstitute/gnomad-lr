@@ -45,10 +45,6 @@ y1_tables = {
     "lr_y1_str_histograms_staging",
     "lr_y1_str_histograms",
     "lr_y1_rejects_staging",
-    "lr_y1_summaries_staging",
-    "lr_y1_alleles_staging",
-    "lr_y1_frequencies_staging",
-    "lr_y1_carriers_staging",
     "lr_y1_summaries",
     "lr_y1_alleles",
     "lr_y1_frequencies",
@@ -68,7 +64,8 @@ for table in sorted(y1_tables):
 
 for table in ["lr_y1_summaries", "lr_y1_alleles", "lr_y1_frequencies", "lr_y1_carriers"]:
     ddl = (y1_sql_dir / f"{table}.sql").read_text()
-    assert "PARTITION BY (release, cohort, reference_genome, chrom, run_id)" in ddl
+    assert "task_id String" in ddl and "attempt_id String" in ddl
+    assert "PARTITION BY run_id" in ddl
 
 for table in [
     "lr_y1_coverage_staging", "lr_y1_coverage",
@@ -86,12 +83,12 @@ active_ancillary = (y1_sql_dir / "lr_y1_active_ancillary.sql").read_text()
 assert "ORDER BY (release, cohort, reference_genome, modality)" in active_ancillary
 
 storage = (ROOT / "src" / "y1" / "storage.rs").read_text()
-assert "pub const Y1_SCHEMA_VERSION: u16 = 4;" in storage
+assert "pub const Y1_SCHEMA_VERSION: u16 = 5;" in storage
 assert 'include_str!("../../sql/y1/lr_y1_schema_versions.sql")' in storage
-assert "preflight_methylation_v4_initialization(backend)?;" in storage
+assert "preflight_y1_v5_initialization(backend)?;" in storage
 assert "refusing in-place Y1 schema initialization" in storage
-assert "y1_full_v4_semantic_schema_attestation_not_load_authorization" in storage
-assert "FreshIsolatedV4" in storage
+assert "y1_full_v5_single_primary_copy_schema_attestation_not_load_authorization" in storage
+assert "FreshIsolatedV5" in storage
 assert "fresh_create_statement" in storage
 schema_initializer = storage.split("fn init_schema_with_backend", 1)[1].split("struct ColumnSemantics", 1)[0]
 assert '"ALTER TABLE' not in schema_initializer
@@ -149,4 +146,4 @@ for column in [
     assert column in attempts
 
 exec((ROOT / "scripts" / "verify-y1-ancillary-manifests.py").read_text(), {"__name__": "__main__", "__file__": str(ROOT / "scripts" / "verify-y1-ancillary-manifests.py")})
-print("Manifests verified: legacy smoke is isolated and Y1 schema v4 phased methylation remains unjoined")
+print("Manifests verified: legacy smoke is isolated and Y1 schema v5 keeps phased methylation unjoined")

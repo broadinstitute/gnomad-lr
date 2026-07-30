@@ -6,7 +6,7 @@ Rust loaders that transform gnomAD long-read VCF, coverage, methylation, STR his
 
 The existing `load`/`run` paths and `sql/lr_{variants,haplotypes}.sql` still implement the legacy browser contract. They are **not compatible with the cohort-aware Y1 HGSVC/HPRC and AoU sources**: the legacy shape loses multiallelic arrays, lacks release/cohort identity, and cannot represent AoU's summary-only records safely.
 
-Y1 development now has a separate pure transformation layer plus repository-owned `sql/y1/` staging, canonical-summary, ALT-expanded, frequency, carrier, metadata, ancillary-ledger, and active-pointer tables. Ancillary source candidates and the deterministic 232-sample methylation assay-subset manifest are fail-closed; none is yet authorized for Y1 serving. See [`docs/y1-ancillary-inventory.md`](docs/y1-ancillary-inventory.md) and [`docs/y1-ancillary-runbook.md`](docs/y1-ancillary-runbook.md). Do not point the legacy commands at Y1 objects, initialize `gnomad_lr_y1_pilot` with legacy DDL, or write surveyed Y1 data to remote ClickHouse before acceptance.
+Y1 development now has a separate pure transformation layer plus repository-owned `sql/y1/` canonical summary, ALT-expanded, frequency, and carrier tables with attempt identity, together with metadata, ancillary-ledger, and active-pointer tables. Primary Y1 rows have no second `_staging` copy; ancillary and phased-methylation staging remains separate. Ancillary source candidates and the deterministic 232-sample methylation assay-subset manifest are fail-closed; none is yet authorized for Y1 serving. See [`docs/y1-ancillary-inventory.md`](docs/y1-ancillary-inventory.md) and [`docs/y1-ancillary-runbook.md`](docs/y1-ancillary-runbook.md). Do not point the legacy commands at Y1 objects, initialize `gnomad_lr_y1_pilot` with legacy DDL, or write surveyed Y1 data to remote ClickHouse before acceptance.
 
 ## Reproducible build
 
@@ -29,18 +29,18 @@ make install-genohype
 
 ## ClickHouse environments
 
-The repository-owned DDL for the current legacy browser contract lives at the top of `sql/` and is embedded in the binary's `init` command. Y1 v4 DDL lives separately in `sql/y1/` and is initialized only by `init-y1`. Use a ClickHouse **database** (the ClickHouse equivalent of an isolated index) to separate smoke data from serving data. Legacy HTTP requests preserve a URL's `database` query parameter:
+The repository-owned DDL for the current legacy browser contract lives at the top of `sql/` and is embedded in the binary's `init` command. Y1 v5 DDL lives separately in `sql/y1/` and is initialized only by `init-y1`. Every major/full Y1 load targets a fresh Terraform-provisioned private ClickHouse instance; the whole instance is the candidate and each primary logical table has exactly one physical table. A database remains useful for local smoke isolation, but there is no in-instance primary active/candidate copy or staging-to-final publication phase. Legacy HTTP requests preserve a URL's `database` query parameter:
 
 ```text
 http://127.0.0.1:8123/?database=gnomad_lr_smoke
 ```
 
-The Y1 target contract is stricter: endpoint, database, target kind, and auth source are separate values. It rejects `default`, credentials or `database=...` embedded in the endpoint, unsafe database names, unauthenticated remote endpoints, and serving targets without an additional acknowledgement. D0 performs no in-place migration or `ALTER`: initialization accepts only an empty isolated database with an `_v4_` name token, or an already exact live schema carrying the full checked-Y1 attestation. That attestation proves schema shape only and is never load authorization. For example, after an administrator creates a fresh database:
+The Y1 target contract is stricter: endpoint, database, target kind, and auth source are separate values. It rejects `default`, credentials or `database=...` embedded in the endpoint, unsafe database names, unauthenticated remote endpoints, and serving targets without an additional acknowledgement. Initialization performs no in-place migration or `ALTER`: it accepts only an empty isolated database with a `_v5_` name token, or an already exact live schema carrying the full checked-Y1 attestation. That attestation proves schema shape only and is never load authorization. For example, after an administrator creates a fresh database:
 
 ```bash
 target/debug/gnomad-lr init-y1 \
   --endpoint http://127.0.0.1:8123 \
-  --database gnomad_lr_y1_scratch_v4_local \
+  --database gnomad_lr_y1_scratch_v5_local \
   --target-kind scratch \
   --auth-source none
 ```
@@ -63,9 +63,9 @@ target/debug/gnomad-lr load-y1-interval \
   --report-path /tmp/aou-10kb.json
 ```
 
-Records are transformed and staged in bounded batches (250 records by default), while validation and fail-closed publication still apply to the complete requested interval. This prevents a 1 Mb genotype-rich interval from being materialized as one multi-gigabyte client-side insert. Complete source INFO JSON is stored once on the source-record summary; ALT-expanded rows reference the same run/cohort/source identity instead of duplicating multi-megabyte record payloads for every ALT.
+Records are transformed and inserted directly into the canonical attempt-scoped tables in bounded batches (250 records by default). Full-run finalization first fences new writers, verifies every terminal attempt and physical count, synchronously removes nonaccepted retry rows, computes ordered RowBinary SHA-256 digests, durably freezes the run, rereads the same rows, and only then records `accepted_frozen`. It never copies rows into a second primary table set. This prevents a 1 Mb genotype-rich interval from being materialized as one multi-gigabyte client-side insert. Complete source INFO JSON is stored once on the source-record summary; ALT-expanded rows reference the same run/cohort/source identity instead of duplicating multi-megabyte record payloads for every ALT.
 
-A rejected attempt remains visible in the ledgers and staging tables but produces no canonical rows. Interval runs cannot activate a serving partition.
+A rejected attempt remains visible in the immutable attempt ledger; its primary rows are deleted before a full run can be accepted. Interval runs cannot activate a serving partition. Environment-level endpoint cutover is a later, explicitly authorized operation; finalization neither activates serving nor applies Terraform. Existing instances remain the rollback environment.
 
 Recommended promotion path:
 
@@ -186,4 +186,4 @@ gnomad-lr run --chroms chr22 --skip-index \
   --clickhouse-url 'http://192.168.0.6:8123/?database=gnomad_lr_smoke_pool'
 ```
 
-Do not promote Y1 data to the production `default` database through this legacy path. The v2 development tables preserve canonical arrays and derive ALT-expanded/frequency/carrier query shapes. Task attempts are immutable; only one accepted attempt per task is materialized, repeat materialization replaces the inactive run partition, and an active pointer is separate. Activation is restricted to immutable, independently counted full-chromosome serving runs. Y1 promotion still requires dual-cohort 10 kb acceptance, metadata/ancillary gates, and cohort-aware browser/API changes.
+Do not promote Y1 data to the production `default` database through this legacy path. The Y1 tables preserve canonical arrays and derive ALT-expanded/frequency/carrier query shapes. Major loads use a fresh isolated instance and freeze one canonical attempt-scoped table set in place; they do not materialize an inactive copy. Serving cutover remains separately authorized and all dual-cohort full-load, activation, metadata/ancillary, phased-methylation, and browser/API gates remain in force. Production acceptance also remains blocked until VCF and index reads are generation-qualified and their observed object identities are persisted end to end; the current pinned Genohype I/O API reads bare mutable URIs.

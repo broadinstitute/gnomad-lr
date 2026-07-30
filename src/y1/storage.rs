@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const Y1_SCHEMA_VERSION: u16 = 4;
+pub const Y1_SCHEMA_VERSION: u16 = 5;
 
 // This receipt attests the complete checked Y1 table set. It is never load
 // authorization and does not relax any runtime source/write/finalization gate.
-const Y1_V4_SCHEMA_CONTRACT: &str = "y1_full_v4_semantic_schema_attestation_not_load_authorization";
+const Y1_SCHEMA_CONTRACT: &str =
+    "y1_full_v5_single_primary_copy_schema_attestation_not_load_authorization";
 
 const Y1_SCHEMA_TABLE_NAMES: &[&str] = &[
     "lr_y1_schema_versions",
@@ -37,10 +38,6 @@ const Y1_SCHEMA_TABLE_NAMES: &[&str] = &[
     "lr_y1_sample_metadata",
     "lr_y1_metadata_audit",
     "lr_y1_rejects_staging",
-    "lr_y1_summaries_staging",
-    "lr_y1_alleles_staging",
-    "lr_y1_frequencies_staging",
-    "lr_y1_carriers_staging",
     "lr_y1_summaries",
     "lr_y1_alleles",
     "lr_y1_frequencies",
@@ -369,23 +366,10 @@ const METHYLATION_V4_TABLES: &[TableContract] = &[
     },
 ];
 
-const SUMMARY_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, ref_allele, alts, allele_type, qual, filters, ac, an, af, allele_lengths, length_provenance, source_allele_length, source_svlen, source_svlen_present, frequencies_json, source_info_json";
-const ALLELE_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, reference_end, xpos, source_variant_id, alt_index, ref_allele, alt, allele_type, qual, filters, ac, an, af, allele_length, length_provenance, rsids, cadd_phred, phylop, major_consequence, short_read_match_id, short_read_match_type, short_read_match_source";
-const FREQUENCY_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, division, ac, an, af, values_available";
-const CARRIER_COLUMNS: &str = "run_id, release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, alt, sample_id, genotype_position, gt_alleles, gt_phased, genotype_fields_json, position_fields_json";
-
-const ACCEPTED_ATTEMPTS: &str = r#"
-SELECT task_id, any(attempt_id) AS attempt_id
-FROM (
-    SELECT task_id, attempt_id, argMax(state, revision) AS state
-    FROM lr_y1_task_attempts
-    WHERE run_id = {run_id:String} AND chrom = {chrom:String}
-    GROUP BY task_id, attempt_id
-)
-WHERE state = 'accepted'
-GROUP BY task_id
-HAVING count() = 1
-"#;
+const SUMMARY_COLUMNS: &str = "run_id, task_id, attempt_id, release, cohort, reference_genome, chrom, position, source_variant_id, ref_allele, alts, allele_type, qual, filters, ac, an, af, allele_lengths, length_provenance, source_allele_length, source_svlen, source_svlen_present, frequencies_json, source_info_json";
+const ALLELE_COLUMNS: &str = "run_id, task_id, attempt_id, release, cohort, reference_genome, chrom, position, reference_end, xpos, source_variant_id, alt_index, ref_allele, alt, allele_type, qual, filters, ac, an, af, allele_length, length_provenance, rsids, cadd_phred, phylop, major_consequence, short_read_match_id, short_read_match_type, short_read_match_source";
+const FREQUENCY_COLUMNS: &str = "run_id, task_id, attempt_id, release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, division, ac, an, af, values_available";
+const CARRIER_COLUMNS: &str = "run_id, task_id, attempt_id, release, cohort, reference_genome, chrom, position, source_variant_id, alt_index, alt, sample_id, genotype_position, gt_alleles, gt_phased, genotype_fields_json, position_fields_json";
 
 trait SchemaBackend {
     fn database(&self) -> &str;
@@ -408,9 +392,9 @@ impl SchemaBackend for ClickHouseTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MethylationV4Disposition {
+enum SchemaDisposition {
     AlreadyAttested,
-    FreshIsolatedV4,
+    FreshIsolatedV5,
 }
 
 pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
@@ -418,8 +402,8 @@ pub fn init_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
 }
 
 fn init_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()> {
-    let disposition = preflight_methylation_v4_initialization(backend)?;
-    if disposition == MethylationV4Disposition::AlreadyAttested {
+    let disposition = preflight_y1_v5_initialization(backend)?;
+    if disposition == SchemaDisposition::AlreadyAttested {
         // An attested schema is read-only to this initializer. In particular,
         // reruns never CREATE or ALTER historical/intermediate tables.
         return Ok(());
@@ -438,15 +422,15 @@ fn init_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()>
     validate_exact_y1_semantic_schema(backend)?;
     let post_ddl = read_methylation_schema_inventory(backend)?;
     validate_exact_methylation_v4_schema(&post_ddl)?;
-    if disposition == MethylationV4Disposition::FreshIsolatedV4 {
+    if disposition == SchemaDisposition::FreshIsolatedV5 {
         require_empty_attestation_tables(&post_ddl)?;
         backend
             .execute(&format!(
                 "INSERT INTO lr_y1_schema_versions \
                  (schema_scope, schema_version, state, contract, applied_at, revision) VALUES \
-                 ('y1_full', 4, 'applied', '{Y1_V4_SCHEMA_CONTRACT}', now64(3), toUInt64(toUnixTimestamp64Milli(now64(3))))"
+                 ('y1_full', 5, 'applied', '{Y1_SCHEMA_CONTRACT}', now64(3), toUInt64(toUnixTimestamp64Milli(now64(3))))"
             ))
-            .context("failed to record applied Y1 schema version 4")?;
+            .context("failed to record applied Y1 schema version 5")?;
     }
 
     // The full-schema receipt is accepted only together with a fresh live
@@ -454,7 +438,7 @@ fn init_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()>
     validate_exact_y1_semantic_schema(backend)?;
     let verified = read_methylation_schema_inventory(backend)?;
     validate_exact_methylation_v4_schema(&verified)?;
-    require_applied_v4_receipt(backend, &verified)?;
+    require_applied_schema_receipt(backend, &verified)?;
     Ok(())
 }
 
@@ -519,16 +503,16 @@ struct ColumnCatalogRow {
 
 type SchemaInventory = BTreeMap<String, TableInventory>;
 
-fn preflight_methylation_v4_initialization<B: SchemaBackend>(
+fn preflight_y1_v5_initialization<B: SchemaBackend>(
     backend: &B,
-) -> anyhow::Result<MethylationV4Disposition> {
+) -> anyhow::Result<SchemaDisposition> {
     // All reads in this preflight precede every DDL statement. Without a real
     // exclusive migration fence, D0 never adopts or ALTERs an existing object.
     let database_tables = read_database_table_names(backend)?;
     let inventory = read_methylation_schema_inventory(backend)?;
-    match read_v4_receipt(backend, &inventory)? {
+    match read_schema_receipt(backend, &inventory)? {
         Some((state, contract)) => {
-            if state != "applied" || contract != Y1_V4_SCHEMA_CONTRACT {
+            if state != "applied" || contract != Y1_SCHEMA_CONTRACT {
                 bail!(
                     "refusing Y1 methylation schema receipt with unrecognized state/contract: state={state:?} contract={contract:?}"
                 );
@@ -536,21 +520,21 @@ fn preflight_methylation_v4_initialization<B: SchemaBackend>(
             validate_exact_y1_table_set(&database_tables)?;
             validate_exact_y1_semantic_schema(backend)?;
             validate_exact_methylation_v4_schema(&inventory)?;
-            Ok(MethylationV4Disposition::AlreadyAttested)
+            Ok(SchemaDisposition::AlreadyAttested)
         }
         None => {
             if !database_tables.is_empty() {
                 bail!(
-                    "refusing in-place Y1 schema initialization without an exact full-v4 attestation; database contains tables [{}]. Use a new isolated versioned v4 database",
+                    "refusing in-place Y1 schema initialization without an exact full-v5 attestation; database contains tables [{}]. Use a new isolated versioned v5 database",
                     database_tables.join(", ")
                 );
             }
-            if !backend.database().split('_').any(|part| part == "v4") {
+            if !backend.database().split('_').any(|part| part == "v5") {
                 bail!(
-                    "fresh Y1 schema initialization requires an isolated database name containing the version token _v4_"
+                    "fresh Y1 schema initialization requires an isolated database name containing the version token _v5_"
                 );
             }
-            Ok(MethylationV4Disposition::FreshIsolatedV4)
+            Ok(SchemaDisposition::FreshIsolatedV5)
         }
     }
 }
@@ -562,7 +546,7 @@ fn validate_exact_y1_table_set(actual: &[String]) -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     expected.sort();
     if actual != expected {
-        bail!("Y1 initializer requires the exact checked 32-table set; no missing or extra table is accepted");
+        bail!("Y1 initializer requires the exact checked 28-table set; no missing or extra table is accepted");
     }
     Ok(())
 }
@@ -594,7 +578,7 @@ fn validate_exact_y1_semantic_schema<B: SchemaBackend>(backend: &B) -> anyhow::R
             .get(*name)
             .ok_or_else(|| anyhow::anyhow!("full Y1 schema is missing table {name}"))?;
         if normalize_create_statement(create, name) != expected_normalized_create_statement(name) {
-            bail!("Y1 schema v4 table {name} does not match its exact normalized SHOW CREATE contract");
+            bail!("Y1 schema v5 table {name} does not match its exact normalized SHOW CREATE contract");
         }
     }
     Ok(())
@@ -741,7 +725,7 @@ fn parse_key_expression(expression: &str) -> Vec<String> {
     }
 }
 
-fn read_v4_receipt<B: SchemaBackend>(
+fn read_schema_receipt<B: SchemaBackend>(
     backend: &B,
     inventory: &SchemaInventory,
 ) -> anyhow::Result<Option<(String, String)>> {
@@ -749,7 +733,7 @@ fn read_v4_receipt<B: SchemaBackend>(
         return Ok(None);
     }
     let body = backend.query_text(
-        "SELECT state, contract FROM lr_y1_schema_versions FINAL WHERE schema_scope = 'y1_full' AND schema_version = 4 FORMAT TabSeparated",
+        "SELECT state, contract FROM lr_y1_schema_versions FINAL WHERE schema_scope = 'y1_full' AND schema_version = 5 FORMAT TabSeparated",
         &[],
     )?;
     if body.trim().is_empty() {
@@ -757,24 +741,22 @@ fn read_v4_receipt<B: SchemaBackend>(
     }
     let rows: Vec<&str> = body.lines().filter(|line| !line.is_empty()).collect();
     if rows.len() != 1 {
-        bail!("schema v4 receipt query returned multiple resolved rows");
+        bail!("schema v5 receipt query returned multiple resolved rows");
     }
     let fields: Vec<&str> = rows[0].split('\t').collect();
     if fields.len() != 2 {
-        bail!("schema v4 receipt query returned a malformed row");
+        bail!("schema v5 receipt query returned a malformed row");
     }
     Ok(Some((fields[0].to_string(), fields[1].to_string())))
 }
 
-fn require_applied_v4_receipt<B: SchemaBackend>(
+fn require_applied_schema_receipt<B: SchemaBackend>(
     backend: &B,
     inventory: &SchemaInventory,
 ) -> anyhow::Result<()> {
-    match read_v4_receipt(backend, inventory)? {
-        Some((state, contract)) if state == "applied" && contract == Y1_V4_SCHEMA_CONTRACT => {
-            Ok(())
-        }
-        _ => bail!("Y1 schema v4 lacks its exact full-schema attestation receipt"),
+    match read_schema_receipt(backend, inventory)? {
+        Some((state, contract)) if state == "applied" && contract == Y1_SCHEMA_CONTRACT => Ok(()),
+        _ => bail!("Y1 schema v5 lacks its exact full-schema attestation receipt"),
     }
 }
 
@@ -786,7 +768,7 @@ fn require_empty_attestation_tables(inventory: &SchemaInventory) -> anyhow::Resu
         if let Some(table) = inventory.get(contract.name) {
             if table.rows != 0 {
                 bail!(
-                    "refusing Y1 full-v4 schema attestation: fresh isolated table {} was populated during initialization",
+                    "refusing Y1 full-v5 schema attestation: fresh isolated table {} was populated during initialization",
                     contract.name
                 );
             }
@@ -904,14 +886,6 @@ fn y1_schema_ddl(table: &str) -> &'static str {
         "lr_y1_sample_metadata" => include_str!("../../sql/y1/lr_y1_sample_metadata.sql"),
         "lr_y1_metadata_audit" => include_str!("../../sql/y1/lr_y1_metadata_audit.sql"),
         "lr_y1_rejects_staging" => include_str!("../../sql/y1/lr_y1_rejects_staging.sql"),
-        "lr_y1_summaries_staging" => {
-            include_str!("../../sql/y1/lr_y1_summaries_staging.sql")
-        }
-        "lr_y1_alleles_staging" => include_str!("../../sql/y1/lr_y1_alleles_staging.sql"),
-        "lr_y1_frequencies_staging" => {
-            include_str!("../../sql/y1/lr_y1_frequencies_staging.sql")
-        }
-        "lr_y1_carriers_staging" => include_str!("../../sql/y1/lr_y1_carriers_staging.sql"),
         "lr_y1_summaries" => include_str!("../../sql/y1/lr_y1_summaries.sql"),
         "lr_y1_alleles" => include_str!("../../sql/y1/lr_y1_alleles.sql"),
         "lr_y1_frequencies" => include_str!("../../sql/y1/lr_y1_frequencies.sql"),
@@ -1539,17 +1513,61 @@ pub fn stage_attempt_tracked(
     let rows = StageRows::from_batch(context, batch)?;
     let counts = rows.counts(batch.report.source_records)?;
 
-    insert_tracked(target, "lr_y1_summaries_staging", &rows.summaries, inserted)?;
-    insert_tracked(target, "lr_y1_alleles_staging", &rows.alleles, inserted)?;
-    insert_tracked(
-        target,
-        "lr_y1_frequencies_staging",
-        &rows.frequencies,
-        inserted,
-    )?;
-    insert_tracked(target, "lr_y1_carriers_staging", &rows.carriers, inserted)?;
+    ensure_run_accepts_primary_writes(target, &context.run_id)?;
+    insert_tracked(target, "lr_y1_summaries", &rows.summaries, inserted)?;
+    insert_tracked(target, "lr_y1_alleles", &rows.alleles, inserted)?;
+    insert_tracked(target, "lr_y1_frequencies", &rows.frequencies, inserted)?;
+    insert_tracked(target, "lr_y1_carriers", &rows.carriers, inserted)?;
     insert_tracked(target, "lr_y1_rejects_staging", &rows.rejects, inserted)?;
     Ok(counts)
+}
+
+pub(crate) fn ensure_run_accepts_primary_writes(
+    target: &ClickHouseTarget,
+    run_id: &str,
+) -> anyhow::Result<()> {
+    let body = target.query_text(
+        "SELECT state FROM lr_y1_load_runs WHERE run_id = {run_id:String} ORDER BY revision DESC LIMIT 1 FORMAT TabSeparated",
+        &[("run_id", run_id)],
+    )?;
+    validate_primary_write_state((!body.trim().is_empty()).then(|| body.trim()))
+}
+
+pub(crate) fn validate_primary_write_state(state: Option<&str>) -> anyhow::Result<()> {
+    match state {
+        None | Some("loading" | "validated") => Ok(()),
+        Some(state) => {
+            bail!("primary run is fenced in state {state:?}; late canonical writes are rejected")
+        }
+    }
+}
+
+pub(crate) fn delete_attempt_rows(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    task_id: &str,
+    attempt_id: &str,
+) -> anyhow::Result<()> {
+    let parameters = [
+        ("run_id", run_id),
+        ("task_id", task_id),
+        ("attempt_id", attempt_id),
+    ];
+    for table in [
+        "lr_y1_summaries",
+        "lr_y1_alleles",
+        "lr_y1_frequencies",
+        "lr_y1_carriers",
+        "lr_y1_rejects_staging",
+    ] {
+        target.execute_with_params(
+            &format!(
+                "ALTER TABLE {table} DELETE WHERE run_id = {{run_id:String}} AND task_id = {{task_id:String}} AND attempt_id = {{attempt_id:String}} SETTINGS mutations_sync = 2"
+            ),
+            &parameters,
+        )?;
+    }
+    Ok(())
 }
 
 fn insert_tracked<T: Serialize>(
@@ -1746,146 +1764,9 @@ impl PublicationRequest {
     }
 }
 
-struct PublishedTable {
-    published: &'static str,
-    staging: &'static str,
-    columns: &'static str,
-    unique_key: &'static str,
+struct CanonicalTable {
+    table: &'static str,
     expected: u64,
-}
-
-#[derive(Debug)]
-pub(crate) struct LoadAcceptanceToken {
-    run_id: String,
-    receipt_sha256: String,
-}
-
-/// Resolve a durable load-acceptance ledger receipt into an unforgeable in-process
-/// capability. Full-contig publication requires this token; interval/synthetic
-/// publication remains governed by its existing bounded gates.
-pub(crate) fn validate_load_acceptance_receipt(
-    target: &ClickHouseTarget,
-    run_id: &str,
-    receipt_json: &str,
-    receipt_sha256: &str,
-) -> anyhow::Result<LoadAcceptanceToken> {
-    let actual_sha256 = format!(
-        "{:x}",
-        <sha2::Sha256 as sha2::Digest>::digest(receipt_json.as_bytes())
-    );
-    if receipt_sha256 != actual_sha256 {
-        bail!("load-acceptance receipt SHA-256 does not match its canonical JSON");
-    }
-    let body = target.query_text(
-        "SELECT message FROM lr_y1_load_runs WHERE run_id = {run_id:String} AND state = 'accepted' ORDER BY revision DESC LIMIT 1 FORMAT JSONEachRow",
-        &[("run_id", run_id)],
-    )?;
-    #[derive(Deserialize)]
-    struct ReceiptRow {
-        message: String,
-    }
-    let row: ReceiptRow = serde_json::from_str(body.trim())
-        .context("durable load-acceptance ledger receipt is missing or malformed")?;
-    if row.message != receipt_json {
-        bail!("durable load-acceptance ledger receipt differs from the validated receipt");
-    }
-    Ok(LoadAcceptanceToken {
-        run_id: run_id.to_string(),
-        receipt_sha256: receipt_sha256.to_string(),
-    })
-}
-
-pub fn publish_staged_run(
-    target: &ClickHouseTarget,
-    request: &PublicationRequest,
-) -> anyhow::Result<()> {
-    if request.scope == LoadScope::FullChromosome {
-        bail!("full-chromosome publication cannot bypass the finalizer's durable load acceptance");
-    }
-    publish_staged_run_inner(target, request, None)
-}
-
-pub(crate) fn publish_accepted_staged_run(
-    target: &ClickHouseTarget,
-    request: &PublicationRequest,
-    acceptance: &LoadAcceptanceToken,
-) -> anyhow::Result<()> {
-    publish_staged_run_inner(target, request, Some(acceptance))
-}
-
-fn publish_staged_run_inner(
-    target: &ClickHouseTarget,
-    request: &PublicationRequest,
-    acceptance: Option<&LoadAcceptanceToken>,
-) -> anyhow::Result<()> {
-    request.validate()?;
-    if request.scope == LoadScope::FullChromosome {
-        let token = acceptance.context(
-            "full-chromosome publication requires a validated durable load-acceptance receipt",
-        )?;
-        if token.run_id != request.run_id || token.receipt_sha256.len() != 64 {
-            bail!("load-acceptance capability is not bound to this publication run");
-        }
-    } else if acceptance.is_some() {
-        bail!("load-acceptance capabilities are reserved for full-chromosome publication");
-    }
-    validate_run_contig_isolation(target, target.database(), request, true)?;
-    if target.kind() == TargetKind::Serving && request.scope != LoadScope::FullChromosome {
-        bail!("interval and synthetic runs cannot be materialized in a serving Y1 target");
-    }
-
-    let accepted = accepted_counts(target, request)?;
-    if accepted != request.expected_counts {
-        bail!(
-            "accepted task ledger counts {accepted:?} do not match expected counts {:?}",
-            request.expected_counts
-        );
-    }
-
-    let tables = published_tables(request);
-    for table in &tables {
-        validate_staging_table(target, request, table)?;
-    }
-    validate_reject_staging(target, request)?;
-
-    let active = active_run(target, request)?;
-    if active.as_deref() == Some(request.run_id.as_str()) {
-        bail!("the active run cannot be replaced in place; publish a new run_id");
-    }
-
-    let params = publication_parameters(request);
-    for table in &tables {
-        let query = format!(
-            "ALTER TABLE {} DROP PARTITION tuple({{release:String}}, {{cohort:String}}, {{reference_genome:String}}, {{chrom:String}}, {{run_id:String}})",
-            table.published
-        );
-        target.execute_with_params(&query, &params)?;
-    }
-
-    for table in &tables {
-        let selected_columns = prefixed_columns(table.columns, "s");
-        let query = format!(
-            "INSERT INTO {published} ({columns})\nSELECT {selected_columns}\nFROM {staging} AS s\nINNER JOIN ({accepted}) AS a\n  ON s.task_id = a.task_id AND s.attempt_id = a.attempt_id\nWHERE s.run_id = {{run_id:String}} AND s.release = {{release:String}} AND s.cohort = {{cohort:String}} AND s.reference_genome = {{reference_genome:String}} AND s.chrom = {{chrom:String}}",
-            published = table.published,
-            columns = table.columns,
-            staging = table.staging,
-            accepted = ACCEPTED_ATTEMPTS,
-        );
-        target.execute_with_params(&query, &params)?;
-    }
-
-    for table in &tables {
-        let actual = published_row_count(target, request, table.published)?;
-        if actual != table.expected {
-            bail!(
-                "published table {} has {actual} rows for run {}; expected {}",
-                table.published,
-                request.run_id,
-                table.expected
-            );
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2088,12 +1969,12 @@ fn validate_activation_candidate(
             request.expected_counts
         );
     }
-    for table in published_tables(request) {
-        let actual = published_row_count(target, request, table.published)?;
+    for table in canonical_tables(request) {
+        let actual = published_row_count(target, request, table.table)?;
         if actual != table.expected {
             bail!(
                 "cannot change primary pointer: {} has {actual} rows, expected {}",
-                table.published,
+                table.table,
                 table.expected
             );
         }
@@ -2689,7 +2570,7 @@ fn validate_run_contig_isolation(
     target: &ClickHouseTarget,
     database: &str,
     request: &PublicationRequest,
-    include_staging: bool,
+    _include_staging: bool,
 ) -> anyhow::Result<()> {
     validate_scratch_database_or_current(target, database)?;
     let params = publication_parameters(request);
@@ -2736,21 +2617,7 @@ fn validate_run_contig_isolation(
         );
     }
 
-    let table_names: &[&str] = if include_staging {
-        &[
-            "summaries",
-            "alleles",
-            "frequencies",
-            "carriers",
-            "summaries_staging",
-            "alleles_staging",
-            "frequencies_staging",
-            "carriers_staging",
-        ]
-    } else {
-        &["summaries", "alleles", "frequencies", "carriers"]
-    };
-    for table in table_names {
+    for table in ["summaries", "alleles", "frequencies", "carriers"] {
         let query = format!(
             "SELECT countIf(release != {{release:String}} OR cohort != {{cohort:String}} OR reference_genome != {{reference_genome:String}} OR chrom != {{chrom:String}}) FROM {database}.lr_y1_{table} WHERE run_id = {{run_id:String}} FORMAT TabSeparated"
         );
@@ -2834,65 +2701,6 @@ FORMAT TabSeparated
     })
 }
 
-fn validate_staging_table(
-    target: &ClickHouseTarget,
-    request: &PublicationRequest,
-    table: &PublishedTable,
-) -> anyhow::Result<()> {
-    let query = format!(
-        "SELECT count(), uniqExact({key}), countIf(s.release != {{release:String}} OR s.cohort != {{cohort:String}} OR s.reference_genome != {{reference_genome:String}} OR s.chrom != {{chrom:String}})\nFROM {staging} AS s\nINNER JOIN ({accepted}) AS a\n  ON s.task_id = a.task_id AND s.attempt_id = a.attempt_id\nWHERE s.run_id = {{run_id:String}}\nFORMAT TabSeparated",
-        key = table.unique_key,
-        staging = table.staging,
-        accepted = ACCEPTED_ATTEMPTS,
-    );
-    let params = publication_parameters(request);
-    let body = target.query_text(&query, &params)?;
-    let values = parse_u64_row(&body, 3, table.staging)?;
-    if values[0] != table.expected {
-        bail!(
-            "{} has {} accepted staging rows; expected {}",
-            table.staging,
-            values[0],
-            table.expected
-        );
-    }
-    if values[1] != values[0] {
-        bail!(
-            "{} contains duplicate accepted keys ({} rows, {} unique)",
-            table.staging,
-            values[0],
-            values[1]
-        );
-    }
-    if values[2] != 0 {
-        bail!(
-            "{} contains {} rows outside the requested cohort partition",
-            table.staging,
-            values[2]
-        );
-    }
-    Ok(())
-}
-
-fn validate_reject_staging(
-    target: &ClickHouseTarget,
-    request: &PublicationRequest,
-) -> anyhow::Result<()> {
-    let query = format!(
-        "SELECT count()\nFROM lr_y1_rejects_staging AS s\nINNER JOIN ({ACCEPTED_ATTEMPTS}) AS a\n  ON s.task_id = a.task_id AND s.attempt_id = a.attempt_id\nWHERE s.run_id = {{run_id:String}}\nFORMAT TabSeparated"
-    );
-    let body = target.query_text(&query, &publication_parameters(request))?;
-    let values = parse_u64_row(&body, 1, "reject staging")?;
-    if values[0] != request.expected_counts.rejects {
-        bail!(
-            "accepted reject staging has {} rows; expected {}",
-            values[0],
-            request.expected_counts.rejects
-        );
-    }
-    Ok(())
-}
-
 fn published_row_count(
     target: &ClickHouseTarget,
     request: &PublicationRequest,
@@ -2919,35 +2727,22 @@ fn active_run(
     }
 }
 
-fn published_tables(request: &PublicationRequest) -> [PublishedTable; 4] {
+fn canonical_tables(request: &PublicationRequest) -> [CanonicalTable; 4] {
     [
-        PublishedTable {
-            published: "lr_y1_summaries",
-            staging: "lr_y1_summaries_staging",
-            columns: SUMMARY_COLUMNS,
-            unique_key: "tuple(s.release, s.cohort, s.source_variant_id)",
+        CanonicalTable {
+            table: "lr_y1_summaries",
             expected: request.expected_counts.summaries,
         },
-        PublishedTable {
-            published: "lr_y1_alleles",
-            staging: "lr_y1_alleles_staging",
-            columns: ALLELE_COLUMNS,
-            unique_key: "tuple(s.release, s.cohort, s.source_variant_id, s.alt_index)",
+        CanonicalTable {
+            table: "lr_y1_alleles",
             expected: request.expected_counts.alleles,
         },
-        PublishedTable {
-            published: "lr_y1_frequencies",
-            staging: "lr_y1_frequencies_staging",
-            columns: FREQUENCY_COLUMNS,
-            unique_key:
-                "tuple(s.release, s.cohort, s.source_variant_id, s.alt_index, s.division)",
+        CanonicalTable {
+            table: "lr_y1_frequencies",
             expected: request.expected_counts.frequencies,
         },
-        PublishedTable {
-            published: "lr_y1_carriers",
-            staging: "lr_y1_carriers_staging",
-            columns: CARRIER_COLUMNS,
-            unique_key: "tuple(s.release, s.cohort, s.source_variant_id, s.alt_index, s.sample_id, s.genotype_position)",
+        CanonicalTable {
+            table: "lr_y1_carriers",
             expected: request.expected_counts.carriers,
         },
     ]
@@ -2961,14 +2756,6 @@ fn publication_parameters(request: &PublicationRequest) -> [(&'static str, &str)
         ("reference_genome", request.reference_genome.as_str()),
         ("chrom", request.chrom.as_str()),
     ]
-}
-
-fn prefixed_columns(columns: &str, prefix: &str) -> String {
-    columns
-        .split(',')
-        .map(|column| format!("{prefix}.{}", column.trim()))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn parse_u64_row(body: &str, expected: usize, label: &str) -> anyhow::Result<Vec<u64>> {
@@ -3070,36 +2857,6 @@ mod tests {
     const HGSVC_FIXTURE: &str = include_str!("../../tests/fixtures/y1/hgsvc_hprc_trv_13_alt.vcf");
     const AOU_FIXTURE: &str = include_str!("../../tests/fixtures/y1/aou_summary_only_ins.vcf");
 
-    #[test]
-    fn full_contig_publication_cannot_bypass_durable_acceptance() {
-        let target = ClickHouseTarget::new(
-            "http://127.0.0.1:8123",
-            "gnomad_lr_y1_scratch_acceptance_test",
-            TargetKind::Scratch,
-            super::super::AuthSource::None,
-            false,
-            false,
-        )
-        .unwrap();
-        let request = PublicationRequest {
-            run_id: "run".into(),
-            scope: LoadScope::FullChromosome,
-            release: Release::Y1,
-            cohort: Cohort::Aou,
-            reference_genome: ReferenceGenome::Grch38,
-            chrom: "chr22".into(),
-            interval_start: 1,
-            interval_end: grch38_contig_length("chr22").unwrap(),
-            expected_tasks: 1,
-            expected_counts: StagedCounts::default(),
-            source_uri: "source".into(),
-            source_generation: "generation".into(),
-            source_checksum: "checksum".into(),
-        };
-        let error = publish_staged_run(&target, &request).unwrap_err();
-        assert!(error.to_string().contains("cannot bypass"));
-    }
-
     fn fixture_batch(fixture: &str, cohort: Cohort) -> TransformationBatch {
         let header = super::super::parser::Y1Header::parse(fixture, cohort).unwrap();
         let records: Vec<&str> = fixture
@@ -3184,7 +2941,7 @@ mod tests {
                 state: RefCell::new(MockSchemaState {
                     tables,
                     other_tables,
-                    receipt: Some(("applied".into(), Y1_V4_SCHEMA_CONTRACT.into())),
+                    receipt: Some(("applied".into(), Y1_SCHEMA_CONTRACT.into())),
                     ..MockSchemaState::default()
                 }),
             }
@@ -3193,7 +2950,7 @@ mod tests {
 
     impl SchemaBackend for MockSchemaBackend {
         fn database(&self) -> &str {
-            "gnomad_lr_y1_scratch_v4_schema_mock"
+            "gnomad_lr_y1_scratch_v5_schema_mock"
         }
 
         fn execute(&self, query: &str) -> anyhow::Result<()> {
@@ -3227,10 +2984,10 @@ mod tests {
             let expected_receipt = format!(
                 "INSERT INTO lr_y1_schema_versions \
                  (schema_scope, schema_version, state, contract, applied_at, revision) VALUES \
-                 ('y1_full', 4, 'applied', '{Y1_V4_SCHEMA_CONTRACT}', now64(3), toUInt64(toUnixTimestamp64Milli(now64(3))))"
+                 ('y1_full', 5, 'applied', '{Y1_SCHEMA_CONTRACT}', now64(3), toUInt64(toUnixTimestamp64Milli(now64(3))))"
             );
             if query == expected_receipt {
-                state.receipt = Some(("applied".into(), Y1_V4_SCHEMA_CONTRACT.into()));
+                state.receipt = Some(("applied".into(), Y1_SCHEMA_CONTRACT.into()));
                 state
                     .tables
                     .get_mut("lr_y1_schema_versions")
@@ -3317,7 +3074,7 @@ mod tests {
                 }
                 return Ok(body);
             }
-            if query == "SELECT state, contract FROM lr_y1_schema_versions FINAL WHERE schema_scope = 'y1_full' AND schema_version = 4 FORMAT TabSeparated" {
+            if query == "SELECT state, contract FROM lr_y1_schema_versions FINAL WHERE schema_scope = 'y1_full' AND schema_version = 5 FORMAT TabSeparated" {
                 return Ok(state
                     .receipt
                     .as_ref()
@@ -3403,7 +3160,7 @@ mod tests {
         validate_exact_methylation_v4_schema(&state.tables).unwrap();
         assert_eq!(
             state.receipt,
-            Some(("applied".into(), Y1_V4_SCHEMA_CONTRACT.into()))
+            Some(("applied".into(), Y1_SCHEMA_CONTRACT.into()))
         );
         assert_eq!(state.executed.len(), Y1_SCHEMA_TABLE_NAMES.len() + 1);
         assert!(state
@@ -3534,14 +3291,6 @@ mod tests {
             .execute("ALTER TABLE anything ADD COLUMN surprise UInt8")
             .is_err());
         assert!(backend.query_text("SELECT 1", &[]).is_err());
-    }
-
-    #[test]
-    fn prefixing_preserves_column_order() {
-        assert_eq!(
-            prefixed_columns("run_id, release, source_variant_id", "s"),
-            "s.run_id, s.release, s.source_variant_id"
-        );
     }
 
     #[test]
@@ -3844,263 +3593,6 @@ mod tests {
         request.chrom = "chrM".into();
         request.interval_end = 16_569;
         assert!(request.validate().is_err());
-    }
-
-    #[test]
-    fn local_clickhouse_retry_publication_is_count_stable() {
-        let Ok(endpoint) = std::env::var("GNOMAD_LR_Y1_TEST_ENDPOINT") else {
-            return;
-        };
-        let database = std::env::var("GNOMAD_LR_Y1_TEST_DATABASE")
-            .unwrap_or_else(|_| "gnomad_lr_y1_scratch_v4_ci".to_string());
-        let target = ClickHouseTarget::new(
-            &endpoint,
-            &database,
-            TargetKind::Scratch,
-            super::super::target::AuthSource::None,
-            false,
-            false,
-        )
-        .unwrap();
-        init_schema(&target).unwrap();
-
-        exercise_fixture_publication(
-            &target,
-            HGSVC_FIXTURE,
-            Cohort::HgsvcHprc,
-            StagedCounts {
-                source_records: 1,
-                summaries: 1,
-                alleles: 13,
-                frequencies: 273,
-                carriers: 214,
-                rejects: 0,
-            },
-        );
-        exercise_fixture_publication(
-            &target,
-            AOU_FIXTURE,
-            Cohort::Aou,
-            StagedCounts {
-                source_records: 1,
-                summaries: 1,
-                alleles: 1,
-                frequencies: 6,
-                carriers: 0,
-                rejects: 0,
-            },
-        );
-        exercise_cross_contig_run_rejection(&target);
-    }
-
-    fn exercise_cross_contig_run_rejection(target: &ClickHouseTarget) {
-        let run_id = format!(
-            "cross-contig-{}-{}",
-            std::process::id(),
-            now_revision().unwrap()
-        );
-        let revision = now_revision().unwrap();
-        let ledger = LoadRunLedgerRow {
-            run_id: run_id.clone(),
-            revision,
-            state: "validated".into(),
-            load_scope: LoadScope::Synthetic.as_str().into(),
-            release: Release::Y1.as_str().into(),
-            cohort: Cohort::Aou.as_str().into(),
-            reference_genome: ReferenceGenome::Grch38.as_str().into(),
-            chrom: "chr22".into(),
-            interval_start: 20_000_000,
-            interval_end: 20_010_000,
-            source_uri: "fixture.vcf".into(),
-            source_generation: "git".into(),
-            source_checksum_algorithm: "git_blob".into(),
-            source_checksum: "fixture".into(),
-            source_index_uri: "fixture.vcf.tbi".into(),
-            source_index_generation: "git".into(),
-            source_index_checksum: "fixture-index".into(),
-            schema_version: Y1_SCHEMA_VERSION,
-            loader_version: env!("CARGO_PKG_VERSION").into(),
-            expected_tasks: 1,
-            expected_source_records: 1,
-            summary_rows: 1,
-            allele_rows: 1,
-            frequency_rows: 6,
-            carrier_rows: 0,
-            rejected_records: 0,
-            created_at_ms: revision / 1_000_000,
-            updated_at_ms: revision / 1_000_000,
-            message: "adversarial isolation fixture".into(),
-        };
-        record_load_run(target, &ledger).unwrap();
-
-        let mut batch = fixture_batch(AOU_FIXTURE, Cohort::Aou);
-        for summary in &mut batch.summaries {
-            summary.chrom = "chr1".into();
-        }
-        let context = AttemptContext {
-            run_id: run_id.clone(),
-            task_id: "misassigned-chr1".into(),
-            attempt_id: "attempt-cross-contig".into(),
-            cohort: Cohort::Aou,
-            chrom: "chr1".into(),
-            interval_start: 1,
-            interval_end: grch38_contig_length("chr1").unwrap(),
-        };
-        let counts = stage_attempt(target, &context, &batch).unwrap();
-        let attempt = TaskAttemptLedgerRow::new(
-            &context,
-            now_revision().unwrap(),
-            AttemptState::Accepted,
-            counts,
-            &batch.report,
-            "",
-        )
-        .unwrap();
-        record_task_attempt(target, &attempt).unwrap();
-
-        let request = PublicationRequest {
-            run_id,
-            scope: LoadScope::Synthetic,
-            release: Release::Y1,
-            cohort: Cohort::Aou,
-            reference_genome: ReferenceGenome::Grch38,
-            chrom: "chr22".into(),
-            interval_start: 20_000_000,
-            interval_end: 20_010_000,
-            expected_tasks: 1,
-            expected_counts: counts,
-            source_uri: "fixture.vcf".into(),
-            source_generation: "git".into(),
-            source_checksum: "fixture".into(),
-        };
-        assert!(validate_run_contig_isolation(target, target.database(), &request, true).is_err());
-        assert!(publish_staged_run(target, &request).is_err());
-    }
-
-    fn exercise_fixture_publication(
-        target: &ClickHouseTarget,
-        fixture: &str,
-        cohort: Cohort,
-        expected: StagedCounts,
-    ) {
-        let batch = fixture_batch(fixture, cohort);
-        let run_id = format!(
-            "fixture-{}-{}-{}",
-            cohort.as_str(),
-            std::process::id(),
-            now_revision().unwrap()
-        );
-        let revision = now_revision().unwrap();
-        let run = LoadRunLedgerRow {
-            run_id: run_id.clone(),
-            revision,
-            state: "validated".to_string(),
-            load_scope: LoadScope::Synthetic.as_str().to_string(),
-            release: Release::Y1.as_str().to_string(),
-            cohort: cohort.as_str().to_string(),
-            reference_genome: ReferenceGenome::Grch38.as_str().to_string(),
-            chrom: "chr22".to_string(),
-            interval_start: 20_000_000,
-            interval_end: 20_010_000,
-            source_uri: "checked-in-fixture.vcf".to_string(),
-            source_generation: "git".to_string(),
-            source_checksum_algorithm: "git_blob".to_string(),
-            source_checksum: "fixture".to_string(),
-            source_index_uri: "checked-in-fixture.vcf".to_string(),
-            source_index_generation: "git".to_string(),
-            source_index_checksum: "fixture".to_string(),
-            schema_version: Y1_SCHEMA_VERSION,
-            loader_version: env!("CARGO_PKG_VERSION").to_string(),
-            expected_tasks: 1,
-            expected_source_records: expected.source_records,
-            summary_rows: expected.summaries,
-            allele_rows: expected.alleles,
-            frequency_rows: expected.frequencies,
-            carrier_rows: expected.carriers,
-            rejected_records: expected.rejects,
-            created_at_ms: revision / 1_000_000,
-            updated_at_ms: revision / 1_000_000,
-            message: "local synthetic integration".to_string(),
-        };
-        record_load_run(target, &run).unwrap();
-
-        let base_context = AttemptContext {
-            run_id: run_id.clone(),
-            task_id: "chr22-20000000-20010000".to_string(),
-            attempt_id: "failed-attempt".to_string(),
-            cohort,
-            chrom: "chr22".to_string(),
-            interval_start: 20_000_000,
-            interval_end: 20_010_000,
-        };
-
-        let failed_counts = stage_attempt(target, &base_context, &batch).unwrap();
-        assert_eq!(failed_counts, expected);
-        let failed = TaskAttemptLedgerRow::new(
-            &base_context,
-            now_revision().unwrap(),
-            AttemptState::Failed,
-            failed_counts,
-            &batch.report,
-            "synthetic retry injection",
-        )
-        .unwrap();
-        record_task_attempt(target, &failed).unwrap();
-
-        let accepted_context = AttemptContext {
-            attempt_id: "accepted-attempt".to_string(),
-            ..base_context
-        };
-        let accepted_counts = stage_attempt(target, &accepted_context, &batch).unwrap();
-        assert_eq!(accepted_counts, expected);
-        let accepted = TaskAttemptLedgerRow::new(
-            &accepted_context,
-            now_revision().unwrap(),
-            AttemptState::Accepted,
-            accepted_counts,
-            &batch.report,
-            "",
-        )
-        .unwrap();
-        record_task_attempt(target, &accepted).unwrap();
-
-        let request = PublicationRequest {
-            run_id,
-            scope: LoadScope::Synthetic,
-            release: Release::Y1,
-            cohort,
-            reference_genome: ReferenceGenome::Grch38,
-            chrom: "chr22".to_string(),
-            interval_start: 20_000_000,
-            interval_end: 20_010_000,
-            expected_tasks: 1,
-            expected_counts: expected,
-            source_uri: "checked-in-fixture.vcf".to_string(),
-            source_generation: "git".to_string(),
-            source_checksum: "fixture".to_string(),
-        };
-
-        publish_staged_run(target, &request).unwrap();
-        let first_counts: Vec<u64> = published_tables(&request)
-            .iter()
-            .map(|table| published_row_count(target, &request, table.published).unwrap())
-            .collect();
-        publish_staged_run(target, &request).unwrap();
-        let second_counts: Vec<u64> = published_tables(&request)
-            .iter()
-            .map(|table| published_row_count(target, &request, table.published).unwrap())
-            .collect();
-        assert_eq!(first_counts, second_counts);
-        assert_eq!(
-            second_counts,
-            vec![
-                expected.summaries,
-                expected.alleles,
-                expected.frequencies,
-                expected.carriers
-            ]
-        );
-        assert_eq!(active_run(target, &request).unwrap(), None);
     }
 
     #[test]

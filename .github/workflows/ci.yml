@@ -31,7 +31,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       GNOMAD_LR_Y1_TEST_ENDPOINT: http://127.0.0.1:8123
-      GNOMAD_LR_Y1_TEST_DATABASE: gnomad_lr_y1_scratch_v4_ci
+      GNOMAD_LR_Y1_TEST_DATABASE: gnomad_lr_y1_scratch_v5_ci
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +42,7 @@ jobs:
       - name: Prepare isolated Y1 integration database
         run: |
           curl --fail --silent --show-error \
-            --data-binary 'CREATE DATABASE gnomad_lr_y1_scratch_v4_ci' \
+            --data-binary 'CREATE DATABASE gnomad_lr_y1_scratch_v5_ci' \
             http://127.0.0.1:8123/
 
       - name: Verify clean checkout
@@ -51,26 +51,24 @@ jobs:
       - name: Verify real ClickHouse 26.3 methylation schema semantics
         run: python3 scripts/test-y1-schema-clickhouse.py --endpoint http://127.0.0.1:8123
 
-      - name: Verify Y1 schema and synthetic retry publication
+      - name: Verify Y1 schema and in-place retry freeze
         run: |
           for table in \
             lr_y1_load_runs lr_y1_task_attempts lr_y1_active_partitions \
-            lr_y1_rejects_staging lr_y1_summaries_staging \
-            lr_y1_alleles_staging lr_y1_frequencies_staging \
-            lr_y1_carriers_staging lr_y1_summaries lr_y1_alleles \
+            lr_y1_rejects_staging lr_y1_summaries lr_y1_alleles \
             lr_y1_frequencies lr_y1_carriers
           do
             curl --fail --silent --show-error \
               --data-binary "EXISTS TABLE ${table}" \
-              'http://127.0.0.1:8123/?database=gnomad_lr_y1_scratch_v4_ci' | grep -qx 1
+              'http://127.0.0.1:8123/?database=gnomad_lr_y1_scratch_v5_ci' | grep -qx 1
           done
 
           curl --fail --silent --show-error \
             --data-binary "SELECT count() > 0 FROM lr_y1_load_runs" \
-            'http://127.0.0.1:8123/?database=gnomad_lr_y1_scratch_v4_ci' | grep -qx 1
+            'http://127.0.0.1:8123/?database=gnomad_lr_y1_scratch_v5_ci' | grep -qx 1
           curl --fail --silent --show-error \
             --data-binary "SELECT count() FROM lr_y1_active_partitions" \
-            'http://127.0.0.1:8123/?database=gnomad_lr_y1_scratch_v4_ci' | grep -qx 0
+            'http://127.0.0.1:8123/?database=gnomad_lr_y1_scratch_v5_ci' | grep -qx 0
 
       - name: Smoke complete ClickHouse schema
         run: |

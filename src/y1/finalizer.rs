@@ -1,9 +1,7 @@
 use super::{
-    contig::grch38_contig_length,
-    record_load_run,
-    storage::{publish_accepted_staged_run, validate_load_acceptance_receipt},
-    ClickHouseTarget, Cohort, LoadRunLedgerRow, LoadScope, PoolY1TaskSpec, PublicationRequest,
-    ReferenceGenome, Release, StagedCounts, TargetKind, Y1_SCHEMA_VERSION,
+    contig::grch38_contig_length, record_load_run, storage::delete_attempt_rows, ClickHouseTarget,
+    LoadRunLedgerRow, LoadScope, PoolY1TaskSpec, ReferenceGenome, Release, StagedCounts,
+    TargetKind, Y1_SCHEMA_VERSION,
 };
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -71,20 +69,21 @@ struct PhysicalAttemptView {
     identity_violations: u64,
     min_position: u32,
     max_position: u32,
-    signature: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StagingContentSignature {
+pub struct CanonicalContentDigest {
     pub table: String,
+    pub task_id: String,
+    pub attempt_id: String,
     pub rows: u64,
-    pub signature: u64,
+    pub sha256: String,
 }
 
-struct LedgerCoverage {
-    accepted: BTreeMap<String, String>,
-    failed: BTreeMap<String, Vec<String>>,
-    staging_signatures: Vec<StagingContentSignature>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalTableCount {
+    pub table: String,
+    pub rows: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +107,8 @@ pub struct LoadAcceptanceReceipt {
     pub source_content_sha256: String,
     pub genotype_content_sha256: String,
     pub annotation_content_sha256: String,
-    pub staging_signatures: Vec<StagingContentSignature>,
+    pub canonical_counts: Vec<CanonicalTableCount>,
+    pub canonical_digests: Vec<CanonicalContentDigest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,8 +126,76 @@ pub struct FinalizationReport {
     pub independent_counts_sha256: String,
     pub acceptance_receipt_sha256: String,
     pub acceptance: LoadAcceptanceReceipt,
+    pub accepted: bool,
+    pub frozen: bool,
     pub published: bool,
 }
+
+struct LedgerCoverage {
+    accepted: BTreeMap<String, String>,
+    failed: BTreeMap<String, Vec<String>>,
+    nonaccepted: Vec<(String, String)>,
+    counts: Vec<CanonicalTableCount>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PhysicalPhase {
+    BeforeCleanup,
+    Frozen,
+}
+
+#[derive(Clone, Copy)]
+struct TableSpec {
+    label: &'static str,
+    table: &'static str,
+    unique_key: &'static str,
+    columns: &'static str,
+    order_by: &'static str,
+    has_primary_identity: bool,
+}
+
+const TABLES: [TableSpec; 5] = [
+    TableSpec {
+        label: "summaries",
+        table: "lr_y1_summaries",
+        unique_key: "tuple(position, source_variant_id)",
+        columns: "run_id,task_id,attempt_id,release,cohort,reference_genome,chrom,position,source_variant_id,ref_allele,alts,allele_type,qual,filters,ac,an,af,allele_lengths,length_provenance,source_allele_length,source_svlen,source_svlen_present,frequencies_json,source_info_json",
+        order_by: "chrom,position,source_variant_id",
+        has_primary_identity: true,
+    },
+    TableSpec {
+        label: "alleles",
+        table: "lr_y1_alleles",
+        unique_key: "tuple(position, source_variant_id, alt_index)",
+        columns: "run_id,task_id,attempt_id,release,cohort,reference_genome,chrom,position,reference_end,xpos,source_variant_id,alt_index,ref_allele,alt,allele_type,qual,filters,ac,an,af,allele_length,length_provenance,rsids,cadd_phred,phylop,major_consequence,short_read_match_id,short_read_match_type,short_read_match_source",
+        order_by: "chrom,position,source_variant_id,alt_index",
+        has_primary_identity: true,
+    },
+    TableSpec {
+        label: "frequencies",
+        table: "lr_y1_frequencies",
+        unique_key: "tuple(position, source_variant_id, alt_index, division)",
+        columns: "run_id,task_id,attempt_id,release,cohort,reference_genome,chrom,position,source_variant_id,alt_index,division,ac,an,af,values_available",
+        order_by: "chrom,position,source_variant_id,alt_index,division",
+        has_primary_identity: true,
+    },
+    TableSpec {
+        label: "carriers",
+        table: "lr_y1_carriers",
+        unique_key: "tuple(position, source_variant_id, alt_index, sample_id, genotype_position)",
+        columns: "run_id,task_id,attempt_id,release,cohort,reference_genome,chrom,position,source_variant_id,alt_index,alt,sample_id,genotype_position,gt_alleles,gt_phased,genotype_fields_json,position_fields_json",
+        order_by: "chrom,position,source_variant_id,alt_index,sample_id,genotype_position",
+        has_primary_identity: true,
+    },
+    TableSpec {
+        label: "rejects",
+        table: "lr_y1_rejects_staging",
+        unique_key: "tuple(record_number, source_variant_id, reject_code, message)",
+        columns: "run_id,task_id,attempt_id,record_number,source_variant_id,reject_code,message",
+        order_by: "reject_code,record_number,source_variant_id,message",
+        has_primary_identity: false,
+    },
+];
 
 /// Backward-compatible chr22-only entry point with its original signature.
 pub fn finalize_chr22_run(
@@ -145,7 +213,7 @@ pub fn finalize_chr22_run(
     )
 }
 
-/// Finalize and publish exactly one complete canonical GRCh38 contig.
+/// Freeze and accept exactly one complete canonical GRCh38 contig in place.
 pub fn finalize_contig_run(
     target: &ClickHouseTarget,
     manifest_path: &Path,
@@ -174,6 +242,7 @@ fn finalize_contig_run_inner(
     if operator_identity.trim().is_empty() {
         bail!("finalization requires a non-empty operator identity");
     }
+
     let manifest_bytes = std::fs::read(manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     let tasks: Vec<PoolY1TaskSpec> = serde_json::from_slice(&manifest_bytes)
@@ -182,7 +251,6 @@ fn finalize_contig_run_inner(
     if required_chrom.is_some_and(|chrom| run.chrom != chrom) {
         bail!("the legacy chr22 finalizer accepts only chr22 manifests");
     }
-    let contig_length = grch38_contig_length(&run.chrom)?;
     let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
 
     let expected_bytes = std::fs::read(expected_path)
@@ -192,76 +260,105 @@ fn finalize_contig_run_inner(
     validate_independent_reconciliation(&expected, &run)?;
     let independent_counts_sha256 = format!("{:x}", Sha256::digest(&expected_bytes));
 
-    let ledger = validate_ledger_coverage(target, &run.run_id, &run.chrom, &tasks)?;
-    validate_expected_staging_counts(&ledger.staging_signatures, expected.counts)?;
-    let acceptance = build_acceptance_receipt(
-        &run,
-        &expected,
-        &ledger,
-        manifest_sha256.clone(),
-        independent_counts_sha256.clone(),
-    );
-    let acceptance_json = serde_json::to_string(&acceptance)?;
-    let acceptance_receipt_sha256 = format!("{:x}", Sha256::digest(acceptance_json.as_bytes()));
-    let accepted_revision = revision_now()?;
+    ensure_freeze_transition(target, &run.run_id)?;
     record_state(
         target,
         &run,
         &expected,
         tasks.len(),
-        accepted_revision,
-        "accepted",
-        &acceptance_json,
-    )?;
-
-    // Re-read both the durable receipt and the complete physical staging set.
-    // Full-contig publication receives a capability only after both still match.
-    let persisted_acceptance = validate_load_acceptance_receipt(
-        target,
-        &run.run_id,
-        &acceptance_json,
-        &acceptance_receipt_sha256,
-    )?;
-    let current_ledger = validate_ledger_coverage(target, &run.run_id, &run.chrom, &tasks)?;
-    validate_expected_staging_counts(&current_ledger.staging_signatures, expected.counts)?;
-    let current_acceptance = build_acceptance_receipt(
-        &run,
-        &expected,
-        &current_ledger,
-        manifest_sha256.clone(),
-        independent_counts_sha256.clone(),
-    );
-    if current_acceptance != acceptance {
-        bail!("staging or attempt ledger changed after the durable load acceptance was recorded");
-    }
-    let cohort = parse_cohort(&run.cohort)?;
-    let request = PublicationRequest {
-        run_id: run.run_id.clone(),
-        scope: LoadScope::FullChromosome,
-        release: Release::Y1,
-        cohort,
-        reference_genome: ReferenceGenome::Grch38,
-        chrom: run.chrom.clone(),
-        interval_start: 1,
-        interval_end: contig_length,
-        expected_tasks: u32::try_from(tasks.len())?,
-        expected_counts: expected.counts,
-        source_uri: run.source_uri.clone(),
-        source_generation: run.source_generation.clone(),
-        source_checksum: run.source_checksum.clone(),
-    };
-
-    let created = revision_now()?;
-    record_state(
-        target,
-        &run,
-        &expected,
-        tasks.len(),
-        created,
-        "finalizing",
+        revision_now()?,
+        "freezing",
         operator_identity,
     )?;
-    if let Err(error) = publish_accepted_staged_run(target, &request, &persisted_acceptance) {
+
+    let result = (|| -> anyhow::Result<FinalizationReport> {
+        // The freezing row is the application-level writer fence. Every primary
+        // batch checks it before insertion. All attempt claims must now be terminal.
+        let before = validate_ledger_coverage(target, &run, &tasks, PhysicalPhase::BeforeCleanup)?;
+        validate_expected_counts(&before.counts, expected.counts)?;
+
+        // Fresh-instance retries are resolved in place. Failed attempt rows are
+        // removed synchronously; no accepted rows are copied to another table.
+        for (task_id, attempt_id) in &before.nonaccepted {
+            delete_attempt_rows(target, &run.run_id, task_id, attempt_id)?;
+        }
+
+        let frozen = validate_ledger_coverage(target, &run, &tasks, PhysicalPhase::Frozen)?;
+        validate_expected_counts(&frozen.counts, expected.counts)?;
+        let digests = read_canonical_digests(target, &run, &frozen.accepted, &frozen.counts)?;
+        let acceptance = build_acceptance_receipt(
+            &run,
+            &expected,
+            &frozen,
+            manifest_sha256.clone(),
+            independent_counts_sha256.clone(),
+            digests,
+        );
+        let acceptance_json = serde_json::to_string(&acceptance)?;
+        let acceptance_receipt_sha256 = format!("{:x}", Sha256::digest(acceptance_json.as_bytes()));
+
+        record_state(
+            target,
+            &run,
+            &expected,
+            tasks.len(),
+            revision_now()?,
+            "frozen",
+            &acceptance_json,
+        )?;
+        validate_persisted_receipt(target, &run.run_id, "frozen", &acceptance_json)?;
+
+        // Reread the exact same canonical rows after the durable frozen marker.
+        // Any late ledger contribution, row, deletion, or same-count mutation
+        // changes this snapshot and fails before acceptance.
+        let reread = validate_ledger_coverage(target, &run, &tasks, PhysicalPhase::Frozen)?;
+        validate_expected_counts(&reread.counts, expected.counts)?;
+        let reread_digests =
+            read_canonical_digests(target, &run, &reread.accepted, &reread.counts)?;
+        let reread_receipt = build_acceptance_receipt(
+            &run,
+            &expected,
+            &reread,
+            manifest_sha256.clone(),
+            independent_counts_sha256.clone(),
+            reread_digests,
+        );
+        if reread_receipt != acceptance {
+            bail!("canonical rows or attempt ledger changed after the run was frozen");
+        }
+
+        record_state(
+            target,
+            &run,
+            &expected,
+            tasks.len(),
+            revision_now()?,
+            "accepted_frozen",
+            &acceptance_json,
+        )?;
+        validate_persisted_receipt(target, &run.run_id, "accepted_frozen", &acceptance_json)?;
+
+        Ok(FinalizationReport {
+            run_id: run.run_id.clone(),
+            cohort: run.cohort.clone(),
+            chrom: run.chrom.clone(),
+            operator_identity: operator_identity.to_string(),
+            manifest_tasks: tasks.len(),
+            manifest_sha256,
+            accepted_attempts: frozen.accepted,
+            failed_attempts: frozen.failed,
+            expected_counts: expected.counts,
+            independent_evidence_uri: expected.evidence_uri.clone(),
+            independent_counts_sha256,
+            acceptance_receipt_sha256,
+            acceptance,
+            accepted: true,
+            frozen: true,
+            published: false,
+        })
+    })();
+
+    if let Err(error) = &result {
         let _ = record_state(
             target,
             &run,
@@ -271,34 +368,43 @@ fn finalize_contig_run_inner(
             "finalization_failed",
             &format!("{operator_identity}: {error:#}"),
         );
-        return Err(error.context(format!("guarded full-{} publication failed", run.chrom)));
     }
-    record_state(
-        target,
-        &run,
-        &expected,
-        tasks.len(),
-        revision_now()?,
-        "published",
-        operator_identity,
-    )?;
+    result
+}
 
-    Ok(FinalizationReport {
-        run_id: run.run_id,
-        cohort: run.cohort,
-        chrom: run.chrom,
-        operator_identity: operator_identity.to_string(),
-        manifest_tasks: tasks.len(),
-        manifest_sha256,
-        accepted_attempts: ledger.accepted,
-        failed_attempts: ledger.failed,
-        expected_counts: expected.counts,
-        independent_evidence_uri: expected.evidence_uri,
-        independent_counts_sha256,
-        acceptance_receipt_sha256,
-        acceptance,
-        published: true,
-    })
+fn ensure_freeze_transition(target: &ClickHouseTarget, run_id: &str) -> anyhow::Result<()> {
+    let body = target.query_text(
+        "SELECT state FROM lr_y1_load_runs WHERE run_id = {run_id:String} ORDER BY revision DESC LIMIT 1 FORMAT TabSeparated",
+        &[("run_id", run_id)],
+    )?;
+    match body.trim() {
+        "accepted_frozen" | "frozen" => {
+            bail!("run is already frozen; immutable acceptance cannot be repeated in place")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_persisted_receipt(
+    target: &ClickHouseTarget,
+    run_id: &str,
+    state: &str,
+    receipt: &str,
+) -> anyhow::Result<()> {
+    let body = target.query_text(
+        "SELECT message FROM lr_y1_load_runs WHERE run_id = {run_id:String} AND state = {state:String} ORDER BY revision DESC LIMIT 1 FORMAT JSONEachRow",
+        &[("run_id", run_id), ("state", state)],
+    )?;
+    #[derive(Deserialize)]
+    struct Row {
+        message: String,
+    }
+    let row: Row = serde_json::from_str(body.trim())
+        .context("durable freeze/acceptance receipt is missing or malformed")?;
+    if row.message != receipt {
+        bail!("durable freeze/acceptance receipt differs from the verified receipt");
+    }
+    Ok(())
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -359,16 +465,16 @@ fn validate_independent_reconciliation(
     Ok(())
 }
 
-fn validate_expected_staging_counts(
-    signatures: &[StagingContentSignature],
+fn validate_expected_counts(
+    counts: &[CanonicalTableCount],
     expected: StagedCounts,
 ) -> anyhow::Result<()> {
     let rows = |table: &str| {
-        signatures
+        counts
             .iter()
-            .find(|signature| signature.table == table)
-            .map(|signature| signature.rows)
-            .with_context(|| format!("acceptance snapshot is missing {table}"))
+            .find(|snapshot| snapshot.table == table)
+            .map(|snapshot| snapshot.rows)
+            .with_context(|| format!("canonical snapshot is missing {table}"))
     };
     let observed = StagedCounts {
         source_records: rows("summaries")?,
@@ -379,7 +485,7 @@ fn validate_expected_staging_counts(
         rejects: rows("rejects")?,
     };
     if observed != expected {
-        bail!("physical accepted staging counts {observed:?} do not equal independent expected counts {expected:?}");
+        bail!("frozen canonical counts {observed:?} do not equal independent expected counts {expected:?}");
     }
     Ok(())
 }
@@ -390,9 +496,10 @@ fn build_acceptance_receipt(
     ledger: &LedgerCoverage,
     manifest_sha256: String,
     independent_counts_sha256: String,
+    canonical_digests: Vec<CanonicalContentDigest>,
 ) -> LoadAcceptanceReceipt {
     LoadAcceptanceReceipt {
-        contract_version: 1,
+        contract_version: 2,
         schema_version: Y1_SCHEMA_VERSION,
         run_id: run.run_id.clone(),
         cohort: run.cohort.clone(),
@@ -411,7 +518,8 @@ fn build_acceptance_receipt(
         source_content_sha256: expected.facts.source_content_sha256.clone(),
         genotype_content_sha256: expected.facts.genotype_content_sha256.clone(),
         annotation_content_sha256: expected.facts.annotation_content_sha256.clone(),
-        staging_signatures: ledger.staging_signatures.clone(),
+        canonical_counts: ledger.counts.clone(),
+        canonical_digests,
     }
 }
 
@@ -466,36 +574,33 @@ fn validate_worker_provenance(report: &serde_json::Value, attempt_id: &str) -> a
     let worker_identity = field("worker_identity")?;
     let build_identity = field("worker_build_version")?;
     let backend_revision = field("backend_revision")?;
-
-    if matches!(worker_identity, "unknown" | "unknown-worker") {
-        bail!("attempt {attempt_id} has placeholder worker identity");
-    }
-    if matches!(
-        build_identity,
-        "unknown" | "unknown-build" | "unversioned-development-build"
-    ) {
-        bail!("attempt {attempt_id} has placeholder worker build identity");
+    if matches!(worker_identity, "unknown" | "unknown-worker")
+        || matches!(
+            build_identity,
+            "unknown" | "unknown-build" | "unversioned-development-build"
+        )
+    {
+        bail!("attempt {attempt_id} has placeholder worker/build identity");
     }
     if !matches!(backend_revision.len(), 40 | 64)
         || !backend_revision
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
+        || !build_identity.contains(backend_revision)
     {
-        bail!("attempt {attempt_id} backend revision is not a full Git object ID");
-    }
-    if !build_identity.contains(backend_revision) {
-        bail!("attempt {attempt_id} worker build identity is not bound to its backend revision");
+        bail!("attempt {attempt_id} worker build is not bound to a full backend revision");
     }
     Ok(())
 }
 
 fn validate_ledger_coverage(
     target: &ClickHouseTarget,
-    run_id: &str,
-    chrom: &str,
+    run: &PoolY1TaskSpec,
     tasks: &[PoolY1TaskSpec],
+    phase: PhysicalPhase,
 ) -> anyhow::Result<LedgerCoverage> {
-    let query = r#"
+    let body = target.query_text(
+        r#"
 SELECT task_id, attempt_id, argMax(state, revision) AS state,
        argMax(chrom, revision) AS chrom,
        argMax(interval_start, revision) AS interval_start,
@@ -511,9 +616,10 @@ FROM lr_y1_task_attempts
 WHERE run_id = {run_id:String}
 GROUP BY task_id, attempt_id
 FORMAT JSONEachRow
-"#;
-    let body = target.query_text(query, &[("run_id", run_id)])?;
-    let physical = read_physical_attempts(target, run_id, &tasks[0].cohort, chrom)?;
+"#,
+        &[("run_id", &run.run_id)],
+    )?;
+    let physical = read_physical_attempts(target, run)?;
     let expected: BTreeMap<&str, (u32, u32)> = tasks
         .iter()
         .map(|task| (task.task_id.as_str(), (task.start, task.stop)))
@@ -522,18 +628,19 @@ FORMAT JSONEachRow
     let mut failed: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut terminal_counts = BTreeMap::new();
     let mut terminal_states = BTreeMap::new();
+
     for line in body.lines().filter(|line| !line.trim().is_empty()) {
         let row: AttemptView = serde_json::from_str(line).context("invalid attempt ledger JSON")?;
         if row.attempt_id.trim().is_empty() {
             bail!("attempt ledger contains an empty attempt ID");
         }
-        let Some(bounds) = expected.get(row.task_id.as_str()) else {
-            bail!(
-                "run ledger contains task {} absent from the checked manifest",
+        let bounds = expected.get(row.task_id.as_str()).with_context(|| {
+            format!(
+                "run ledger contains task {} absent from manifest",
                 row.task_id
-            );
-        };
-        if row.chrom != chrom || (row.interval_start, row.interval_end) != *bounds {
+            )
+        })?;
+        if row.chrom != run.chrom || (row.interval_start, row.interval_end) != *bounds {
             bail!(
                 "attempt {} has bounds inconsistent with its manifest task",
                 row.attempt_id
@@ -545,19 +652,19 @@ FORMAT JSONEachRow
         let manifest_task = tasks
             .iter()
             .find(|task| task.task_id == row.task_id)
-            .expect("task was checked against the manifest above");
+            .expect("ledger task was checked above");
         for (field, expected_value) in [
-            ("run_id", run_id),
+            ("run_id", run.run_id.as_str()),
             ("task_id", row.task_id.as_str()),
             ("attempt_id", row.attempt_id.as_str()),
             ("cohort", manifest_task.cohort.as_str()),
-            ("chrom", chrom),
+            ("chrom", run.chrom.as_str()),
         ] {
             if report.get(field).and_then(|value| value.as_str()) != Some(expected_value) {
                 bail!("attempt {} report has inconsistent {field}", row.attempt_id);
             }
         }
-        let ledger_counts = StagedCounts {
+        let counts = StagedCounts {
             source_records: row.source_records,
             summaries: row.summary_rows,
             alleles: row.allele_rows,
@@ -565,13 +672,9 @@ FORMAT JSONEachRow
             carriers: row.carrier_rows,
             rejects: row.rejected_records,
         };
-        let attempt_key = (row.task_id.clone(), row.attempt_id.clone());
-        if terminal_counts
-            .insert(attempt_key.clone(), ledger_counts)
-            .is_some()
-            || terminal_states
-                .insert(attempt_key, row.state.clone())
-                .is_some()
+        let key = (row.task_id.clone(), row.attempt_id.clone());
+        if terminal_counts.insert(key.clone(), counts).is_some()
+            || terminal_states.insert(key, row.state.clone()).is_some()
         {
             bail!("attempt ledger query returned a duplicate terminal attempt");
         }
@@ -602,7 +705,7 @@ FORMAT JSONEachRow
             || report.get("stop").and_then(|value| value.as_u64())
                 != Some(u64::from(manifest_task.stop))
             || report.get("published").and_then(|value| value.as_bool()) != Some(false)
-            || report_counts != ledger_counts
+            || report_counts != counts
             || inserted_rows.is_none()
             || inserted_bytes.is_none()
             || report
@@ -619,71 +722,64 @@ FORMAT JSONEachRow
                 .is_none()
             || report.get("linux_peak_rss_bytes").is_none()
         {
-            bail!("attempt {} report is incomplete or inconsistent with its immutable ledger/source identity", row.attempt_id);
-        }
-        if row.state == "accepted" {
-            let expected_inserted = [
-                row.summary_rows,
-                row.allele_rows,
-                row.frequency_rows,
-                row.carrier_rows,
-                row.rejected_records,
-            ]
-            .into_iter()
-            .try_fold(0u64, |total, value| {
-                total
-                    .checked_add(value)
-                    .context("attempt row total exceeds UInt64")
-            })?;
-            if report.get("state").and_then(|value| value.as_str()) != Some("accepted")
-                || !report
-                    .get("failure")
-                    .is_some_and(serde_json::Value::is_null)
-                || inserted_rows != Some(expected_inserted)
-                || (expected_inserted > 0 && inserted_bytes == Some(0))
-            {
-                bail!(
-                    "accepted attempt {} does not contain a complete successful worker result",
-                    row.attempt_id
-                );
-            }
-            if accepted
-                .insert(row.task_id.clone(), row.attempt_id)
-                .is_some()
-            {
-                bail!("task {} has more than one accepted attempt", row.task_id);
-            }
-        } else if row.state == "failed" {
-            if report.get("state").and_then(|value| value.as_str()) != Some("failed")
-                || !report
-                    .get("failure")
-                    .is_some_and(serde_json::Value::is_object)
-            {
-                bail!(
-                    "failed attempt {} has no structured failure result",
-                    row.attempt_id
-                );
-            }
-            failed
-                .entry(row.task_id.clone())
-                .or_default()
-                .push(row.attempt_id);
-        } else {
             bail!(
-                "attempt ledger has unsupported terminal state {:?}",
-                row.state
+                "attempt {} report is incomplete or inconsistent with its declared source identity",
+                row.attempt_id
             );
+        }
+        match row.state.as_str() {
+            "accepted" => {
+                let expected_inserted = [
+                    counts.summaries,
+                    counts.alleles,
+                    counts.frequencies,
+                    counts.carriers,
+                    counts.rejects,
+                ]
+                .into_iter()
+                .try_fold(0u64, |total, value| total.checked_add(value))
+                .context("attempt row total exceeds UInt64")?;
+                if report.get("state").and_then(|value| value.as_str()) != Some("accepted")
+                    || !report
+                        .get("failure")
+                        .is_some_and(serde_json::Value::is_null)
+                    || inserted_rows != Some(expected_inserted)
+                    || (expected_inserted > 0 && inserted_bytes == Some(0))
+                    || accepted
+                        .insert(row.task_id.clone(), row.attempt_id.clone())
+                        .is_some()
+                {
+                    bail!(
+                        "task {} lacks exactly one complete accepted attempt",
+                        row.task_id
+                    );
+                }
+            }
+            "failed" => {
+                if report.get("state").and_then(|value| value.as_str()) != Some("failed")
+                    || !report
+                        .get("failure")
+                        .is_some_and(serde_json::Value::is_object)
+                {
+                    bail!(
+                        "failed attempt {} has no structured failure result",
+                        row.attempt_id
+                    );
+                }
+                failed.entry(row.task_id).or_default().push(row.attempt_id);
+            }
+            state => bail!("attempt ledger has unsupported nonterminal state {state:?}"),
         }
     }
     for attempts in failed.values_mut() {
         attempts.sort();
     }
-    if accepted.len() != tasks.len() {
-        bail!(
-            "run has {} accepted manifest tasks; expected {}",
-            accepted.len(),
-            tasks.len()
-        );
+    if accepted.len() != tasks.len()
+        || tasks
+            .iter()
+            .any(|task| !accepted.contains_key(&task.task_id))
+    {
+        bail!("run does not have exactly one accepted terminal attempt for every manifest task");
     }
     for task in tasks
         .iter()
@@ -702,78 +798,71 @@ FORMAT JSONEachRow
             })
         });
         if !initial_matches || !retry_matches {
-            bail!("controlled fail-once task {} does not prove failed initial and deterministically accepted retry attempts", task.task_id);
+            bail!(
+                "controlled fail-once task {} lacks its failed initial and accepted retry evidence",
+                task.task_id
+            );
         }
     }
-    let staging_signatures = validate_physical_attempts(
+
+    let counts = validate_physical_attempts(
         tasks,
         &accepted,
         &terminal_counts,
         &terminal_states,
         &physical,
+        phase,
     )?;
+    let mut nonaccepted = terminal_states
+        .iter()
+        .filter(|(_, state)| state.as_str() != "accepted")
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    nonaccepted.sort();
     Ok(LedgerCoverage {
         accepted,
         failed,
-        staging_signatures,
+        nonaccepted,
+        counts,
     })
 }
 
 fn read_physical_attempts(
     target: &ClickHouseTarget,
-    run_id: &str,
-    cohort: &str,
-    chrom: &str,
+    run: &PoolY1TaskSpec,
 ) -> anyhow::Result<Vec<PhysicalAttemptView>> {
-    const TABLES: [(&str, &str, &str); 4] = [
-        (
-            "summaries",
-            "tuple(position, source_variant_id)",
-            "release,cohort,reference_genome,chrom,position,source_variant_id,ref_allele,alts,allele_type,qual,filters,ac,an,af,allele_lengths,length_provenance,source_allele_length,source_svlen,source_svlen_present,frequencies_json,source_info_json",
-        ),
-        (
-            "alleles",
-            "tuple(position, source_variant_id, alt_index)",
-            "release,cohort,reference_genome,chrom,position,reference_end,xpos,source_variant_id,alt_index,ref_allele,alt,allele_type,qual,filters,ac,an,af,allele_length,length_provenance,rsids,cadd_phred,phylop,major_consequence,short_read_match_id,short_read_match_type,short_read_match_source",
-        ),
-        (
-            "frequencies",
-            "tuple(position, source_variant_id, alt_index, division)",
-            "release,cohort,reference_genome,chrom,position,source_variant_id,alt_index,division,ac,an,af,values_available",
-        ),
-        (
-            "carriers",
-            "tuple(position, source_variant_id, alt_index, sample_id, genotype_position)",
-            "release,cohort,reference_genome,chrom,position,source_variant_id,alt_index,alt,sample_id,genotype_position,gt_alleles,gt_phased,genotype_fields_json,position_fields_json",
-        ),
-    ];
     let mut result = Vec::new();
-    for (table, unique_key, signature_columns) in TABLES {
+    for spec in TABLES {
+        let identity = if spec.has_primary_identity {
+            "countIf(release != 'y1' OR cohort != {cohort:String} OR reference_genome != 'GRCh38' OR chrom != {chrom:String})"
+        } else {
+            "toUInt64(0)"
+        };
+        let positions = if spec.has_primary_identity {
+            "min(position), max(position)"
+        } else {
+            "toUInt32(0), toUInt32(0)"
+        };
         let query = format!(
-            "SELECT '{table}' AS table, task_id, attempt_id, count() AS rows, \
-             uniqExact({unique_key}) AS unique_keys, \
-             countIf(release != 'y1' OR cohort != {{cohort:String}} OR reference_genome != 'GRCh38' OR chrom != {{chrom:String}}) AS identity_violations, \
-             min(position) AS min_position, max(position) AS max_position, \
-             groupBitXor(cityHash64(toJSONString(tuple({signature_columns})))) AS signature \
-             FROM lr_y1_{table}_staging WHERE run_id = {{run_id:String}} \
-             GROUP BY task_id, attempt_id FORMAT JSONEachRow"
+            "SELECT '{}' AS table, task_id, attempt_id, count() AS rows, uniqExact({}) AS unique_keys, {} AS identity_violations, {} AS min_position, {} AS max_position FROM {} WHERE run_id = {{run_id:String}} GROUP BY task_id, attempt_id FORMAT JSONEachRow",
+            spec.label,
+            spec.unique_key,
+            identity,
+            positions.split(',').next().expect("position expression"),
+            positions.split(',').nth(1).expect("position expression"),
+            spec.table,
         );
         let body = target.query_text(
             &query,
-            &[("run_id", run_id), ("cohort", cohort), ("chrom", chrom)],
+            &[
+                ("run_id", &run.run_id),
+                ("cohort", &run.cohort),
+                ("chrom", &run.chrom),
+            ],
         )?;
         for line in body.lines().filter(|line| !line.trim().is_empty()) {
-            result.push(
-                serde_json::from_str(line).context("invalid physical staging aggregate JSON")?,
-            );
+            result.push(serde_json::from_str(line).context("invalid canonical aggregate JSON")?);
         }
-    }
-    let rejects = target.query_text(
-        "SELECT 'rejects' AS table, task_id, attempt_id, count() AS rows, count() AS unique_keys, 0 AS identity_violations, 0 AS min_position, 0 AS max_position, groupBitXor(cityHash64(toJSONString(tuple(record_number, source_variant_id, reject_code, message)))) AS signature FROM lr_y1_rejects_staging WHERE run_id = {run_id:String} GROUP BY task_id, attempt_id FORMAT JSONEachRow",
-        &[("run_id", run_id)],
-    )?;
-    for line in rejects.lines().filter(|line| !line.trim().is_empty()) {
-        result.push(serde_json::from_str(line).context("invalid reject staging aggregate JSON")?);
     }
     Ok(result)
 }
@@ -784,52 +873,47 @@ fn validate_physical_attempts(
     terminal_counts: &BTreeMap<(String, String), StagedCounts>,
     terminal_states: &BTreeMap<(String, String), String>,
     physical: &[PhysicalAttemptView],
-) -> anyhow::Result<Vec<StagingContentSignature>> {
-    const TABLES: [&str; 5] = ["summaries", "alleles", "frequencies", "carriers", "rejects"];
+    phase: PhysicalPhase,
+) -> anyhow::Result<Vec<CanonicalTableCount>> {
     let task_bounds: BTreeMap<&str, (u32, u32)> = tasks
         .iter()
         .map(|task| (task.task_id.as_str(), (task.start, task.stop)))
         .collect();
-    if accepted.len() != tasks.len()
-        || tasks
-            .iter()
-            .any(|task| !accepted.contains_key(&task.task_id))
-    {
-        bail!("physical acceptance snapshot lacks exactly one accepted attempt per manifest task");
-    }
     let accepted_terminal_count = terminal_states
         .values()
         .filter(|state| state.as_str() == "accepted")
         .count();
-    if accepted_terminal_count != tasks.len()
-        || accepted.iter().any(|(task_id, attempt_id)| {
-            terminal_states
-                .get(&(task_id.clone(), attempt_id.clone()))
+    if accepted.len() != tasks.len()
+        || accepted_terminal_count != tasks.len()
+        || tasks.iter().any(|task| {
+            accepted
+                .get(&task.task_id)
+                .and_then(|attempt| terminal_states.get(&(task.task_id.clone(), attempt.clone())))
                 .map(String::as_str)
                 != Some("accepted")
         })
     {
-        bail!("terminal ledger contains a missing, duplicate, or inconsistent accepted attempt");
+        bail!("physical acceptance lacks exactly one accepted terminal attempt per task");
     }
     let mut aggregates = BTreeMap::new();
     for row in physical {
-        if !TABLES.contains(&row.table.as_str()) {
-            bail!("physical staging snapshot contains an unknown table");
+        if !TABLES.iter().any(|spec| spec.label == row.table) {
+            bail!("canonical snapshot contains an unknown table");
         }
         let attempt_key = (row.task_id.clone(), row.attempt_id.clone());
         if !terminal_counts.contains_key(&attempt_key) {
             bail!(
-                "stale or orphan staging contribution for task {}/attempt {}",
+                "stale or orphan canonical contribution for task {}/attempt {}",
                 row.task_id,
                 row.attempt_id
             );
         }
         let bounds = task_bounds
             .get(row.task_id.as_str())
-            .context("physical staging row names a task absent from the manifest")?;
+            .context("canonical row names a task absent from the manifest")?;
         if row.identity_violations != 0 {
             bail!(
-                "physical {} staging contains cross-run/cohort/contig identity violations",
+                "canonical {} contains cross-run/cohort/contig identity violations",
                 row.table
             );
         }
@@ -838,14 +922,14 @@ fn validate_physical_attempts(
             && (row.min_position < bounds.0 || row.max_position > bounds.1)
         {
             bail!(
-                "physical {} staging escapes task {} bounds",
+                "canonical {} escapes task {} bounds",
                 row.table,
                 row.task_id
             );
         }
         if row.unique_keys != row.rows {
             bail!(
-                "physical {} staging contains duplicate keys for task {}/attempt {}",
+                "canonical {} contains duplicate keys for task {}/attempt {}",
                 row.table,
                 row.task_id,
                 row.attempt_id
@@ -856,13 +940,12 @@ fn validate_physical_attempts(
             row.task_id.clone(),
             row.attempt_id.clone(),
         );
-        if aggregates.insert(key, row).is_some() {
-            bail!("physical staging snapshot contains a duplicate attempt aggregate");
+        if aggregates.insert(key, row.rows).is_some() {
+            bail!("canonical snapshot contains a duplicate attempt aggregate");
         }
     }
 
     let mut accepted_rows = BTreeMap::new();
-    let mut accepted_signatures = BTreeMap::new();
     for (attempt_key, counts) in terminal_counts {
         if counts.summaries.checked_add(counts.rejects) != Some(counts.source_records) {
             bail!(
@@ -876,44 +959,112 @@ fn validate_physical_attempts(
             counts.carriers,
             counts.rejects,
         ];
-        for (table, expected) in TABLES.into_iter().zip(expected_rows) {
-            let physical = aggregates.get(&(
-                table.to_string(),
-                attempt_key.0.clone(),
-                attempt_key.1.clone(),
-            ));
-            let rows = physical.map_or(0, |row| row.rows);
-            if rows != expected {
-                bail!(
-                    "physical {table} rows disagree with terminal ledger for task {}/attempt {}",
-                    attempt_key.0,
-                    attempt_key.1
-                );
-            }
-            if accepted.get(&attempt_key.0) == Some(&attempt_key.1) {
-                let total = accepted_rows.entry(table).or_insert(0u64);
+        let is_accepted = accepted.get(&attempt_key.0) == Some(&attempt_key.1)
+            && terminal_states.get(attempt_key).map(String::as_str) == Some("accepted");
+        for (spec, expected) in TABLES.into_iter().zip(expected_rows) {
+            let rows = aggregates
+                .get(&(
+                    spec.label.to_string(),
+                    attempt_key.0.clone(),
+                    attempt_key.1.clone(),
+                ))
+                .copied()
+                .unwrap_or(0);
+            if is_accepted {
+                if rows != expected {
+                    bail!(
+                        "canonical {} rows disagree with accepted ledger for task {}/attempt {}",
+                        spec.label,
+                        attempt_key.0,
+                        attempt_key.1
+                    );
+                }
+                let total = accepted_rows.entry(spec.label).or_insert(0u64);
                 *total = total
                     .checked_add(rows)
-                    .context("accepted staging row total exceeds UInt64")?;
-                *accepted_signatures.entry(table).or_insert(0u64) ^=
-                    physical.map_or(0, |row| row.signature);
+                    .context("canonical row total exceeds UInt64")?;
+            } else {
+                let valid = match phase {
+                    PhysicalPhase::BeforeCleanup => rows == 0 || rows == expected,
+                    PhysicalPhase::Frozen => rows == 0,
+                };
+                if !valid {
+                    bail!(
+                        "nonaccepted canonical {} rows are partial or survived the freeze cleanup",
+                        spec.label
+                    );
+                }
             }
         }
-        if terminal_states.get(attempt_key).map(String::as_str) == Some("accepted")
-            && counts.rejects != 0
-        {
+        if is_accepted && counts.rejects != 0 {
             bail!("accepted terminal attempt contains rejected records");
         }
     }
-
     Ok(TABLES
         .into_iter()
-        .map(|table| StagingContentSignature {
-            table: table.to_string(),
-            rows: accepted_rows.get(table).copied().unwrap_or(0),
-            signature: accepted_signatures.get(table).copied().unwrap_or(0),
+        .map(|spec| CanonicalTableCount {
+            table: spec.label.to_string(),
+            rows: accepted_rows.get(spec.label).copied().unwrap_or(0),
         })
         .collect())
+}
+
+fn read_canonical_digests(
+    target: &ClickHouseTarget,
+    run: &PoolY1TaskSpec,
+    accepted: &BTreeMap<String, String>,
+    counts: &[CanonicalTableCount],
+) -> anyhow::Result<Vec<CanonicalContentDigest>> {
+    let total = |label: &str| {
+        counts
+            .iter()
+            .find(|count| count.table == label)
+            .map(|count| count.rows)
+            .unwrap_or(0)
+    };
+    let mut result = Vec::with_capacity(accepted.len() * TABLES.len());
+    let mut digest_totals: BTreeMap<&str, u64> = BTreeMap::new();
+    for (task_id, attempt_id) in accepted {
+        for spec in TABLES {
+            let count_query = format!(
+                "SELECT count() FROM {} WHERE run_id = {{run_id:String}} AND task_id = {{task_id:String}} AND attempt_id = {{attempt_id:String}} FORMAT TabSeparated",
+                spec.table
+            );
+            let parameters = [
+                ("run_id", run.run_id.as_str()),
+                ("task_id", task_id.as_str()),
+                ("attempt_id", attempt_id.as_str()),
+            ];
+            let rows = target
+                .query_text(&count_query, &parameters)?
+                .trim()
+                .parse::<u64>()
+                .context("invalid canonical digest row count")?;
+            let query = format!(
+                "SELECT {} FROM {} WHERE run_id = {{run_id:String}} AND task_id = {{task_id:String}} AND attempt_id = {{attempt_id:String}} ORDER BY {} FORMAT RowBinary",
+                spec.columns, spec.table, spec.order_by
+            );
+            let domain = format!("{}\0{}\0{}\0{}", spec.label, task_id, attempt_id, rows);
+            let sha256 = target.query_sha256(&query, &parameters, domain.as_bytes())?;
+            *digest_totals.entry(spec.label).or_default() += rows;
+            result.push(CanonicalContentDigest {
+                table: spec.label.to_string(),
+                task_id: task_id.clone(),
+                attempt_id: attempt_id.clone(),
+                rows,
+                sha256,
+            });
+        }
+    }
+    for spec in TABLES {
+        if digest_totals.get(spec.label).copied().unwrap_or(0) != total(spec.label) {
+            bail!(
+                "per-attempt {} digest counts do not equal the frozen canonical count",
+                spec.label
+            );
+        }
+    }
+    Ok(result)
 }
 
 fn record_state(
@@ -961,14 +1112,6 @@ fn record_state(
     )
 }
 
-fn parse_cohort(value: &str) -> anyhow::Result<Cohort> {
-    match value {
-        "hgsvc_hprc" => Ok(Cohort::HgsvcHprc),
-        "aou" => Ok(Cohort::Aou),
-        _ => bail!("unsupported cohort"),
-    }
-}
-
 fn revision_now() -> anyhow::Result<u64> {
     Ok(u64::try_from(
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
@@ -1010,37 +1153,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manifest_requires_exact_per_contig_adjacency_and_full_coverage() {
-        for chrom in (1..=22)
-            .map(|number| format!("chr{number}"))
-            .chain(["chrX".to_string(), "chrY".to_string()])
-        {
-            let length = grch38_contig_length(&chrom).unwrap();
-            assert!(
-                validate_manifest(&[task_for(&chrom, 0, 1, length)]).is_ok(),
-                "{chrom}"
-            );
-            assert!(
-                validate_manifest(&[task_for(&chrom, 0, 1, length - 1)]).is_err(),
-                "{chrom}"
-            );
-            assert!(
-                validate_manifest(&[task_for(&chrom, 0, 1, 10), task_for(&chrom, 1, 12, length),])
-                    .is_err(),
-                "{chrom}"
-            );
-        }
-        assert!(validate_manifest(&[task_for("chrM", 0, 1, 16_569)]).is_err());
-    }
-
-    #[test]
-    fn manifest_cannot_mix_contigs() {
-        let mut second = task_for("chr2", 1, 11, grch38_contig_length("chr2").unwrap());
-        second.run_id = "run".into();
-        assert!(validate_manifest(&[task_for("chr1", 0, 1, 10), second]).is_err());
-    }
-
     fn independent_for(task: &PoolY1TaskSpec) -> IndependentExpectedCounts {
         IndependentExpectedCounts {
             contract_version: 1,
@@ -1076,17 +1188,16 @@ mod tests {
         }
     }
 
-    fn snapshot() -> (
+    type TestSnapshot = (
         Vec<PoolY1TaskSpec>,
         BTreeMap<String, String>,
         BTreeMap<(String, String), StagedCounts>,
         BTreeMap<(String, String), String>,
         Vec<PhysicalAttemptView>,
-    ) {
-        let length = grch38_contig_length("chr22").unwrap();
-        let task = task_for("chr22", 0, 1, length);
-        let accepted_id = "accepted".to_string();
-        let failed_id = "failed".to_string();
+    );
+
+    fn snapshot() -> TestSnapshot {
+        let task = task_for("chr22", 0, 1, grch38_contig_length("chr22").unwrap());
         let counts = StagedCounts {
             source_records: 1,
             summaries: 1,
@@ -1095,43 +1206,28 @@ mod tests {
             carriers: 0,
             rejects: 0,
         };
-        let accepted = BTreeMap::from([(task.task_id.clone(), accepted_id.clone())]);
+        let accepted = BTreeMap::from([(task.task_id.clone(), "accepted".into())]);
         let terminal_counts = BTreeMap::from([
-            ((task.task_id.clone(), accepted_id.clone()), counts),
-            ((task.task_id.clone(), failed_id.clone()), counts),
+            ((task.task_id.clone(), "accepted".into()), counts),
+            ((task.task_id.clone(), "failed".into()), counts),
         ]);
         let terminal_states = BTreeMap::from([
-            (
-                (task.task_id.clone(), accepted_id.clone()),
-                "accepted".to_string(),
-            ),
-            (
-                (task.task_id.clone(), failed_id.clone()),
-                "failed".to_string(),
-            ),
+            ((task.task_id.clone(), "accepted".into()), "accepted".into()),
+            ((task.task_id.clone(), "failed".into()), "failed".into()),
         ]);
         let mut physical = Vec::new();
-        for attempt in [&accepted_id, &failed_id] {
-            for (table, rows, signature) in [
-                ("summaries", 1, 11),
-                ("alleles", 2, 22),
-                ("frequencies", 3, 33),
-                ("carriers", 0, 0),
-                ("rejects", 0, 0),
-            ] {
-                if rows != 0 {
-                    physical.push(PhysicalAttemptView {
-                        table: table.to_string(),
-                        task_id: task.task_id.clone(),
-                        attempt_id: attempt.clone(),
-                        rows,
-                        unique_keys: rows,
-                        identity_violations: 0,
-                        min_position: 1,
-                        max_position: 1,
-                        signature,
-                    });
-                }
+        for attempt in ["accepted", "failed"] {
+            for (table, rows) in [("summaries", 1), ("alleles", 2), ("frequencies", 3)] {
+                physical.push(PhysicalAttemptView {
+                    table: table.into(),
+                    task_id: task.task_id.clone(),
+                    attempt_id: attempt.into(),
+                    rows,
+                    unique_keys: rows,
+                    identity_violations: 0,
+                    min_position: 1,
+                    max_position: 1,
+                });
             }
         }
         (
@@ -1144,123 +1240,152 @@ mod tests {
     }
 
     #[test]
-    fn independent_reconciliation_rejects_malformed_hashes_and_source_drops() {
+    fn manifest_requires_exact_adjacency_full_coverage_and_one_identity() {
+        for chrom in (1..=22)
+            .map(|n| format!("chr{n}"))
+            .chain(["chrX".into(), "chrY".into()])
+        {
+            let length = grch38_contig_length(&chrom).unwrap();
+            assert!(validate_manifest(&[task_for(&chrom, 0, 1, length)]).is_ok());
+            assert!(validate_manifest(&[task_for(&chrom, 0, 1, length - 1)]).is_err());
+            assert!(validate_manifest(&[
+                task_for(&chrom, 0, 1, 10),
+                task_for(&chrom, 1, 12, length)
+            ])
+            .is_err());
+        }
+        assert!(validate_manifest(&[task_for("chrM", 0, 1, 16_569)]).is_err());
+    }
+
+    #[test]
+    fn independent_reconciliation_rejects_malformed_hash_source_drop_and_cross_identity() {
         let task = task_for("chr22", 0, 1, grch38_contig_length("chr22").unwrap());
-        let valid = independent_for(&task);
-        assert!(validate_independent_reconciliation(&valid, &task).is_ok());
-
+        assert!(validate_independent_reconciliation(&independent_for(&task), &task).is_ok());
         let mut malformed = independent_for(&task);
-        malformed.facts.source_content_sha256 = "not-a-sha256".into();
+        malformed.facts.source_content_sha256 = "bad".into();
         assert!(validate_independent_reconciliation(&malformed, &task).is_err());
-
         let mut dropped = independent_for(&task);
         dropped.facts.source_records = 2;
         assert!(validate_independent_reconciliation(&dropped, &task).is_err());
-
-        let mut cross_source = independent_for(&task);
-        cross_source.source_generation = "other-generation".into();
-        assert!(validate_independent_reconciliation(&cross_source, &task).is_err());
-
-        let mut encoded = serde_json::to_value(independent_for(&task)).unwrap();
-        encoded.as_object_mut().unwrap().insert(
-            "unexpected".into(),
-            serde_json::Value::String("field".into()),
-        );
-        assert!(serde_json::from_value::<IndependentExpectedCounts>(encoded).is_err());
+        let mut cross = independent_for(&task);
+        cross.source_generation = "other".into();
+        assert!(validate_independent_reconciliation(&cross, &task).is_err());
     }
 
     #[test]
-    fn physical_acceptance_accounts_for_failed_retry_and_is_deterministic() {
-        let (tasks, accepted, counts, states, mut physical) = snapshot();
-        let first =
-            validate_physical_attempts(&tasks, &accepted, &counts, &states, &physical).unwrap();
-        physical.reverse();
-        let second =
-            validate_physical_attempts(&tasks, &accepted, &counts, &states, &physical).unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first[0].rows, 1);
-        assert_eq!(first[0].signature, 11);
-    }
-
-    #[test]
-    fn physical_acceptance_rejects_missing_duplicate_and_stale_attempts() {
+    fn retry_rows_are_verified_then_must_be_removed_before_freeze() {
         let (tasks, accepted, counts, states, physical) = snapshot();
-        assert!(
-            validate_physical_attempts(&tasks, &BTreeMap::new(), &counts, &states, &physical)
-                .is_err()
-        );
-
-        let mut duplicate_counts = counts.clone();
-        let mut duplicate_states = states.clone();
-        duplicate_counts.insert(
-            (tasks[0].task_id.clone(), "second-accepted".into()),
-            StagedCounts::default(),
-        );
-        duplicate_states.insert(
-            (tasks[0].task_id.clone(), "second-accepted".into()),
-            "accepted".into(),
+        let before = validate_physical_attempts(
+            &tasks,
+            &accepted,
+            &counts,
+            &states,
+            &physical,
+            PhysicalPhase::BeforeCleanup,
+        )
+        .unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .find(|row| row.table == "summaries")
+                .unwrap()
+                .rows,
+            1
         );
         assert!(validate_physical_attempts(
             &tasks,
             &accepted,
-            &duplicate_counts,
-            &duplicate_states,
-            &physical
+            &counts,
+            &states,
+            &physical,
+            PhysicalPhase::Frozen
         )
         .is_err());
+        let accepted_only = physical
+            .into_iter()
+            .filter(|row| row.attempt_id == "accepted")
+            .collect::<Vec<_>>();
+        assert!(validate_physical_attempts(
+            &tasks,
+            &accepted,
+            &counts,
+            &states,
+            &accepted_only,
+            PhysicalPhase::Frozen
+        )
+        .is_ok());
+    }
 
+    #[test]
+    fn physical_acceptance_rejects_missing_duplicate_partial_stale_and_cross_identity_rows() {
+        let (tasks, accepted, counts, states, physical) = snapshot();
+        assert!(validate_physical_attempts(
+            &tasks,
+            &BTreeMap::new(),
+            &counts,
+            &states,
+            &physical,
+            PhysicalPhase::BeforeCleanup
+        )
+        .is_err());
         let mut stale = physical.clone();
         let mut orphan = stale[0].clone();
         orphan.attempt_id = "orphan".into();
         stale.push(orphan);
-        assert!(validate_physical_attempts(&tasks, &accepted, &counts, &states, &stale).is_err());
-    }
-
-    #[test]
-    fn physical_acceptance_rejects_cross_identity_count_and_signature_changes() {
-        let (tasks, accepted, counts, states, physical) = snapshot();
-        let mut cross_identity = physical.clone();
-        cross_identity[0].identity_violations = 1;
-        assert!(
-            validate_physical_attempts(&tasks, &accepted, &counts, &states, &cross_identity)
-                .is_err()
-        );
-
-        let mut wrong_count = physical.clone();
-        wrong_count[0].rows = 2;
-        wrong_count[0].unique_keys = 2;
-        assert!(
-            validate_physical_attempts(&tasks, &accepted, &counts, &states, &wrong_count).is_err()
-        );
-
-        let baseline =
-            validate_physical_attempts(&tasks, &accepted, &counts, &states, &physical).unwrap();
-        let mut changed = physical;
-        changed[0].signature ^= 1;
-        let changed =
-            validate_physical_attempts(&tasks, &accepted, &counts, &states, &changed).unwrap();
-        assert_ne!(baseline, changed);
-    }
-
-    #[test]
-    fn local_clickhouse_physical_snapshot_queries_compile() {
-        let Ok(endpoint) = std::env::var("GNOMAD_LR_Y1_TEST_ENDPOINT") else {
-            return;
-        };
-        let database = std::env::var("GNOMAD_LR_Y1_TEST_DATABASE")
-            .unwrap_or_else(|_| "gnomad_lr_y1_scratch_v4_ci".to_string());
-        let target = ClickHouseTarget::new(
-            &endpoint,
-            &database,
-            TargetKind::Scratch,
-            super::super::AuthSource::None,
-            false,
-            false,
+        assert!(validate_physical_attempts(
+            &tasks,
+            &accepted,
+            &counts,
+            &states,
+            &stale,
+            PhysicalPhase::BeforeCleanup
         )
-        .unwrap();
-        super::super::init_schema(&target).unwrap();
-        let snapshot = read_physical_attempts(&target, "absent-run", "aou", "chr22").unwrap();
-        assert!(snapshot.is_empty());
+        .is_err());
+        let mut cross = physical.clone();
+        cross[0].identity_violations = 1;
+        assert!(validate_physical_attempts(
+            &tasks,
+            &accepted,
+            &counts,
+            &states,
+            &cross,
+            PhysicalPhase::BeforeCleanup
+        )
+        .is_err());
+        let mut partial = physical;
+        partial
+            .iter_mut()
+            .find(|row| row.attempt_id == "failed" && row.table == "alleles")
+            .unwrap()
+            .rows = 1;
+        partial
+            .iter_mut()
+            .find(|row| row.attempt_id == "failed" && row.table == "alleles")
+            .unwrap()
+            .unique_keys = 1;
+        assert!(validate_physical_attempts(
+            &tasks,
+            &accepted,
+            &counts,
+            &states,
+            &partial,
+            PhysicalPhase::BeforeCleanup
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn freeze_state_rejects_late_primary_writes() {
+        for state in [
+            "freezing",
+            "frozen",
+            "accepted_frozen",
+            "finalization_failed",
+        ] {
+            assert!(super::super::storage::validate_primary_write_state(Some(state)).is_err());
+        }
+        assert!(super::super::storage::validate_primary_write_state(None).is_ok());
+        assert!(super::super::storage::validate_primary_write_state(Some("validated")).is_ok());
     }
 
     #[test]
@@ -1272,25 +1397,160 @@ mod tests {
             "backend_revision": revision,
         });
         assert!(validate_worker_provenance(&valid, "attempt-7").is_ok());
+        let invalid = serde_json::json!({
+            "worker_identity": "unknown-worker",
+            "worker_build_version": format!("gnomad-lr/{revision}/x86_64-linux-release"),
+            "backend_revision": revision,
+        });
+        assert!(validate_worker_provenance(&invalid, "attempt-7").is_err());
+    }
 
-        for invalid in [
-            serde_json::json!({
-                "worker_identity": "unknown-worker",
-                "worker_build_version": format!("gnomad-lr/{revision}/x86_64-linux-release"),
-                "backend_revision": revision,
-            }),
-            serde_json::json!({
-                "worker_identity": "worker-7",
-                "worker_build_version": "0.1.0",
-                "backend_revision": "unknown",
-            }),
-            serde_json::json!({
-                "worker_identity": "worker-7",
-                "worker_build_version": "gnomad-lr/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/release",
-                "backend_revision": revision,
-            }),
-        ] {
-            assert!(validate_worker_provenance(&invalid, "attempt-7").is_err());
-        }
+    fn record_terminal_fixture_attempt(
+        target: &ClickHouseTarget,
+        task: &PoolY1TaskSpec,
+        context: &super::super::AttemptContext,
+        counts: StagedCounts,
+        transformation: &super::super::TransformationReport,
+        accepted: bool,
+    ) {
+        let revision = revision_now().unwrap();
+        let mut ledger = super::super::TaskAttemptLedgerRow::new(
+            context,
+            revision,
+            if accepted {
+                super::super::AttemptState::Accepted
+            } else {
+                super::super::AttemptState::Failed
+            },
+            counts,
+            transformation,
+            if accepted { "" } else { "fixture retry" },
+        )
+        .unwrap();
+        let inserted_rows = counts.summaries
+            + counts.alleles
+            + counts.frequencies
+            + counts.carriers
+            + counts.rejects;
+        ledger.report_json = serde_json::json!({
+            "run_id": task.run_id,
+            "task_id": task.task_id,
+            "attempt_id": context.attempt_id,
+            "cohort": task.cohort,
+            "chrom": task.chrom,
+            "start": task.start,
+            "stop": task.stop,
+            "source_uri": task.source_uri,
+            "source_generation": task.source_generation,
+            "source_size_bytes": task.source_size_bytes,
+            "counts": counts,
+            "inserted": { "rows": inserted_rows, "bytes": 1, "requests": 1 },
+            "started_at_ms": 1,
+            "finished_at_ms": 2,
+            "elapsed_ms": 1,
+            "parse_transform_insert_ms": 1,
+            "linux_peak_rss_bytes": null,
+            "worker_identity": "integration-worker",
+            "worker_build_version": "gnomad-lr/0123456789abcdef0123456789abcdef01234567/x86_64-linux-release",
+            "backend_revision": "0123456789abcdef0123456789abcdef01234567",
+            "state": if accepted { "accepted" } else { "failed" },
+            "failure": if accepted { serde_json::Value::Null } else { serde_json::json!({"code":"fixture_retry"}) },
+            "published": false
+        })
+        .to_string();
+        super::super::record_task_attempt(target, &ledger).unwrap();
+    }
+
+    #[test]
+    fn local_clickhouse_freezes_canonical_rows_in_place_and_cleans_retry() {
+        let Ok(endpoint) = std::env::var("GNOMAD_LR_Y1_TEST_ENDPOINT") else {
+            return;
+        };
+        let database = std::env::var("GNOMAD_LR_Y1_TEST_DATABASE")
+            .unwrap_or_else(|_| "gnomad_lr_y1_scratch_v5_ci".to_string());
+        let target = ClickHouseTarget::new(
+            &endpoint,
+            &database,
+            TargetKind::Scratch,
+            super::super::AuthSource::None,
+            false,
+            false,
+        )
+        .unwrap();
+        super::super::init_schema(&target).unwrap();
+
+        let fixture = include_str!("../../tests/fixtures/y1/aou_summary_only_ins.vcf");
+        let header = super::super::Y1Header::parse(fixture, super::super::Cohort::Aou).unwrap();
+        let batch = super::super::transform_records(
+            &header,
+            fixture
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#')),
+        );
+        let mut task = task_for("chr22", 0, 1, grch38_contig_length("chr22").unwrap());
+        task.run_id = format!("freeze-integration-{}", revision_now().unwrap());
+        let base = super::super::AttemptContext {
+            run_id: task.run_id.clone(),
+            task_id: task.task_id.clone(),
+            attempt_id: "failed".into(),
+            cohort: super::super::Cohort::Aou,
+            chrom: task.chrom.clone(),
+            interval_start: task.start,
+            interval_end: task.stop,
+        };
+        let failed_counts = super::super::stage_attempt(&target, &base, &batch).unwrap();
+        record_terminal_fixture_attempt(&target, &task, &base, failed_counts, &batch.report, false);
+        let accepted_context = super::super::AttemptContext {
+            attempt_id: "accepted".into(),
+            ..base.clone()
+        };
+        let accepted_counts =
+            super::super::stage_attempt(&target, &accepted_context, &batch).unwrap();
+        record_terminal_fixture_attempt(
+            &target,
+            &task,
+            &accepted_context,
+            accepted_counts,
+            &batch.report,
+            true,
+        );
+
+        let mut expected = independent_for(&task);
+        expected.counts = accepted_counts;
+        expected.facts.source_records = accepted_counts.source_records;
+        expected.facts.alt_alleles = accepted_counts.alleles;
+        expected.facts.frequency_rows = accepted_counts.frequencies;
+        expected.facts.annotated_alt_alleles = accepted_counts.alleles;
+        let nonce = format!("{}-{}", std::process::id(), revision_now().unwrap());
+        let manifest_path = std::env::temp_dir().join(format!("gnomad-lr-manifest-{nonce}.json"));
+        let expected_path = std::env::temp_dir().join(format!("gnomad-lr-expected-{nonce}.json"));
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&vec![task.clone()]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&expected_path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        let report =
+            finalize_contig_run(&target, &manifest_path, &expected_path, "integration-test")
+                .unwrap();
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(expected_path);
+        assert!(report.accepted && report.frozen && !report.published);
+        assert!(report
+            .acceptance
+            .canonical_digests
+            .iter()
+            .all(|digest| valid_sha256(&digest.sha256)));
+
+        let rows = target.query_text(
+            "SELECT countIf(attempt_id = 'failed'), countIf(attempt_id = 'accepted') FROM lr_y1_summaries WHERE run_id = {run_id:String} FORMAT TabSeparated",
+            &[("run_id", &task.run_id)],
+        ).unwrap();
+        assert_eq!(rows.trim(), "0\t1");
+        let late_context = super::super::AttemptContext {
+            attempt_id: "late".into(),
+            ..accepted_context
+        };
+        assert!(super::super::stage_attempt(&target, &late_context, &batch).is_err());
     }
 }

@@ -29,7 +29,7 @@ pub enum Commands {
     InitY1(Y1InitArgs),
     /// Strict bounded Y1 source load into an isolated scratch database
     LoadY1Interval(Y1IntervalArgs),
-    /// Guardedly finalize one complete staged Y1 GRCh38 chr1-22/X/Y candidate
+    /// Fence, verify, digest, and freeze one canonical Y1 GRCh38 chr1-22/X/Y candidate in place
     FinalizeY1Contig(Y1FinalizeArgs),
     /// Backward-compatible chr22-only finalization command
     FinalizeY1Chr22(Y1FinalizeArgs),

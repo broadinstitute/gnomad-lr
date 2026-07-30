@@ -1,4 +1,5 @@
 use super::contig::{canonical_y1_mirror_uri, grch38_contig_length};
+use super::storage::ensure_run_accepts_primary_writes;
 use super::{
     record_task_attempt, stage_attempt_tracked, AttemptContext, AttemptState, ClickHouseTarget,
     Cohort, InsertStats, StagedCounts, TaskAttemptLedgerRow, TransformationReport, Y1Header,
@@ -186,6 +187,7 @@ pub fn run_pool_interval_attempt(
         bail!("batch_records must be greater than zero");
     }
 
+    ensure_run_accepts_primary_writes(target, &task.run_id)?;
     let (attempt_id, inject_failure) = select_attempt(target, task)?;
     let cohort = match task.cohort.as_str() {
         "hgsvc_hprc" => Cohort::HgsvcHprc,
@@ -451,13 +453,13 @@ fn staged_attempt_rows(target: &ClickHouseTarget, context: &AttemptContext) -> a
     let query = r#"
 SELECT sum(rows)
 FROM (
-    SELECT count() AS rows FROM lr_y1_summaries_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+    SELECT count() AS rows FROM lr_y1_summaries WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
     UNION ALL
-    SELECT count() AS rows FROM lr_y1_alleles_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+    SELECT count() AS rows FROM lr_y1_alleles WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
     UNION ALL
-    SELECT count() AS rows FROM lr_y1_frequencies_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+    SELECT count() AS rows FROM lr_y1_frequencies WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
     UNION ALL
-    SELECT count() AS rows FROM lr_y1_carriers_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
+    SELECT count() AS rows FROM lr_y1_carriers WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
     UNION ALL
     SELECT count() AS rows FROM lr_y1_rejects_staging WHERE run_id = {run_id:String} AND task_id = {task_id:String} AND attempt_id = {attempt_id:String}
 )
@@ -544,6 +546,7 @@ fn claim_attempt(
     claim.report_json = serde_json::to_string(&claim_report)?;
     record_task_attempt(target, &claim).context("failed to claim Y1 attempt before staging")?;
     ensure_attempt_claim(target, context, revision)?;
+    ensure_run_accepts_primary_writes(target, &context.run_id)?;
 
     // Close the legacy gap where a pre-claim worker may still publish after our first check.
     let raced_rows = staged_attempt_rows(target, context)?;
