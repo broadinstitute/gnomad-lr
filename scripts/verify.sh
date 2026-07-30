@@ -10,12 +10,14 @@ python3 scripts/verify-manifests.py
 python3 scripts/test-generate-y1-chr22-manifest.py
 python3 scripts/test-convert-y1-full-genome-source-inventory.py
 python3 scripts/test-generate-y1-grch38-contig-manifest.py
+python3 scripts/test-generate-y1-phased-mirror-canary.py
 python3 scripts/test-reconcile-y1-chr22-source.py
 python3 scripts/test-reconcile-y1-contig-source.py
 python3 scripts/test-verify-y1-chr22-signatures.py
 python3 scripts/test-verify-worker-artifact.py
 python3 scripts/generate-y1-chr22-manifest.py --source-manifest sources/y1/primary-source-manifest.json --cohort hgsvc_hprc --run-id ignored-when-checking --attempt ignored-when-checking --output manifests/y1/hgsvc-hprc-chr22-1mb.json --check
 python3 scripts/generate-y1-chr22-manifest.py --source-manifest sources/y1/primary-source-manifest.json --cohort aou --run-id ignored-when-checking --attempt ignored-when-checking --output manifests/y1/aou-chr22-1mb.json --check
+python3 scripts/generate-y1-phased-mirror-canary.py --check
 cargo metadata --locked --format-version 1 --no-deps >/dev/null
 cargo test --locked --features clickhouse
 cargo build --locked --features clickhouse

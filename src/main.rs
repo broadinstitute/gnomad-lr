@@ -114,7 +114,10 @@ async fn main() -> anyhow::Result<()> {
                     worker_id,
                     coordinator_url: url,
                     poll_interval_ms: poll_interval,
-                    build_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                    // Genohype persists this exact assignment-time identity in
+                    // terminal custom receipts; package version alone is not
+                    // sufficient to accept a canary attempt.
+                    build_version: Some(pool::WORKER_BUILD_IDENTITY.to_string()),
                     ..Default::default()
                 };
                 run_worker(config, handler).await?;

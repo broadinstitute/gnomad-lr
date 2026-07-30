@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "status": "blocked_pending_fresh_candidate_and_exact_release_artifact",
+  "load_authorized": false,
+  "contract_id": "mirror-only-chr22-source-phased-canary-v1",
+  "run_id": "y1-phased-mirror-chr22-canary-v1",
+  "pool": "lr-phased-chr22-canary",
+  "starting_workers": 0,
+  "canary_workers": 1,
+  "coordinator_batch_size": 1,
+  "task_manifest": "manifests/y1/phased-methylation-mirror-chr22-canary.json",
+  "task_count": 462,
+  "task_manifest_sha256": "3ab09e412e4517d3e2cdfaedd980cf3bbfe0200d02033c32505d387c31cc1fd1",
+  "ledger": {
+    "path": "sources/y1/methylation-phased-mirror-ledger.json",
+    "content_sha256": "97355c54eef458b56f31a318c740dddaff7261a0d76b1d83be5078b4efb13241",
+    "raw_sha256": "7f4e15a93920c842b11fc24ed3ee96aebefcc42549e001431164c2631e54b78b",
+    "objects": 924,
+    "samples": 231,
+    "bytes": 127463220748
+  },
+  "genohype_revision": "78dc914c148b594d0002222e5fe410832c16eabc",
+  "worker_principal": "gnomad_lr_y1_phased_worker",
+  "authentication": "named_passwordless_private_user",
+  "allowed_writes": [
+    "INSERT on candidate lr_y1_methylation_phased_staging only"
+  ],
+  "required_selects": [
+    "candidate schema and staging readback",
+    "currentUser() and synchronous-insert settings"
+  ],
+  "protected_exclusions": [
+    "all final, active, joined, published, and serving tables",
+    "all existing ClickHouse instances and databases",
+    "all GCS writes and accepted mirror objects"
+  ],
+  "joinable_to_vcf": false,
+  "orientation_status": "UNCONFIRMED",
+  "required_runtime_values_not_yet_available": [
+    "fresh candidate private RFC1918 endpoint and scratch database",
+    "exact committed backend revision",
+    "exact clean release worker build identity and SHA-256",
+    "read-only preflight proving candidate grants and empty staging"
+  ]
+}

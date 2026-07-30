@@ -204,6 +204,9 @@ impl TaskHandler for LrTaskHandler {
         match action {
             "index" => handle_index_tasks(tasks).await,
             "load_y1_interval" => handle_y1_interval_tasks(payload, tasks).await,
+            "load_y1_phased_mirror_chr22" => {
+                handle_y1_phased_mirror_chr22_task(payload, tasks).await
+            }
             "load_coverage" => handle_coverage_tasks(payload, tasks).await,
             "load_metadata" => handle_metadata_tasks(payload, tasks).await,
             "load_histograms" => handle_histograms_tasks(payload, tasks).await,
@@ -215,6 +218,53 @@ impl TaskHandler for LrTaskHandler {
             }
         }
     }
+}
+
+async fn handle_y1_phased_mirror_chr22_task(
+    payload: &Value,
+    tasks: Vec<TaskDescriptor>,
+) -> Result<TaskResult, anyhow::Error> {
+    let job: crate::y1::PhasedMirrorJobSpec = serde_json::from_value(payload.clone())?;
+    job.validate(BACKEND_REVISION, WORKER_BUILD_IDENTITY)?;
+    if tasks.len() != 1 {
+        anyhow::bail!("phased mirror canary requires exactly one fenced task per completion");
+    }
+    let descriptor = tasks.into_iter().next().unwrap();
+    if descriptor.task_type != "custom" {
+        anyhow::bail!("phased mirror canary accepts only manifest-backed custom tasks");
+    }
+    let task: crate::y1::PhasedMirrorTaskSpec = serde_json::from_value(descriptor.payload.clone())?;
+    crate::y1::validate_task_against_ledger(&task, &descriptor.id)?;
+    let (assignment_attempt, lease_token) = required_custom_lease(&descriptor)?;
+    let attempt_id = durable_attempt_id(
+        &task.attempt_prefix,
+        &descriptor.id,
+        assignment_attempt,
+        lease_token,
+    )?;
+    let target = job.target()?;
+    let worker = worker_identity();
+    let batch_records = job.batch_records;
+    let descriptor_id = descriptor.id.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        crate::y1::run_phased_mirror_task(
+            &target,
+            &task,
+            &descriptor_id,
+            assignment_attempt,
+            &attempt_id,
+            &worker,
+            BACKEND_REVISION,
+            WORKER_BUILD_IDENTITY,
+            batch_records,
+        )
+    })
+    .await??;
+    let rows = usize::try_from(report.rows())?;
+    Ok(TaskResult::success(
+        rows,
+        Some(serde_json::to_value(report)?),
+    ))
 }
 
 async fn handle_y1_interval_tasks(

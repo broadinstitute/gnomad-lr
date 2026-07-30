@@ -3,7 +3,7 @@
 CARGO_FEATURES ?= clickhouse
 CLICKHOUSE_URL ?= http://127.0.0.1:8123
 GENOHYPE_GIT := https://github.com/broadinstitute/genohype.git
-GENOHYPE_REV := b037236358269bd35d3a1d6e7eebfdaa14c5fc96
+GENOHYPE_REV := 78dc914c148b594d0002222e5fe410832c16eabc
 GIT_SHA := $(shell git rev-parse --verify HEAD)
 GIT_DIRTY_SUFFIX := $(shell test -z "$$(git status --porcelain --untracked-files=no)" || printf '%s' '-dirty')
 SOURCE_BUILD_ID := $(GIT_SHA)$(GIT_DIRTY_SUFFIX)

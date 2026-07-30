@@ -41,6 +41,11 @@ pub enum AuthSource {
     /// Unauthenticated ClickHouse access confined to a private RFC1918 endpoint
     /// and a separately managed VPC firewall, matching the established pool setup.
     PrivateNetwork,
+    /// Explicit named ClickHouse user with no password. This is permitted only
+    /// on loopback or literal private-network endpoints and sends no secret.
+    PasswordlessUser {
+        username: String,
+    },
     Environment {
         username_variable: String,
         password_variable: String,
@@ -132,6 +137,15 @@ impl ClickHouseTarget {
         }
         if matches!(auth, AuthSource::PrivateNetwork) && !endpoint_is_private(&endpoint) {
             bail!("private-network ClickHouse access requires a literal RFC1918 endpoint");
+        }
+        if let AuthSource::PasswordlessUser { username } = &auth {
+            validate_identifier(username, "passwordless ClickHouse principal")?;
+            if username == "default" {
+                bail!("the broad default ClickHouse principal is forbidden");
+            }
+            if !loopback && !endpoint_is_private(&endpoint) {
+                bail!("passwordless ClickHouse principals require loopback or a literal private endpoint");
+            }
         }
         if let AuthSource::Environment {
             username_variable,
@@ -317,6 +331,9 @@ impl ClickHouseTarget {
     fn authorized(&self, request: RequestBuilder) -> anyhow::Result<RequestBuilder> {
         match &self.auth {
             AuthSource::None | AuthSource::PrivateNetwork => Ok(request),
+            AuthSource::PasswordlessUser { username } => {
+                Ok(request.header("X-ClickHouse-User", username))
+            }
             AuthSource::Environment {
                 username_variable,
                 password_variable,
@@ -650,6 +667,41 @@ mod tests {
             false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn named_passwordless_auth_rejects_default_and_public_endpoints() {
+        let target = ClickHouseTarget::new(
+            "http://10.0.0.8:8123",
+            "gnomad_lr_y1_scratch_unit",
+            TargetKind::Scratch,
+            AuthSource::PasswordlessUser {
+                username: "gnomad_lr_y1_phased_worker".into(),
+            },
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(target.endpoint().host_str(), Some("10.0.0.8"));
+        for (endpoint, username) in [
+            ("http://10.0.0.8:8123", "default"),
+            (
+                "https://clickhouse.example.org:8443",
+                "gnomad_lr_y1_phased_worker",
+            ),
+        ] {
+            assert!(ClickHouseTarget::new(
+                endpoint,
+                "gnomad_lr_y1_scratch_unit",
+                TargetKind::Scratch,
+                AuthSource::PasswordlessUser {
+                    username: username.into(),
+                },
+                true,
+                false,
+            )
+            .is_err());
+        }
     }
 
     #[test]

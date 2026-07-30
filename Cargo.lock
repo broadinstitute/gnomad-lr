@@ -1074,7 +1074,7 @@ dependencies = [
 [[package]]
 name = "genohype-core"
 version = "0.1.0"
-source = "git+https://github.com/broadinstitute/genohype.git?rev=b037236358269bd35d3a1d6e7eebfdaa14c5fc96#b037236358269bd35d3a1d6e7eebfdaa14c5fc96"
+source = "git+https://github.com/broadinstitute/genohype.git?rev=78dc914c148b594d0002222e5fe410832c16eabc#78dc914c148b594d0002222e5fe410832c16eabc"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1109,7 +1109,7 @@ dependencies = [
 [[package]]
 name = "genohype-pool"
 version = "0.1.0"
-source = "git+https://github.com/broadinstitute/genohype.git?rev=b037236358269bd35d3a1d6e7eebfdaa14c5fc96#b037236358269bd35d3a1d6e7eebfdaa14c5fc96"
+source = "git+https://github.com/broadinstitute/genohype.git?rev=78dc914c148b594d0002222e5fe410832c16eabc#78dc914c148b594d0002222e5fe410832c16eabc"
 dependencies = [
  "anyhow",
  "async-trait",

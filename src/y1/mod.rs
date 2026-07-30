@@ -5,6 +5,7 @@ pub mod metadata;
 pub mod methylation;
 mod model;
 mod parser;
+mod phased_pool;
 mod storage;
 mod target;
 
@@ -23,6 +24,11 @@ pub use methylation::{
 };
 pub use model::*;
 pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};
+pub use phased_pool::{
+    run_phased_mirror_task, validate_task_against_ledger, PhasedMirrorJobSpec,
+    PhasedMirrorTaskReceipt, PhasedMirrorTaskSpec, MIRROR_CONTRACT_ID,
+    MIRROR_LEDGER_CONTENT_SHA256, MIRROR_LEDGER_RAW_SHA256, MIRROR_RUN_ID, MIRROR_WORKER_PRINCIPAL,
+};
 pub use storage::{
     attest_exact_y1_schema, attest_fresh_y1_schema, init_schema, record_load_run, stage_attempt,
     stage_attempt_tracked, AttemptContext, InsertStats, LoadRunLedgerRow, LoadScope, StagedCounts,

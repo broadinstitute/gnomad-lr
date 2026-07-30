@@ -1,0 +1,18 @@
+# Dormant mirror-only chr22 phased-methylation canary profile.
+# Creation starts only the coordinator; submit while worker count is zero, then
+# scale explicitly to one only after the checked preflight in docs passes.
+[defaults]
+project = "gnomadev"
+zone = "us-east1-b"
+network = "gnomad-v4-dev"
+
+[pools.lr-phased-chr22-canary]
+machine_type = "n1-standard-2"
+spot = true
+starting_workers = 0
+workers = 1
+with_coordinator = true
+worker_binary = "target/release/gnomad-lr-worker"
+subnet = "gnomad-v4-dev-main"
+pool_db_path = "gs://gnomad-lr-data/pool-ops/lr-phased-chr22-canary-v1/ops.db"
+service_account = "gnomad-lr-sa@gnomadev.iam.gserviceaccount.com"
