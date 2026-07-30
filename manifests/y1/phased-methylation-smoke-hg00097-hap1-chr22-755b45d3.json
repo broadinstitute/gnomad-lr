@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "status": "proposed_not_executed",
+  "implementation_base_revision": "a4630ed1dbca9cceba935f320a6663a59c5b075e",
+  "authorization_id": "hg00097-hap1-chr22-20000000-20010000-single-owner-v1",
+  "execution_model": "one_local_process_single_owner_no_retries_no_concurrency_claim",
+  "endpoint": "http://127.0.0.1:8127",
+  "database": "gnomad_lr_y1_scratch_phased_methylation_smoke_v5_hg00097_hap1_chr22_20000000_20010000_755b45d3",
+  "database_disposition": "unique_disposable_fresh_schema_v5",
+  "authenticated_writer_principal": "gnomad_lr_y1_worker",
+  "source": {
+    "manifest_id": "hgsvc-hprc-y1-phased-methylation-v2",
+    "manifest_sha256": "f585cbc2b806dcb52944af2ecabe634338a41323f89e3938336235c7729e8743",
+    "manifest_entry_id": "hgsvc_hprc:HG00097",
+    "sample_id": "HG00097",
+    "data_layer": "source_phased",
+    "source_haplotype": "hap1",
+    "reference_genome": "GRCh38",
+    "interval": {
+      "chrom": "chr22",
+      "start": 20000000,
+      "stop": 20010000,
+      "coordinate_convention": "one_based_inclusive"
+    },
+    "bed": {
+      "slot": "hap1_bed",
+      "uri": "gs://fc-fd42e80c-b41e-4e60-a9cf-b7c0ade168c4/submissions/a1e9b9ce-0d67-4d42-b107-b9821f44dd60/MethylationProfiling/4944aeb1-faf3-49a0-995e-93454b836d2f/call-CpgPileup/HG00097.hap1.bed.gz",
+      "generation": "1777748028405778",
+      "byte_size": 296691390,
+      "checksum_algorithm": "md5_base64",
+      "checksum": "h8QoE/2fwhqmvOrZ2cQDJQ=="
+    },
+    "tbi": {
+      "slot": "hap1_bed_index",
+      "uri": "gs://fc-fd42e80c-b41e-4e60-a9cf-b7c0ade168c4/submissions/a1e9b9ce-0d67-4d42-b107-b9821f44dd60/MethylationProfiling/4944aeb1-faf3-49a0-995e-93454b836d2f/call-CpgPileup/HG00097.hap1.bed.gz.tbi",
+      "generation": "1777748044506344",
+      "byte_size": 1647467,
+      "checksum_algorithm": "md5_base64",
+      "checksum": "318vOAD3zpRTeHsyvfaMxg=="
+    }
+  },
+  "allowed_database_writes": [
+    "create the exact disposable database",
+    "create the exact checked 28-table schema-v5 set and its sole schema receipt",
+    "temporarily grant SELECT, INSERT on only the exact disposable database to gnomad_lr_y1_worker",
+    "one synchronous JSONEachRow INSERT into lr_y1_methylation_phased_staging"
+  ],
+  "protected_exclusions": [
+    "every database other than the exact disposable database",
+    "all active pointer tables",
+    "lr_y1_methylation_phased",
+    "lr_y1_methylation and lr_y1_methylation_staging",
+    "lr_y1_methylation_summary",
+    "lr_y1_methylation_availability",
+    "all metadata, coverage, STR, primary variant, reject, run, and attempt tables",
+    "all accepted, frozen, published, activated, joined, or serving state",
+    "all GCS writes",
+    "all Terraform, VM, worker, pool, and coordinator operations"
+  ],
+  "preflight_commands": [
+    "curl --fail --silent --show-error --user \"$Y1_CLICKHOUSE_USER:$Y1_CLICKHOUSE_PASSWORD\" http://127.0.0.1:8127/ --data-binary 'CREATE DATABASE gnomad_lr_y1_scratch_phased_methylation_smoke_v5_hg00097_hap1_chr22_20000000_20010000_755b45d3'",
+    "target/release/gnomad-lr init-y1 --endpoint http://127.0.0.1:8127 --database gnomad_lr_y1_scratch_phased_methylation_smoke_v5_hg00097_hap1_chr22_20000000_20010000_755b45d3 --target-kind scratch --auth-source environment",
+    "curl --fail --silent --show-error --user \"$Y1_CLICKHOUSE_USER:$Y1_CLICKHOUSE_PASSWORD\" http://127.0.0.1:8127/ --data-binary 'GRANT SELECT, INSERT ON gnomad_lr_y1_scratch_phased_methylation_smoke_v5_hg00097_hap1_chr22_20000000_20010000_755b45d3.* TO gnomad_lr_y1_worker'"
+  ],
+  "run_command": "target/release/gnomad-lr smoke-y1-phased-methylation --endpoint http://127.0.0.1:8127 --database gnomad_lr_y1_scratch_phased_methylation_smoke_v5_hg00097_hap1_chr22_20000000_20010000_755b45d3 --auth-source environment --worker-principal gnomad_lr_y1_worker --report-path /tmp/gnomad-lr-phased-methylation-smoke-hg00097-hap1-755b45d3.json",
+  "required_receipt": {
+    "status": "verified_scratch_only",
+    "schema_version": 5,
+    "table_written": "lr_y1_methylation_phased_staging",
+    "row_count": "positive exact UInt64",
+    "reject_count": 0,
+    "key_sha256": "64 lowercase hexadecimal characters",
+    "content_sha256": "64 lowercase hexadecimal characters",
+    "serving_state_written": false,
+    "summaries_written": false,
+    "availability_written": false,
+    "joined_tables_written": false,
+    "active_pointers_written": false
+  },
+  "cleanup_command": "curl --fail --silent --show-error --user \"$Y1_CLICKHOUSE_USER:$Y1_CLICKHOUSE_PASSWORD\" http://127.0.0.1:8127/ --data-binary 'REVOKE SELECT, INSERT ON gnomad_lr_y1_scratch_phased_methylation_smoke_v5_hg00097_hap1_chr22_20000000_20010000_755b45d3.* FROM gnomad_lr_y1_worker' && curl --fail --silent --show-error --user \"$Y1_CLICKHOUSE_USER:$Y1_CLICKHOUSE_PASSWORD\" http://127.0.0.1:8127/ --data-binary 'DROP DATABASE gnomad_lr_y1_scratch_phased_methylation_smoke_v5_hg00097_hap1_chr22_20000000_20010000_755b45d3 SYNC'"
+}

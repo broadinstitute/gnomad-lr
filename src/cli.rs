@@ -29,6 +29,8 @@ pub enum Commands {
     InitY1(Y1InitArgs),
     /// Strict bounded Y1 source load into an isolated scratch database
     LoadY1Interval(Y1IntervalArgs),
+    /// Single-owner, repository-pinned phased-methylation scratch smoke
+    SmokeY1PhasedMethylation(Y1PhasedMethylationSmokeArgs),
     /// Fence, verify, digest, and freeze one canonical Y1 GRCh38 chr1-22/X/Y candidate in place
     FinalizeY1Contig(Y1FinalizeArgs),
     /// Backward-compatible chr22-only finalization command
@@ -160,6 +162,41 @@ pub struct Y1IntervalArgs {
     pub run_id: Option<String>,
 
     /// Machine-readable validation report destination
+    #[arg(long)]
+    pub report_path: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1PhasedMethylationSmokeArgs {
+    /// ClickHouse HTTP endpoint without credentials, path, or query parameters
+    #[arg(long)]
+    pub endpoint: String,
+
+    /// Unique disposable database with the strict phased-methylation smoke prefix
+    #[arg(long)]
+    pub database: String,
+
+    /// Credential source for the one smoke writer
+    #[arg(long, value_enum)]
+    pub auth_source: Y1AuthSourceArg,
+
+    /// Environment variable containing the smoke writer username
+    #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_USER")]
+    pub username_env: String,
+
+    /// Environment variable containing the smoke writer password
+    #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_PASSWORD")]
+    pub password_env: String,
+
+    /// Exact ClickHouse currentUser() required for the smoke writer
+    #[arg(long)]
+    pub worker_principal: String,
+
+    /// Acknowledge that the endpoint is not loopback
+    #[arg(long)]
+    pub allow_remote: bool,
+
+    /// New machine-readable receipt destination; existing files are never overwritten
     #[arg(long)]
     pub report_path: std::path::PathBuf,
 }
@@ -532,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_primary_copy_pointer_and_methylation_cli_surfaces_are_absent() {
+    fn unsafe_primary_copy_pointer_and_general_methylation_cli_surfaces_are_absent() {
         for command in [
             "load-y1-methylation",
             "finalize-y1-methylation",
@@ -556,5 +593,39 @@ mod tests {
         assert!(!help.contains("materialize-y1"));
         assert!(!help.contains("activate-y1-contig"));
         assert!(!help.contains("rollback-y1-contig"));
+    }
+
+    #[test]
+    fn phased_methylation_smoke_has_no_manifest_source_or_serving_overrides() {
+        let base = [
+            "gnomad-lr",
+            "smoke-y1-phased-methylation",
+            "--endpoint",
+            "http://127.0.0.1:8123",
+            "--database",
+            "gnomad_lr_y1_scratch_phased_methylation_smoke_v5_unit_0123456789ab",
+            "--auth-source",
+            "environment",
+            "--worker-principal",
+            "smoke_writer",
+            "--report-path",
+            "/tmp/receipt.json",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(base).unwrap().command,
+            Commands::SmokeY1PhasedMethylation(_)
+        ));
+        for forbidden in [
+            ["--manifest", "forged.json"],
+            ["--source-uri", "gs://forged/source"],
+            ["--sample-id", "HG00099"],
+            ["--source-haplotype", "hap2"],
+            ["--region", "chr21:1-10"],
+            ["--target-kind", "serving"],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(forbidden);
+            assert!(Cli::try_parse_from(args).is_err(), "accepted {forbidden:?}");
+        }
     }
 }

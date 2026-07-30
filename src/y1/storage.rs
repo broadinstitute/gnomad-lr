@@ -12,7 +12,7 @@ pub const Y1_SCHEMA_VERSION: u16 = 5;
 const Y1_SCHEMA_CONTRACT: &str =
     "y1_full_v5_single_primary_copy_schema_attestation_not_load_authorization";
 
-const Y1_SCHEMA_TABLE_NAMES: &[&str] = &[
+pub(crate) const Y1_SCHEMA_TABLE_NAMES: &[&str] = &[
     "lr_y1_schema_versions",
     "lr_y1_load_runs",
     "lr_y1_task_attempts",
@@ -402,6 +402,52 @@ pub fn attest_exact_y1_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
         bail!("Y1 schema-v5 runtime attestation is restricted to scratch targets");
     }
     attest_exact_y1_schema_with_backend(target)
+}
+
+/// Prove that a scratch target has the exact attested v5 schema and has never
+/// received data. The sole permitted row is the one full-schema receipt.
+/// This is intentionally stronger than ordinary runtime schema attestation and
+/// is used only by one-shot smoke commands.
+pub fn attest_fresh_y1_schema(target: &ClickHouseTarget) -> anyhow::Result<()> {
+    if target.kind() != TargetKind::Scratch {
+        bail!("fresh Y1 schema-v5 attestation is restricted to scratch targets");
+    }
+    attest_fresh_y1_schema_with_backend(target)
+}
+
+fn attest_fresh_y1_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()> {
+    attest_exact_y1_schema_with_backend(backend)?;
+    let counts = Y1_SCHEMA_TABLE_NAMES
+        .iter()
+        .map(|table| {
+            let body = backend.query_text(
+                &format!("SELECT count() FROM {table} FORMAT TabSeparated"),
+                &[],
+            )?;
+            Ok(((*table).to_string(), parse_single_count(&body, table)?))
+        })
+        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+    validate_fresh_y1_counts(&counts)
+}
+
+fn validate_fresh_y1_counts(counts: &BTreeMap<String, u64>) -> anyhow::Result<()> {
+    if counts.len() != Y1_SCHEMA_TABLE_NAMES.len()
+        || !Y1_SCHEMA_TABLE_NAMES
+            .iter()
+            .all(|table| counts.contains_key(*table))
+    {
+        bail!("fresh schema-v5 attestation returned an incomplete table-count inventory");
+    }
+    for table in Y1_SCHEMA_TABLE_NAMES {
+        let expected = u64::from(*table == "lr_y1_schema_versions");
+        let actual = counts[*table];
+        if actual != expected {
+            bail!(
+                "phased-methylation smoke requires a fresh schema-v5 database: {table} has {actual} rows, expected {expected}"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn attest_exact_y1_schema_with_backend<B: SchemaBackend>(backend: &B) -> anyhow::Result<()> {
@@ -1871,6 +1917,10 @@ mod tests {
                     table_inventory_from_contract(contract, 0),
                 );
             }
+            tables
+                .get_mut("lr_y1_schema_versions")
+                .expect("schema receipt table is in the contract")
+                .rows = 1;
             let scoped = METHYLATION_V4_TABLES
                 .iter()
                 .map(|table| table.name)
@@ -2037,8 +2087,9 @@ mod tests {
                 let rows = state
                     .tables
                     .get(table_name)
-                    .ok_or_else(|| anyhow::anyhow!("mock count query names absent table"))?
-                    .rows;
+                    .map(|table| table.rows)
+                    .or_else(|| state.other_tables.contains_key(table_name).then_some(0))
+                    .ok_or_else(|| anyhow::anyhow!("mock count query names absent table"))?;
                 return Ok(format!("{rows}\n"));
             }
             bail!("unhandled mock schema query: {query}")
@@ -2098,6 +2149,38 @@ mod tests {
         for invalid in ["", "1\t2\n", "1\n2\n", "not-a-count\n"] {
             assert!(parse_single_count(invalid, "count").is_err());
         }
+    }
+
+    #[test]
+    fn smoke_freshness_requires_only_the_exact_receipt_and_rejects_wrong_schema() {
+        let fresh = MockSchemaBackend::exact_v4_with_receipt();
+        attest_fresh_y1_schema_with_backend(&fresh).unwrap();
+
+        fresh
+            .state
+            .borrow_mut()
+            .tables
+            .get_mut("lr_y1_methylation_phased_staging")
+            .unwrap()
+            .rows = 1;
+        assert!(attest_fresh_y1_schema_with_backend(&fresh)
+            .unwrap_err()
+            .to_string()
+            .contains("requires a fresh"));
+
+        let wrong_schema = MockSchemaBackend::exact_v4_with_receipt();
+        wrong_schema
+            .state
+            .borrow_mut()
+            .tables
+            .get_mut("lr_y1_methylation_phased")
+            .unwrap()
+            .create_table_query
+            .push_str("CONSTRAINTunexpectedCHECK1");
+        assert!(attest_fresh_y1_schema_with_backend(&wrong_schema)
+            .unwrap_err()
+            .to_string()
+            .contains("SHOW CREATE"));
     }
 
     #[test]

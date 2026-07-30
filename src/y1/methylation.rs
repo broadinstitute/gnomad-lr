@@ -3,13 +3,13 @@
 //! This module does not adapt the legacy methylation command or pool action. A
 //! task names a checked manifest entry, never a path or sample ID. Preparation
 //! resolves generation-bound read identities from the repository v2 manifest
-//! and is restricted to a fenced scratch [`ClickHouseTarget`]. The checked D0
-//! manifest is intentionally blocked, so no source read or database mutation is
-//! authorized until the separate atomic attempt ledger exists. The immutable
-//! reader is implemented and independently testable without weakening that gate.
+//! and is restricted to a fenced scratch [`ClickHouseTarget`]. General loading
+//! and finalization remain blocked. The sole exception is one exact, code-pinned,
+//! single-owner smoke into a fresh disposable schema-v5 database; it cannot
+//! publish, activate, join, retry, or select a caller-provided source.
 
 use super::contig::grch38_contig_length;
-use super::{ClickHouseTarget, TargetKind};
+use super::{attest_fresh_y1_schema, ClickHouseTarget, TargetKind, Y1_SCHEMA_VERSION};
 use crate::loader::immutable_gcs::{HttpGcsBackend, ImmutableGcsObject};
 use crate::loader::strict_bed_reader::{StrictBedLines, StrictBedStream, ValidatedBedRecord};
 use anyhow::{bail, Context};
@@ -26,6 +26,18 @@ const CANONICAL_METHYLATION_MANIFEST_ID: &str = "hgsvc-hprc-y1-phased-methylatio
 const CANONICAL_METHYLATION_MANIFEST_SHA256: &str =
     "f585cbc2b806dcb52944af2ecabe634338a41323f89e3938336235c7729e8743";
 const CANONICAL_METHYLATION_AUTHORIZATION_STATUS: &str = "blocked_pending_atomic_attempt_ledger";
+pub const PHASED_METHYLATION_SMOKE_DATABASE_PREFIX: &str =
+    "gnomad_lr_y1_scratch_phased_methylation_smoke_v5_";
+const PHASED_METHYLATION_SMOKE_AUTHORIZATION_ID: &str =
+    "hg00097-hap1-chr22-20000000-20010000-single-owner-v1";
+const PHASED_METHYLATION_SMOKE_ENTRY_ID: &str = "hgsvc_hprc:HG00097";
+const PHASED_METHYLATION_SMOKE_SAMPLE_ID: &str = "HG00097";
+const PHASED_METHYLATION_SMOKE_CHROM: &str = "chr22";
+const PHASED_METHYLATION_SMOKE_START: u32 = 20_000_000;
+const PHASED_METHYLATION_SMOKE_STOP: u32 = 20_010_000;
+const PHASED_METHYLATION_SMOKE_TABLE: &str = "lr_y1_methylation_phased_staging";
+const SMOKE_KEY_HASH_DOMAIN: &[u8] = b"phased-methylation-smoke-key-v1";
+const SMOKE_CONTENT_HASH_DOMAIN: &[u8] = b"phased-methylation-smoke-content-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,9 +303,36 @@ pub struct PreparedMethylationAttempt {
     index: ImmutableObjectIdentity,
 }
 
-/// Resolve a typed task against the checked immutable manifest. This performs
-/// no read and no ClickHouse mutation. The frozen manifest remains blocked here
-/// solely on the separate atomic attempt-ledger/finalizer milestone.
+fn verified_canonical_manifest(bytes: &[u8]) -> anyhow::Result<(Value, String)> {
+    let mut manifest: Value =
+        serde_json::from_slice(bytes).context("embedded methylation manifest is invalid JSON")?;
+    let recorded_hash = manifest
+        .get("content_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("methylation manifest lacks content_sha256"))?
+        .to_string();
+    manifest
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("methylation manifest must be a JSON object"))?
+        .remove("content_sha256");
+    let actual_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&manifest)?));
+    if recorded_hash != actual_hash || recorded_hash != CANONICAL_METHYLATION_MANIFEST_SHA256 {
+        bail!(
+            "methylation manifest canonical hash does not match the pinned repository trust root"
+        );
+    }
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(2)
+        || manifest.get("manifest_id").and_then(Value::as_str)
+            != Some(CANONICAL_METHYLATION_MANIFEST_ID)
+    {
+        bail!("repository methylation trust root is not the pinned v2 manifest");
+    }
+    Ok((manifest, recorded_hash))
+}
+
+/// Resolve a typed general-load task against the checked immutable manifest.
+/// This performs no read and no ClickHouse mutation. The general path remains
+/// blocked on the separate atomic attempt-ledger/finalizer milestone.
 pub fn prepare_methylation_attempt(
     target: &ClickHouseTarget,
     task: &Y1MethylationTaskSpec,
@@ -313,32 +352,10 @@ pub fn prepare_methylation_attempt(
             "methylation source manifest override is forbidden; expected exact repository path {CANONICAL_METHYLATION_MANIFEST_PATH}"
         );
     }
-    let mut manifest: Value = serde_json::from_slice(include_bytes!(
+    let (manifest, recorded_hash) = verified_canonical_manifest(include_bytes!(
         "../../sources/y1/methylation-phased-source-manifest.json"
-    ))
-    .context("embedded methylation manifest is invalid JSON")?;
-    let recorded_hash = manifest
-        .get("content_sha256")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("methylation manifest lacks content_sha256"))?
-        .to_string();
-    manifest
-        .as_object_mut()
-        .expect("JSON document is an object after content hash lookup")
-        .remove("content_sha256");
-    let canonical = serde_json::to_vec(&manifest)?;
-    let actual_hash = format!("{:x}", Sha256::digest(canonical));
-    if recorded_hash != actual_hash
-        || recorded_hash != CANONICAL_METHYLATION_MANIFEST_SHA256
-        || task.source_manifest_hash != CANONICAL_METHYLATION_MANIFEST_SHA256
-    {
-        bail!(
-            "methylation manifest canonical hash does not match the pinned repository trust root"
-        );
-    }
-    if manifest.get("schema_version").and_then(Value::as_u64) != Some(2)
-        || manifest.get("manifest_id").and_then(Value::as_str)
-            != Some(CANONICAL_METHYLATION_MANIFEST_ID)
+    ))?;
+    if task.source_manifest_hash != CANONICAL_METHYLATION_MANIFEST_SHA256
         || task.source_manifest_id != CANONICAL_METHYLATION_MANIFEST_ID
     {
         bail!("typed task does not resolve to the pinned repository v2 methylation manifest");
@@ -437,10 +454,28 @@ fn resolve_immutable_object(
     value: Option<&Value>,
     slot: &str,
 ) -> anyhow::Result<ImmutableObjectIdentity> {
+    resolve_immutable_object_with_authorization(value, slot, true)
+}
+
+fn resolve_smoke_immutable_object(
+    value: Option<&Value>,
+    slot: &str,
+) -> anyhow::Result<ImmutableObjectIdentity> {
+    // The general load flag must remain false. This exact code-level exception
+    // authorizes only the one bounded smoke contract named by constants above.
+    resolve_immutable_object_with_authorization(value, slot, false)
+}
+
+fn resolve_immutable_object_with_authorization(
+    value: Option<&Value>,
+    slot: &str,
+    expected_load_authorized: bool,
+) -> anyhow::Result<ImmutableObjectIdentity> {
     let descriptor =
         value.ok_or_else(|| anyhow::anyhow!("manifest entry lacks object slot {slot}"))?;
-    if descriptor.get("load_authorized").and_then(Value::as_bool) != Some(true) {
-        bail!("manifest object slot {slot} is not load-authorized");
+    if descriptor.get("load_authorized").and_then(Value::as_bool) != Some(expected_load_authorized)
+    {
+        bail!("manifest object slot {slot} has an unexpected general load authorization state");
     }
     let identity = descriptor
         .get("immutable_identity")
@@ -492,6 +527,450 @@ fn resolve_immutable_object(
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PreparedPhasedMethylationSmoke {
+    authorization_id: String,
+    source_manifest_id: String,
+    source_manifest_hash: String,
+    manifest_entry_id: String,
+    sample_id: String,
+    data_layer: MethylationDataLayer,
+    source_haplotype: SourceHaplotype,
+    source_version: String,
+    chrom: String,
+    start: u32,
+    stop: u32,
+    source_object_slot: String,
+    index_object_slot: String,
+    source: ImmutableObjectIdentity,
+    index: ImmutableObjectIdentity,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PhasedMethylationSmokeRow {
+    ancillary_run_id: String,
+    attempt_id: String,
+    release: String,
+    cohort: String,
+    reference_genome: String,
+    modality: String,
+    source_version: String,
+    chrom: String,
+    source_start0: u32,
+    source_end0: u32,
+    position: u32,
+    sample_id: String,
+    source_haplotype: u8,
+    methylation: f32,
+    coverage: u32,
+    estimated_modified_count: u32,
+    estimated_unmodified_count: u32,
+    discretized_methylation: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SmokeReadback {
+    row_count: u64,
+    key_sha256: String,
+    content_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PhasedMethylationSmokeReceipt {
+    schema_version: u16,
+    capability: &'static str,
+    status: &'static str,
+    database: String,
+    authenticated_principal: String,
+    backend_revision: &'static str,
+    worker_build_identity: &'static str,
+    source: PreparedPhasedMethylationSmoke,
+    ancillary_run_id: String,
+    attempt_id: String,
+    table_written: &'static str,
+    row_count: u64,
+    reject_count: u64,
+    key_sha256: String,
+    content_sha256: String,
+    synchronous_inserts: bool,
+    fresh_exact_schema_v5_attested_before_insert: bool,
+    serving_state_written: bool,
+    summaries_written: bool,
+    availability_written: bool,
+    joined_tables_written: bool,
+    active_pointers_written: bool,
+}
+
+fn validate_smoke_database_name(database: &str) -> anyhow::Result<()> {
+    let suffix = database
+        .strip_prefix(PHASED_METHYLATION_SMOKE_DATABASE_PREFIX)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "phased-methylation smoke database must start with {PHASED_METHYLATION_SMOKE_DATABASE_PREFIX}"
+            )
+        })?;
+    if suffix.len() < 12
+        || suffix.len() > 80
+        || !suffix
+            .bytes()
+            .all(|byte| byte == b'_' || byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || suffix.starts_with('_')
+        || suffix.ends_with('_')
+    {
+        bail!("phased-methylation smoke database requires a 12-80 character lowercase alphanumeric/underscore unique suffix");
+    }
+    Ok(())
+}
+
+fn prepare_phased_methylation_smoke(
+    target: &ClickHouseTarget,
+) -> anyhow::Result<PreparedPhasedMethylationSmoke> {
+    if target.kind() != TargetKind::Scratch {
+        bail!("phased-methylation smoke is restricted to scratch targets");
+    }
+    validate_smoke_database_name(target.database())?;
+    let (manifest, source_manifest_hash) = verified_canonical_manifest(include_bytes!(
+        "../../sources/y1/methylation-phased-source-manifest.json"
+    ))?;
+    let readiness = manifest
+        .get("load_readiness")
+        .ok_or_else(|| anyhow::anyhow!("methylation manifest lacks load_readiness"))?;
+    if readiness.get("status").and_then(Value::as_str)
+        != Some(CANONICAL_METHYLATION_AUTHORIZATION_STATUS)
+        || readiness.get("load_authorized").and_then(Value::as_bool) != Some(false)
+    {
+        bail!("single-owner smoke requires the general phased-methylation load path to remain blocked");
+    }
+    for (field, expected) in [
+        ("release", "y1"),
+        ("cohort", "hgsvc_hprc"),
+        ("reference_genome", "GRCh38"),
+    ] {
+        if manifest.get(field).and_then(Value::as_str) != Some(expected) {
+            bail!("repository methylation manifest substituted {field}");
+        }
+    }
+    let source_version = manifest
+        .get("source_version")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("repository methylation manifest lacks source_version"))?;
+    let entry = manifest
+        .get("samples")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("entry_id").and_then(Value::as_str)
+                    == Some(PHASED_METHYLATION_SMOKE_ENTRY_ID)
+            })
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("authorized smoke entry is absent from the repository manifest")
+        })?;
+    if entry.get("sample_id").and_then(Value::as_str) != Some(PHASED_METHYLATION_SMOKE_SAMPLE_ID)
+        || entry.get("inventory_status").and_then(Value::as_str) != Some("source_present")
+    {
+        bail!("authorized smoke entry substituted sample or inventory identity");
+    }
+    let objects = entry
+        .get("objects")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("authorized smoke entry lacks objects"))?;
+    let source = resolve_smoke_immutable_object(objects.get("hap1_bed"), "hap1_bed")?;
+    let index = resolve_smoke_immutable_object(objects.get("hap1_bed_index"), "hap1_bed_index")?;
+    crate::loader::immutable_gcs::validate_source_index_pair(
+        &source.as_gcs_object(),
+        &index.as_gcs_object(),
+    )?;
+
+    Ok(PreparedPhasedMethylationSmoke {
+        authorization_id: PHASED_METHYLATION_SMOKE_AUTHORIZATION_ID.to_string(),
+        source_manifest_id: CANONICAL_METHYLATION_MANIFEST_ID.to_string(),
+        source_manifest_hash,
+        manifest_entry_id: PHASED_METHYLATION_SMOKE_ENTRY_ID.to_string(),
+        sample_id: PHASED_METHYLATION_SMOKE_SAMPLE_ID.to_string(),
+        data_layer: MethylationDataLayer::SourcePhased,
+        source_haplotype: SourceHaplotype::Hap1,
+        source_version: source_version.to_string(),
+        chrom: PHASED_METHYLATION_SMOKE_CHROM.to_string(),
+        start: PHASED_METHYLATION_SMOKE_START,
+        stop: PHASED_METHYLATION_SMOKE_STOP,
+        source_object_slot: "hap1_bed".to_string(),
+        index_object_slot: "hap1_bed_index".to_string(),
+        source,
+        index,
+    })
+}
+
+fn open_phased_methylation_smoke_records(
+    prepared: &PreparedPhasedMethylationSmoke,
+) -> anyhow::Result<MethylationRecordStream> {
+    open_methylation_record_stream(
+        &prepared.source,
+        &prepared.index,
+        &prepared.chrom,
+        prepared.start,
+        prepared.stop,
+        MethylationSourceType::Hap1,
+    )
+}
+
+fn smoke_rows(
+    prepared: &PreparedPhasedMethylationSmoke,
+    database: &str,
+    records: Vec<MethylationRecord>,
+) -> anyhow::Result<Vec<PhasedMethylationSmokeRow>> {
+    if records.is_empty() {
+        bail!("authorized phased-methylation smoke interval returned zero records");
+    }
+    for record in &records {
+        if record.chrom != prepared.chrom
+            || record.position < prepared.start
+            || record.position > prepared.stop
+            || record.source_type != MethylationSourceType::Hap1
+        {
+            bail!("authorized phased-methylation smoke record substituted its interval or source type");
+        }
+    }
+    let ancillary_run_id = format!("single-owner-smoke:{database}");
+    let attempt_id = "single-owner".to_string();
+    let mut rows = records
+        .into_iter()
+        .map(|record| PhasedMethylationSmokeRow {
+            ancillary_run_id: ancillary_run_id.clone(),
+            attempt_id: attempt_id.clone(),
+            release: "y1".to_string(),
+            cohort: "hgsvc_hprc".to_string(),
+            reference_genome: "GRCh38".to_string(),
+            modality: MethylationDataLayer::SourcePhased.modality().to_string(),
+            source_version: prepared.source_version.clone(),
+            chrom: record.chrom,
+            source_start0: record.source_start0,
+            source_end0: record.source_end0,
+            position: record.position,
+            sample_id: prepared.sample_id.clone(),
+            source_haplotype: prepared.source_haplotype.value(),
+            methylation: record.methylation,
+            coverage: record.coverage,
+            estimated_modified_count: record.estimated_modified_count,
+            estimated_unmodified_count: record.estimated_unmodified_count,
+            discretized_methylation: record.discretized_methylation,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| smoke_row_key(left).cmp(&smoke_row_key(right)));
+    for pair in rows.windows(2) {
+        if smoke_row_key(&pair[0]) == smoke_row_key(&pair[1]) {
+            bail!("authorized phased-methylation smoke source contains a duplicate canonical key");
+        }
+    }
+    Ok(rows)
+}
+
+fn smoke_row_key(row: &PhasedMethylationSmokeRow) -> (&str, &str, &str, u32, &str, u8, u32, u32) {
+    (
+        &row.ancillary_run_id,
+        &row.attempt_id,
+        &row.chrom,
+        row.position,
+        &row.sample_id,
+        row.source_haplotype,
+        row.source_start0,
+        row.source_end0,
+    )
+}
+
+trait SmokeInsertReadback {
+    fn insert(&self, rows: &[PhasedMethylationSmokeRow]) -> anyhow::Result<()>;
+    fn readback(&self) -> anyhow::Result<SmokeReadback>;
+}
+
+struct ClickHouseSmokeInsertReadback<'a>(&'a ClickHouseTarget);
+
+impl SmokeInsertReadback for ClickHouseSmokeInsertReadback<'_> {
+    fn insert(&self, rows: &[PhasedMethylationSmokeRow]) -> anyhow::Result<()> {
+        self.0
+            .insert_json_each_row(PHASED_METHYLATION_SMOKE_TABLE, rows)
+    }
+
+    fn readback(&self) -> anyhow::Result<SmokeReadback> {
+        let count = self.0.query_text(
+            "SELECT count() FROM lr_y1_methylation_phased_staging FORMAT TabSeparated",
+            &[],
+        )?;
+        let row_count = parse_exact_count(&count)?;
+        let order = "ancillary_run_id, attempt_id, chrom, position, sample_id, source_haplotype, source_start0, source_end0";
+        let key_query = format!(
+            "SELECT ancillary_run_id, attempt_id, chrom, position, sample_id, source_haplotype, source_start0, source_end0 FROM {PHASED_METHYLATION_SMOKE_TABLE} ORDER BY {order} FORMAT RowBinary"
+        );
+        let content_query = format!(
+            "SELECT ancillary_run_id, attempt_id, release, cohort, reference_genome, modality, source_version, chrom, source_start0, source_end0, position, sample_id, source_haplotype, methylation, coverage, estimated_modified_count, estimated_unmodified_count, discretized_methylation FROM {PHASED_METHYLATION_SMOKE_TABLE} ORDER BY {order} FORMAT RowBinary"
+        );
+        Ok(SmokeReadback {
+            row_count,
+            key_sha256: self
+                .0
+                .query_sha256(&key_query, &[], SMOKE_KEY_HASH_DOMAIN)?,
+            content_sha256: self
+                .0
+                .query_sha256(&content_query, &[], SMOKE_CONTENT_HASH_DOMAIN)?,
+        })
+    }
+}
+
+fn parse_exact_count(value: &str) -> anyhow::Result<u64> {
+    let trimmed = value.trim_end_matches('\n');
+    if trimmed.is_empty()
+        || trimmed.contains(['\t', '\n', '\r'])
+        || !trimmed.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        bail!("phased-methylation smoke readback count is malformed");
+    }
+    Ok(trimmed.parse()?)
+}
+
+fn insert_and_verify_smoke<B: SmokeInsertReadback>(
+    backend: &B,
+    rows: &[PhasedMethylationSmokeRow],
+) -> anyhow::Result<SmokeReadback> {
+    let expected = expected_smoke_readback(rows)?;
+    backend.insert(rows)?;
+    let actual = backend.readback()?;
+    if actual != expected {
+        bail!(
+            "phased-methylation smoke readback mismatch: expected {:?}, got {:?}",
+            expected,
+            actual
+        );
+    }
+    Ok(actual)
+}
+
+fn expected_smoke_readback(rows: &[PhasedMethylationSmokeRow]) -> anyhow::Result<SmokeReadback> {
+    let mut key_bytes = Vec::new();
+    let mut content_bytes = Vec::new();
+    for row in rows {
+        encode_smoke_key(row, &mut key_bytes)?;
+        encode_smoke_content(row, &mut content_bytes)?;
+    }
+    Ok(SmokeReadback {
+        row_count: u64::try_from(rows.len())?,
+        key_sha256: canonical_smoke_sha256(SMOKE_KEY_HASH_DOMAIN, &key_bytes),
+        content_sha256: canonical_smoke_sha256(SMOKE_CONTENT_HASH_DOMAIN, &content_bytes),
+    })
+}
+
+fn canonical_smoke_sha256(domain: &[u8], bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"gnomad-lr-y1-canonical-content-v1\0");
+    digest.update(domain);
+    digest.update([0]);
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
+fn encode_smoke_key(row: &PhasedMethylationSmokeRow, output: &mut Vec<u8>) -> anyhow::Result<()> {
+    encode_rowbinary_string(&row.ancillary_run_id, output)?;
+    encode_rowbinary_string(&row.attempt_id, output)?;
+    encode_rowbinary_string(&row.chrom, output)?;
+    output.extend_from_slice(&row.position.to_le_bytes());
+    encode_rowbinary_string(&row.sample_id, output)?;
+    output.push(row.source_haplotype);
+    output.extend_from_slice(&row.source_start0.to_le_bytes());
+    output.extend_from_slice(&row.source_end0.to_le_bytes());
+    Ok(())
+}
+
+fn encode_smoke_content(
+    row: &PhasedMethylationSmokeRow,
+    output: &mut Vec<u8>,
+) -> anyhow::Result<()> {
+    for value in [
+        &row.ancillary_run_id,
+        &row.attempt_id,
+        &row.release,
+        &row.cohort,
+        &row.reference_genome,
+        &row.modality,
+        &row.source_version,
+        &row.chrom,
+    ] {
+        encode_rowbinary_string(value, output)?;
+    }
+    output.extend_from_slice(&row.source_start0.to_le_bytes());
+    output.extend_from_slice(&row.source_end0.to_le_bytes());
+    output.extend_from_slice(&row.position.to_le_bytes());
+    encode_rowbinary_string(&row.sample_id, output)?;
+    output.push(row.source_haplotype);
+    output.extend_from_slice(&row.methylation.to_bits().to_le_bytes());
+    output.extend_from_slice(&row.coverage.to_le_bytes());
+    output.extend_from_slice(&row.estimated_modified_count.to_le_bytes());
+    output.extend_from_slice(&row.estimated_unmodified_count.to_le_bytes());
+    output.extend_from_slice(&row.discretized_methylation.to_bits().to_le_bytes());
+    Ok(())
+}
+
+fn encode_rowbinary_string(value: &str, output: &mut Vec<u8>) -> anyhow::Result<()> {
+    let mut length = u64::try_from(value.len())?;
+    loop {
+        let mut byte = (length & 0x7f) as u8;
+        length >>= 7;
+        if length != 0 {
+            byte |= 0x80;
+        }
+        output.push(byte);
+        if length == 0 {
+            break;
+        }
+    }
+    output.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+/// Execute the only repository-authorized phased-methylation smoke. No caller
+/// can select a manifest, source URI, sample, haplotype, layer, or interval.
+pub fn run_phased_methylation_smoke(
+    target: &ClickHouseTarget,
+    expected_principal: &str,
+) -> anyhow::Result<PhasedMethylationSmokeReceipt> {
+    let prepared = prepare_phased_methylation_smoke(target)?;
+    let authenticated_principal = target.attest_current_user(expected_principal)?;
+    target.attest_synchronous_inserts()?;
+    attest_fresh_y1_schema(target)?;
+
+    // Buffer the bounded interval completely so malformed source records cannot
+    // cause a prefix insert. One synchronous request is then verified by an
+    // exact count and two independent ordered RowBinary digests.
+    let records =
+        open_phased_methylation_smoke_records(&prepared)?.collect::<anyhow::Result<Vec<_>>>()?;
+    let rows = smoke_rows(&prepared, target.database(), records)?;
+    let readback = insert_and_verify_smoke(&ClickHouseSmokeInsertReadback(target), &rows)?;
+
+    Ok(PhasedMethylationSmokeReceipt {
+        schema_version: Y1_SCHEMA_VERSION,
+        capability: "single_owner_phased_methylation_smoke",
+        status: "verified_scratch_only",
+        database: target.database().to_string(),
+        authenticated_principal,
+        backend_revision: crate::pool::BACKEND_REVISION,
+        worker_build_identity: crate::pool::WORKER_BUILD_IDENTITY,
+        source: prepared,
+        ancillary_run_id: rows[0].ancillary_run_id.clone(),
+        attempt_id: rows[0].attempt_id.clone(),
+        table_written: PHASED_METHYLATION_SMOKE_TABLE,
+        row_count: readback.row_count,
+        reject_count: 0,
+        key_sha256: readback.key_sha256,
+        content_sha256: readback.content_sha256,
+        synchronous_inserts: true,
+        fresh_exact_schema_v5_attested_before_insert: true,
+        serving_state_written: false,
+        summaries_written: false,
+        availability_written: false,
+        joined_tables_written: false,
+        active_pointers_written: false,
+    })
+}
+
 impl ImmutableObjectIdentity {
     fn as_gcs_object(&self) -> ImmutableGcsObject {
         ImmutableGcsObject {
@@ -509,18 +988,35 @@ impl ImmutableObjectIdentity {
 pub fn open_prepared_methylation_records(
     prepared: &PreparedMethylationAttempt,
 ) -> anyhow::Result<MethylationRecordStream> {
-    let expected_type = prepared.expected_type;
+    open_methylation_record_stream(
+        &prepared.source,
+        &prepared.index,
+        &prepared.chrom,
+        prepared.start,
+        prepared.stop,
+        prepared.expected_type,
+    )
+}
+
+fn open_methylation_record_stream(
+    source: &ImmutableObjectIdentity,
+    index: &ImmutableObjectIdentity,
+    chrom: &str,
+    start: u32,
+    stop: u32,
+    expected_type: MethylationSourceType,
+) -> anyhow::Result<MethylationRecordStream> {
     let backend =
         Arc::new(HttpGcsBackend::new().context(
             "failed to initialize read-only GCS backend for immutable methylation source",
         )?);
     let lines = StrictBedStream::open_immutable_region(
         backend,
-        &prepared.source.as_gcs_object(),
-        &prepared.index.as_gcs_object(),
-        &prepared.chrom,
-        prepared.start,
-        prepared.stop,
+        &source.as_gcs_object(),
+        &index.as_gcs_object(),
+        chrom,
+        start,
+        stop,
         move |line: &str| {
             let record = parse_methylation_source_record(line)?;
             if record.source_type != expected_type {
@@ -540,8 +1036,8 @@ pub fn open_prepared_methylation_records(
     .records();
     Ok(MethylationRecordStream {
         lines,
-        expected_chrom: prepared.chrom.clone(),
-        expected_type: prepared.expected_type,
+        expected_chrom: chrom.to_string(),
+        expected_type,
         failed: false,
     })
 }
@@ -1123,5 +1619,217 @@ mod tests {
             snapshot.resolved_attempts[0].identity = substitution;
             assert!(reconcile_authoritative_attempts(&spec, &snapshot).is_err());
         }
+    }
+
+    fn smoke_target() -> ClickHouseTarget {
+        ClickHouseTarget::new(
+            "http://127.0.0.1:8123",
+            "gnomad_lr_y1_scratch_phased_methylation_smoke_v5_unit_0123456789ab",
+            TargetKind::Scratch,
+            AuthSource::None,
+            false,
+            false,
+        )
+        .unwrap()
+    }
+
+    fn smoke_fixture_rows() -> Vec<PhasedMethylationSmokeRow> {
+        let prepared = prepare_phased_methylation_smoke(&smoke_target()).unwrap();
+        smoke_rows(
+            &prepared,
+            smoke_target().database(),
+            vec![MethylationRecord {
+                chrom: "chr22".into(),
+                source_start0: 19_999_999,
+                source_end0: 20_000_000,
+                position: 20_000_000,
+                methylation: 10.25,
+                source_type: MethylationSourceType::Hap1,
+                coverage: 4,
+                estimated_modified_count: 1,
+                estimated_unmodified_count: 3,
+                discretized_methylation: 25.0,
+            }],
+        )
+        .unwrap()
+    }
+
+    struct FakeSmokeStorage {
+        insert_failure: bool,
+        inserted_rows: std::cell::Cell<usize>,
+        readback_calls: std::cell::Cell<usize>,
+        readback: SmokeReadback,
+    }
+
+    impl SmokeInsertReadback for FakeSmokeStorage {
+        fn insert(&self, rows: &[PhasedMethylationSmokeRow]) -> anyhow::Result<()> {
+            if self.insert_failure {
+                self.inserted_rows.set(rows.len().min(1));
+                bail!("injected partial insert failure");
+            }
+            self.inserted_rows.set(rows.len());
+            Ok(())
+        }
+
+        fn readback(&self) -> anyhow::Result<SmokeReadback> {
+            self.readback_calls.set(self.readback_calls.get() + 1);
+            Ok(self.readback.clone())
+        }
+    }
+
+    #[test]
+    fn exact_smoke_authorization_keeps_general_loading_blocked() {
+        let prepared = prepare_phased_methylation_smoke(&smoke_target()).unwrap();
+        assert_eq!(prepared.sample_id, "HG00097");
+        assert_eq!(prepared.source_haplotype, SourceHaplotype::Hap1);
+        assert_eq!(prepared.chrom, "chr22");
+        assert_eq!((prepared.start, prepared.stop), (20_000_000, 20_010_000));
+        assert!(prepared.source.uri.ends_with("/HG00097.hap1.bed.gz"));
+        assert!(prepared.index.uri.ends_with("/HG00097.hap1.bed.gz.tbi"));
+
+        let error = prepare_methylation_attempt(
+            &scratch_target(),
+            &task(),
+            "descriptor-1",
+            Path::new(CANONICAL_METHYLATION_MANIFEST_PATH),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not load-ready"));
+    }
+
+    #[test]
+    fn smoke_database_and_manifest_source_substitution_fail_closed() {
+        for database in [
+            "gnomad_lr_y1_scratch_v5_not_smoke",
+            "gnomad_lr_y1_scratch_phased_methylation_smoke_v5_short",
+            "gnomad_lr_y1_scratch_phased_methylation_smoke_v5_Uppercase_012345",
+        ] {
+            assert!(
+                validate_smoke_database_name(database).is_err(),
+                "{database}"
+            );
+        }
+
+        let mut manifest: Value = serde_json::from_slice(include_bytes!(
+            "../../sources/y1/methylation-phased-source-manifest.json"
+        ))
+        .unwrap();
+        let entry = manifest["samples"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["sample_id"] == "HG00097")
+            .unwrap();
+        entry["objects"]["hap1_bed"]["immutable_identity"]["uri"] =
+            Value::String("gs://substituted/HG00097.hap1.bed.gz".into());
+        assert!(
+            verified_canonical_manifest(&serde_json::to_vec(&manifest).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("pinned repository trust root")
+        );
+    }
+
+    #[test]
+    fn partial_insert_failure_never_attempts_or_emits_verified_readback() {
+        let rows = smoke_fixture_rows();
+        let expected = expected_smoke_readback(&rows).unwrap();
+        let backend = FakeSmokeStorage {
+            insert_failure: true,
+            inserted_rows: std::cell::Cell::new(0),
+            readback_calls: std::cell::Cell::new(0),
+            readback: expected,
+        };
+        let error = insert_and_verify_smoke(&backend, &rows).unwrap_err();
+        assert!(error.to_string().contains("partial insert failure"));
+        assert_eq!(backend.inserted_rows.get(), 1);
+        assert_eq!(backend.readback_calls.get(), 0);
+    }
+
+    #[test]
+    fn exact_count_key_or_content_readback_mismatch_fails() {
+        let rows = smoke_fixture_rows();
+        let expected = expected_smoke_readback(&rows).unwrap();
+        for readback in [
+            SmokeReadback {
+                row_count: 0,
+                ..expected.clone()
+            },
+            SmokeReadback {
+                key_sha256: "0".repeat(64),
+                ..expected.clone()
+            },
+            SmokeReadback {
+                content_sha256: "f".repeat(64),
+                ..expected.clone()
+            },
+        ] {
+            let backend = FakeSmokeStorage {
+                insert_failure: false,
+                inserted_rows: std::cell::Cell::new(0),
+                readback_calls: std::cell::Cell::new(0),
+                readback,
+            };
+            assert!(insert_and_verify_smoke(&backend, &rows)
+                .unwrap_err()
+                .to_string()
+                .contains("readback mismatch"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly supplied disposable local ClickHouse endpoint"]
+    fn local_clickhouse_smoke_rowbinary_readback_matches_local_hashes() {
+        let endpoint = std::env::var("GNOMAD_LR_LOCAL_CLICKHOUSE_SMOKE_URL")
+            .expect("set GNOMAD_LR_LOCAL_CLICKHOUSE_SMOKE_URL to a disposable local endpoint");
+        let database = format!(
+            "{PHASED_METHYLATION_SMOKE_DATABASE_PREFIX}integration_{:012}",
+            std::process::id()
+        );
+        let client = reqwest::blocking::Client::new();
+        let execute = |query: &str| -> anyhow::Result<()> {
+            let response = client.post(&endpoint).body(query.to_string()).send()?;
+            if !response.status().is_success() {
+                bail!("local ClickHouse query failed: {}", response.text()?);
+            }
+            Ok(())
+        };
+        execute(&format!("DROP DATABASE IF EXISTS {database} SYNC")).unwrap();
+        execute(&format!("CREATE DATABASE {database}")).unwrap();
+        let result = (|| -> anyhow::Result<()> {
+            let target = ClickHouseTarget::new(
+                &endpoint,
+                &database,
+                TargetKind::Scratch,
+                AuthSource::None,
+                false,
+                false,
+            )?;
+            super::super::init_schema(&target)?;
+            attest_fresh_y1_schema(&target)?;
+            let prepared = prepare_phased_methylation_smoke(&target)?;
+            let rows = smoke_rows(
+                &prepared,
+                target.database(),
+                vec![MethylationRecord {
+                    chrom: "chr22".into(),
+                    source_start0: 19_999_999,
+                    source_end0: 20_000_000,
+                    position: 20_000_000,
+                    methylation: 10.25,
+                    source_type: MethylationSourceType::Hap1,
+                    coverage: 4,
+                    estimated_modified_count: 1,
+                    estimated_unmodified_count: 3,
+                    discretized_methylation: 25.0,
+                }],
+            )?;
+            insert_and_verify_smoke(&ClickHouseSmokeInsertReadback(&target), &rows)?;
+            assert!(attest_fresh_y1_schema(&target).is_err());
+            Ok(())
+        })();
+        let cleanup = execute(&format!("DROP DATABASE {database} SYNC"));
+        result.unwrap();
+        cleanup.unwrap();
     }
 }

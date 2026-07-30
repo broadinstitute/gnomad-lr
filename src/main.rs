@@ -13,7 +13,7 @@ compile_error!("gnomad-lr requires the default `clickhouse` feature");
 use clap::Parser;
 use cli::{
     parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
-    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1TargetKindArg,
+    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1PhasedMethylationSmokeArgs, Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
@@ -49,6 +49,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::LoadY1Interval(args) => {
             tokio::task::spawn_blocking(move || run_y1_interval(args)).await??;
+        }
+        Commands::SmokeY1PhasedMethylation(args) => {
+            tokio::task::spawn_blocking(move || run_y1_phased_methylation_smoke(args)).await??;
         }
         Commands::FinalizeY1Contig(args) => {
             tokio::task::spawn_blocking(move || run_y1_finalization(args, false)).await??;
@@ -204,6 +207,65 @@ fn write_json_report<T: serde::Serialize>(
     }
     std::fs::write(path, serde_json::to_vec_pretty(report)?)?;
     println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
+}
+
+fn run_y1_phased_methylation_smoke(args: Y1PhasedMethylationSmokeArgs) -> anyhow::Result<()> {
+    let auth = match args.auth_source {
+        Y1AuthSourceArg::None => y1::AuthSource::None,
+        Y1AuthSourceArg::PrivateNetwork => y1::AuthSource::PrivateNetwork,
+        Y1AuthSourceArg::Environment => y1::AuthSource::Environment {
+            username_variable: args.username_env,
+            password_variable: args.password_env,
+        },
+    };
+    let target = y1::ClickHouseTarget::new(
+        &args.endpoint,
+        &args.database,
+        y1::TargetKind::Scratch,
+        auth,
+        args.allow_remote,
+        false,
+    )?;
+    let mut report_file = reserve_new_json_report(&args.report_path)?;
+    let receipt = match y1::run_phased_methylation_smoke(&target, &args.worker_principal) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            drop(report_file);
+            let _ = std::fs::remove_file(&args.report_path);
+            return Err(error);
+        }
+    };
+    write_reserved_json_report(&mut report_file, &receipt)
+}
+
+fn reserve_new_json_report(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "refusing to overwrite smoke receipt {}: {error}",
+                path.display()
+            )
+        })
+}
+
+fn write_reserved_json_report<T: serde::Serialize>(
+    file: &mut std::fs::File,
+    report: &T,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let body = serde_json::to_vec_pretty(report)?;
+    file.write_all(&body)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    println!("{}", String::from_utf8(body)?);
     Ok(())
 }
 
