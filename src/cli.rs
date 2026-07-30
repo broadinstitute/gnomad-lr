@@ -31,6 +31,8 @@ pub enum Commands {
     LoadY1Interval(Y1IntervalArgs),
     /// Single-owner, repository-pinned phased-methylation scratch smoke
     SmokeY1PhasedMethylation(Y1PhasedMethylationSmokeArgs),
+    /// Fixed retained HG00097 hap1/hap2 phased-methylation evaluation load
+    EvaluateY1PhasedMethylation(Y1PhasedMethylationEvaluationArgs),
     /// Fence, verify, digest, and freeze one canonical Y1 GRCh38 chr1-22/X/Y candidate in place
     FinalizeY1Contig(Y1FinalizeArgs),
     /// Backward-compatible chr22-only finalization command
@@ -162,6 +164,21 @@ pub struct Y1IntervalArgs {
     pub run_id: Option<String>,
 
     /// Machine-readable validation report destination
+    #[arg(long)]
+    pub report_path: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1PhasedMethylationEvaluationArgs {
+    /// ClickHouse HTTP endpoint without credentials, path, or query parameters
+    #[arg(long)]
+    pub endpoint: String,
+
+    /// Acknowledge that the endpoint is not loopback
+    #[arg(long)]
+    pub allow_remote: bool,
+
+    /// New machine-readable receipt destination; existing files are never overwritten
     #[arg(long)]
     pub report_path: std::path::PathBuf,
 }
@@ -577,6 +594,34 @@ mod tests {
         assert!(!help.contains("materialize-y1"));
         assert!(!help.contains("activate-y1-contig"));
         assert!(!help.contains("rollback-y1-contig"));
+    }
+
+    #[test]
+    fn phased_methylation_evaluation_has_no_database_source_or_interval_overrides() {
+        let base = [
+            "gnomad-lr",
+            "evaluate-y1-phased-methylation",
+            "--endpoint",
+            "http://127.0.0.1:8123",
+            "--report-path",
+            "/tmp/evaluation-receipt.json",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(base).unwrap().command,
+            Commands::EvaluateY1PhasedMethylation(_)
+        ));
+        for forbidden in [
+            ["--database", "gnomad_lr_y1_scratch_other"],
+            ["--manifest", "forged.json"],
+            ["--sample-id", "HG00099"],
+            ["--source-haplotype", "hap1"],
+            ["--region", "chr21:1-10"],
+            ["--worker-principal", "default"],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(forbidden);
+            assert!(Cli::try_parse_from(args).is_err(), "accepted {forbidden:?}");
+        }
     }
 
     #[test]

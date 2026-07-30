@@ -14,11 +14,12 @@ pub use interval::{
 pub use methylation::{
     open_prepared_methylation_records, parse_methylation_record, plan_methylation_finalization,
     plan_methylation_finalization_from_snapshot, prepare_methylation_attempt,
-    run_phased_methylation_smoke, AuthoritativeMethylationLedgerSnapshot, ImmutableObjectIdentity,
-    MethylationDataLayer, MethylationFinalizationPlan, MethylationLeaseOwnership,
-    MethylationLedgerState, MethylationRecord, MethylationResolvedAttempt, MethylationSourceType,
+    run_phased_methylation_evaluation, run_phased_methylation_smoke,
+    AuthoritativeMethylationLedgerSnapshot, ImmutableObjectIdentity, MethylationDataLayer,
+    MethylationFinalizationPlan, MethylationLeaseOwnership, MethylationLedgerState,
+    MethylationRecord, MethylationResolvedAttempt, MethylationSourceType,
     MethylationTaskOwnerIdentity, PreparedMethylationAttempt, SourceHaplotype,
-    Y1MethylationFinalizationSpec, Y1MethylationTaskSpec,
+    Y1MethylationFinalizationSpec, Y1MethylationTaskSpec, PHASED_METHYLATION_EVALUATION_DATABASE,
 };
 pub use model::*;
 pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};

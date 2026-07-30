@@ -28,13 +28,19 @@ const CANONICAL_METHYLATION_MANIFEST_SHA256: &str =
 const CANONICAL_METHYLATION_AUTHORIZATION_STATUS: &str = "blocked_pending_atomic_attempt_ledger";
 pub const PHASED_METHYLATION_SMOKE_DATABASE_PREFIX: &str =
     "gnomad_lr_y1_scratch_phased_methylation_smoke_v5_";
+pub const PHASED_METHYLATION_EVALUATION_DATABASE: &str =
+    "gnomad_lr_y1_scratch_phased_methylation_evaluation_v5_hg00097_chr22_47040000_47050000_v1";
 const PHASED_METHYLATION_SMOKE_AUTHORIZATION_ID: &str =
     "hg00097-hap1-chr22-20000000-20010000-single-owner-v1";
+const PHASED_METHYLATION_EVALUATION_AUTHORIZATION_ID: &str =
+    "hg00097-source-hap1-hap2-chr22-47040000-47050000-retained-evaluation-v1";
 const PHASED_METHYLATION_SMOKE_ENTRY_ID: &str = "hgsvc_hprc:HG00097";
 const PHASED_METHYLATION_SMOKE_SAMPLE_ID: &str = "HG00097";
 const PHASED_METHYLATION_SMOKE_CHROM: &str = "chr22";
 const PHASED_METHYLATION_SMOKE_START: u32 = 20_000_000;
 const PHASED_METHYLATION_SMOKE_STOP: u32 = 20_010_000;
+const PHASED_METHYLATION_EVALUATION_START: u32 = 47_040_000;
+const PHASED_METHYLATION_EVALUATION_STOP: u32 = 47_050_000;
 const PHASED_METHYLATION_SMOKE_TABLE: &str = "lr_y1_methylation_phased_staging";
 const PHASED_METHYLATION_SMOKE_PRINCIPAL: &str = "gnomad_lr_y1_worker";
 const SMOKE_KEY_HASH_DOMAIN: &[u8] = b"phased-methylation-smoke-key-v1";
@@ -602,6 +608,48 @@ pub struct PhasedMethylationSmokeReceipt {
     active_pointers_written: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct PhasedMethylationEvaluationVerification {
+    source_hap1: SmokeReadback,
+    source_hap2: SmokeReadback,
+    combined: SmokeReadback,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PhasedMethylationEvaluationReceipt {
+    schema_version: u16,
+    capability: &'static str,
+    status: &'static str,
+    database: &'static str,
+    authenticated_principal: String,
+    backend_revision: &'static str,
+    worker_build_identity: &'static str,
+    sources: Vec<PreparedPhasedMethylationSmoke>,
+    ancillary_run_id: String,
+    attempt_id: String,
+    table_written: &'static str,
+    verification: PhasedMethylationEvaluationVerification,
+    reject_count: u64,
+    synchronous_inserts: bool,
+    both_sources_fully_parsed_before_insert: bool,
+    fresh_exact_schema_v5_attested_before_insert: bool,
+    retained_for_evaluation: bool,
+    joinable_to_vcf: bool,
+    orientation_status: &'static str,
+    serving_state_written: bool,
+    summaries_written: bool,
+    availability_written: bool,
+    joined_tables_written: bool,
+    active_pointers_written: bool,
+}
+
+fn validate_evaluation_database_name(database: &str) -> anyhow::Result<()> {
+    if database != PHASED_METHYLATION_EVALUATION_DATABASE {
+        bail!("phased-methylation evaluation requires the exact fixed evaluation database");
+    }
+    Ok(())
+}
+
 fn validate_smoke_database_name(database: &str) -> anyhow::Result<()> {
     let suffix = database
         .strip_prefix(PHASED_METHYLATION_SMOKE_DATABASE_PREFIX)
@@ -623,13 +671,16 @@ fn validate_smoke_database_name(database: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn prepare_phased_methylation_smoke(
+fn prepare_fixed_phased_methylation_source(
     target: &ClickHouseTarget,
+    authorization_id: &str,
+    source_haplotype: SourceHaplotype,
+    start: u32,
+    stop: u32,
 ) -> anyhow::Result<PreparedPhasedMethylationSmoke> {
     if target.kind() != TargetKind::Scratch {
-        bail!("phased-methylation smoke is restricted to scratch targets");
+        bail!("fixed phased-methylation load is restricted to scratch targets");
     }
-    validate_smoke_database_name(target.database())?;
     let (manifest, source_manifest_hash) = verified_canonical_manifest(include_bytes!(
         "../../sources/y1/methylation-phased-source-manifest.json"
     ))?;
@@ -640,7 +691,7 @@ fn prepare_phased_methylation_smoke(
         != Some(CANONICAL_METHYLATION_AUTHORIZATION_STATUS)
         || readiness.get("load_authorized").and_then(Value::as_bool) != Some(false)
     {
-        bail!("single-owner smoke requires the general phased-methylation load path to remain blocked");
+        bail!("fixed single-owner load requires the general phased-methylation load path to remain blocked");
     }
     for (field, expected) in [
         ("release", "y1"),
@@ -666,53 +717,71 @@ fn prepare_phased_methylation_smoke(
             })
         })
         .ok_or_else(|| {
-            anyhow::anyhow!("authorized smoke entry is absent from the repository manifest")
+            anyhow::anyhow!("fixed HG00097 entry is absent from the repository manifest")
         })?;
     if entry.get("sample_id").and_then(Value::as_str) != Some(PHASED_METHYLATION_SMOKE_SAMPLE_ID)
         || entry.get("inventory_status").and_then(Value::as_str) != Some("source_present")
     {
-        bail!("authorized smoke entry substituted sample or inventory identity");
+        bail!("fixed phased-methylation entry substituted sample or inventory identity");
     }
     let objects = entry
         .get("objects")
         .and_then(Value::as_object)
-        .ok_or_else(|| anyhow::anyhow!("authorized smoke entry lacks objects"))?;
-    let source = resolve_smoke_immutable_object(objects.get("hap1_bed"), "hap1_bed")?;
-    let index = resolve_smoke_immutable_object(objects.get("hap1_bed_index"), "hap1_bed_index")?;
+        .ok_or_else(|| anyhow::anyhow!("fixed phased-methylation entry lacks objects"))?;
+    let (source_slot, index_slot) = source_haplotype.object_slots();
+    let source = resolve_smoke_immutable_object(objects.get(source_slot), source_slot)?;
+    let index = resolve_smoke_immutable_object(objects.get(index_slot), index_slot)?;
     crate::loader::immutable_gcs::validate_source_index_pair(
         &source.as_gcs_object(),
         &index.as_gcs_object(),
     )?;
 
     Ok(PreparedPhasedMethylationSmoke {
-        authorization_id: PHASED_METHYLATION_SMOKE_AUTHORIZATION_ID.to_string(),
+        authorization_id: authorization_id.to_string(),
         source_manifest_id: CANONICAL_METHYLATION_MANIFEST_ID.to_string(),
         source_manifest_hash,
         manifest_entry_id: PHASED_METHYLATION_SMOKE_ENTRY_ID.to_string(),
         sample_id: PHASED_METHYLATION_SMOKE_SAMPLE_ID.to_string(),
         data_layer: MethylationDataLayer::SourcePhased,
-        source_haplotype: SourceHaplotype::Hap1,
+        source_haplotype,
         source_version: source_version.to_string(),
         chrom: PHASED_METHYLATION_SMOKE_CHROM.to_string(),
-        start: PHASED_METHYLATION_SMOKE_START,
-        stop: PHASED_METHYLATION_SMOKE_STOP,
-        source_object_slot: "hap1_bed".to_string(),
-        index_object_slot: "hap1_bed_index".to_string(),
+        start,
+        stop,
+        source_object_slot: source_slot.to_string(),
+        index_object_slot: index_slot.to_string(),
         source,
         index,
     })
 }
 
+fn prepare_phased_methylation_smoke(
+    target: &ClickHouseTarget,
+) -> anyhow::Result<PreparedPhasedMethylationSmoke> {
+    validate_smoke_database_name(target.database())?;
+    prepare_fixed_phased_methylation_source(
+        target,
+        PHASED_METHYLATION_SMOKE_AUTHORIZATION_ID,
+        SourceHaplotype::Hap1,
+        PHASED_METHYLATION_SMOKE_START,
+        PHASED_METHYLATION_SMOKE_STOP,
+    )
+}
+
 fn open_phased_methylation_smoke_records(
     prepared: &PreparedPhasedMethylationSmoke,
 ) -> anyhow::Result<MethylationRecordStream> {
+    let expected_source_type = match prepared.source_haplotype {
+        SourceHaplotype::Hap1 => MethylationSourceType::Hap1,
+        SourceHaplotype::Hap2 => MethylationSourceType::Hap2,
+    };
     open_methylation_record_stream(
         &prepared.source,
         &prepared.index,
         &prepared.chrom,
         prepared.start,
         prepared.stop,
-        MethylationSourceType::Hap1,
+        expected_source_type,
     )
 }
 
@@ -721,19 +790,32 @@ fn smoke_rows(
     database: &str,
     records: Vec<MethylationRecord>,
 ) -> anyhow::Result<Vec<PhasedMethylationSmokeRow>> {
+    fixed_phased_methylation_rows(prepared, database, "single-owner-smoke", records)
+}
+
+fn fixed_phased_methylation_rows(
+    prepared: &PreparedPhasedMethylationSmoke,
+    database: &str,
+    run_kind: &str,
+    records: Vec<MethylationRecord>,
+) -> anyhow::Result<Vec<PhasedMethylationSmokeRow>> {
     if records.is_empty() {
-        bail!("authorized phased-methylation smoke interval returned zero records");
+        bail!("fixed phased-methylation interval returned zero records");
     }
+    let expected_source_type = match prepared.source_haplotype {
+        SourceHaplotype::Hap1 => MethylationSourceType::Hap1,
+        SourceHaplotype::Hap2 => MethylationSourceType::Hap2,
+    };
     for record in &records {
         if record.chrom != prepared.chrom
             || record.position < prepared.start
             || record.position > prepared.stop
-            || record.source_type != MethylationSourceType::Hap1
+            || record.source_type != expected_source_type
         {
-            bail!("authorized phased-methylation smoke record substituted its interval or source type");
+            bail!("fixed phased-methylation record substituted its interval or source type");
         }
     }
-    let ancillary_run_id = format!("single-owner-smoke:{database}");
+    let ancillary_run_id = format!("{run_kind}:{database}");
     let attempt_id = "single-owner".to_string();
     let mut rows = records
         .into_iter()
@@ -794,28 +876,31 @@ impl SmokeInsertReadback for ClickHouseSmokeInsertReadback<'_> {
     }
 
     fn readback(&self) -> anyhow::Result<SmokeReadback> {
-        let count = self.0.query_text(
-            "SELECT count() FROM lr_y1_methylation_phased_staging FORMAT TabSeparated",
-            &[],
-        )?;
-        let row_count = parse_exact_count(&count)?;
-        let order = "ancillary_run_id, attempt_id, chrom, position, sample_id, source_haplotype, source_start0, source_end0";
-        let key_query = format!(
-            "SELECT ancillary_run_id, attempt_id, chrom, position, sample_id, source_haplotype, source_start0, source_end0 FROM {PHASED_METHYLATION_SMOKE_TABLE} ORDER BY {order} FORMAT RowBinary"
-        );
-        let content_query = format!(
-            "SELECT ancillary_run_id, attempt_id, release, cohort, reference_genome, modality, source_version, chrom, source_start0, source_end0, position, sample_id, source_haplotype, methylation, coverage, estimated_modified_count, estimated_unmodified_count, discretized_methylation FROM {PHASED_METHYLATION_SMOKE_TABLE} ORDER BY {order} FORMAT RowBinary"
-        );
-        Ok(SmokeReadback {
-            row_count,
-            key_sha256: self
-                .0
-                .query_sha256(&key_query, &[], SMOKE_KEY_HASH_DOMAIN)?,
-            content_sha256: self
-                .0
-                .query_sha256(&content_query, &[], SMOKE_CONTENT_HASH_DOMAIN)?,
-        })
+        clickhouse_smoke_readback(self.0, "")
     }
+}
+
+fn clickhouse_smoke_readback(
+    target: &ClickHouseTarget,
+    static_where_clause: &str,
+) -> anyhow::Result<SmokeReadback> {
+    let count_query = format!(
+        "SELECT count() FROM {PHASED_METHYLATION_SMOKE_TABLE} {static_where_clause} FORMAT TabSeparated"
+    );
+    let count = target.query_text(&count_query, &[])?;
+    let row_count = parse_exact_count(&count)?;
+    let order = "ancillary_run_id, attempt_id, chrom, position, sample_id, source_haplotype, source_start0, source_end0";
+    let key_query = format!(
+        "SELECT ancillary_run_id, attempt_id, chrom, position, sample_id, source_haplotype, source_start0, source_end0 FROM {PHASED_METHYLATION_SMOKE_TABLE} {static_where_clause} ORDER BY {order} FORMAT RowBinary"
+    );
+    let content_query = format!(
+        "SELECT ancillary_run_id, attempt_id, release, cohort, reference_genome, modality, source_version, chrom, source_start0, source_end0, position, sample_id, source_haplotype, methylation, coverage, estimated_modified_count, estimated_unmodified_count, discretized_methylation FROM {PHASED_METHYLATION_SMOKE_TABLE} {static_where_clause} ORDER BY {order} FORMAT RowBinary"
+    );
+    Ok(SmokeReadback {
+        row_count,
+        key_sha256: target.query_sha256(&key_query, &[], SMOKE_KEY_HASH_DOMAIN)?,
+        content_sha256: target.query_sha256(&content_query, &[], SMOKE_CONTENT_HASH_DOMAIN)?,
+    })
 }
 
 fn parse_exact_count(value: &str) -> anyhow::Result<u64> {
@@ -988,6 +1073,109 @@ pub fn run_phased_methylation_smoke(
         content_sha256: readback.content_sha256,
         synchronous_inserts: true,
         fresh_exact_schema_v5_attested_before_insert: true,
+        serving_state_written: false,
+        summaries_written: false,
+        availability_written: false,
+        joined_tables_written: false,
+        active_pointers_written: false,
+    })
+}
+
+/// Load the one retained visual-evaluation contract. Source hap1/hap2 labels
+/// remain raw source identities and are explicitly not mapped to VCF strands.
+pub fn run_phased_methylation_evaluation(
+    target: &ClickHouseTarget,
+) -> anyhow::Result<PhasedMethylationEvaluationReceipt> {
+    validate_smoke_release_identity(
+        crate::pool::BACKEND_REVISION,
+        crate::pool::WORKER_BUILD_IDENTITY,
+    )?;
+    validate_evaluation_database_name(target.database())?;
+    let authenticated_principal = target.attest_current_user(PHASED_METHYLATION_SMOKE_PRINCIPAL)?;
+    target.attest_synchronous_inserts()?;
+    attest_fresh_y1_schema(target)?;
+
+    let hap1 = prepare_fixed_phased_methylation_source(
+        target,
+        PHASED_METHYLATION_EVALUATION_AUTHORIZATION_ID,
+        SourceHaplotype::Hap1,
+        PHASED_METHYLATION_EVALUATION_START,
+        PHASED_METHYLATION_EVALUATION_STOP,
+    )?;
+    let hap2 = prepare_fixed_phased_methylation_source(
+        target,
+        PHASED_METHYLATION_EVALUATION_AUTHORIZATION_ID,
+        SourceHaplotype::Hap2,
+        PHASED_METHYLATION_EVALUATION_START,
+        PHASED_METHYLATION_EVALUATION_STOP,
+    )?;
+
+    // Parse and validate both immutable sources completely before the sole
+    // synchronous insert, preventing a malformed second source from leaving a
+    // verified-looking first-source prefix.
+    let hap1_records =
+        open_phased_methylation_smoke_records(&hap1)?.collect::<anyhow::Result<Vec<_>>>()?;
+    let hap2_records =
+        open_phased_methylation_smoke_records(&hap2)?.collect::<anyhow::Result<Vec<_>>>()?;
+    let hap1_rows = fixed_phased_methylation_rows(
+        &hap1,
+        target.database(),
+        "single-owner-evaluation",
+        hap1_records,
+    )?;
+    let hap2_rows = fixed_phased_methylation_rows(
+        &hap2,
+        target.database(),
+        "single-owner-evaluation",
+        hap2_records,
+    )?;
+    let expected_hap1 = expected_smoke_readback(&hap1_rows)?;
+    let expected_hap2 = expected_smoke_readback(&hap2_rows)?;
+    let mut rows = hap1_rows;
+    rows.extend(hap2_rows);
+    rows.sort_by(|left, right| smoke_row_key(left).cmp(&smoke_row_key(right)));
+    for pair in rows.windows(2) {
+        if smoke_row_key(&pair[0]) == smoke_row_key(&pair[1]) {
+            bail!("fixed phased-methylation evaluation contains a duplicate canonical key");
+        }
+    }
+    let expected_combined = expected_smoke_readback(&rows)?;
+    ClickHouseSmokeInsertReadback(target).insert(&rows)?;
+
+    let verification = PhasedMethylationEvaluationVerification {
+        source_hap1: clickhouse_smoke_readback(target, "WHERE source_haplotype = 1")?,
+        source_hap2: clickhouse_smoke_readback(target, "WHERE source_haplotype = 2")?,
+        combined: clickhouse_smoke_readback(target, "")?,
+    };
+    if verification.source_hap1 != expected_hap1
+        || verification.source_hap2 != expected_hap2
+        || verification.combined != expected_combined
+        || verification.combined.row_count
+            != verification.source_hap1.row_count + verification.source_hap2.row_count
+    {
+        bail!("phased-methylation evaluation readback count/hash mismatch");
+    }
+
+    Ok(PhasedMethylationEvaluationReceipt {
+        schema_version: Y1_SCHEMA_VERSION,
+        capability: "retained_source_phased_methylation_evaluation",
+        status: "verified_retained_evaluation_only",
+        database: PHASED_METHYLATION_EVALUATION_DATABASE,
+        authenticated_principal,
+        backend_revision: crate::pool::BACKEND_REVISION,
+        worker_build_identity: crate::pool::WORKER_BUILD_IDENTITY,
+        sources: vec![hap1, hap2],
+        ancillary_run_id: rows[0].ancillary_run_id.clone(),
+        attempt_id: rows[0].attempt_id.clone(),
+        table_written: PHASED_METHYLATION_SMOKE_TABLE,
+        verification,
+        reject_count: 0,
+        synchronous_inserts: true,
+        both_sources_fully_parsed_before_insert: true,
+        fresh_exact_schema_v5_attested_before_insert: true,
+        retained_for_evaluation: true,
+        joinable_to_vcf: false,
+        orientation_status: "UNCONFIRMED",
         serving_state_written: false,
         summaries_written: false,
         availability_written: false,
@@ -1658,6 +1846,18 @@ mod tests {
         .unwrap()
     }
 
+    fn evaluation_target() -> ClickHouseTarget {
+        ClickHouseTarget::new(
+            "http://127.0.0.1:8123",
+            PHASED_METHYLATION_EVALUATION_DATABASE,
+            TargetKind::Scratch,
+            AuthSource::None,
+            false,
+            false,
+        )
+        .unwrap()
+    }
+
     fn smoke_fixture_rows() -> Vec<PhasedMethylationSmokeRow> {
         let prepared = prepare_phased_methylation_smoke(&smoke_target()).unwrap();
         smoke_rows(
@@ -1754,6 +1954,79 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("not load-ready"));
+    }
+
+    #[test]
+    fn retained_evaluation_contract_separates_source_labels_and_restricts_scope() {
+        let target = evaluation_target();
+        let hap1 = prepare_fixed_phased_methylation_source(
+            &target,
+            PHASED_METHYLATION_EVALUATION_AUTHORIZATION_ID,
+            SourceHaplotype::Hap1,
+            PHASED_METHYLATION_EVALUATION_START,
+            PHASED_METHYLATION_EVALUATION_STOP,
+        )
+        .unwrap();
+        let hap2 = prepare_fixed_phased_methylation_source(
+            &target,
+            PHASED_METHYLATION_EVALUATION_AUTHORIZATION_ID,
+            SourceHaplotype::Hap2,
+            PHASED_METHYLATION_EVALUATION_START,
+            PHASED_METHYLATION_EVALUATION_STOP,
+        )
+        .unwrap();
+        assert_eq!(hap1.sample_id, "HG00097");
+        assert_eq!(hap2.sample_id, "HG00097");
+        assert_eq!((hap1.start, hap1.stop), (47_040_000, 47_050_000));
+        assert_eq!((hap2.start, hap2.stop), (47_040_000, 47_050_000));
+        assert_eq!(hap1.source_haplotype, SourceHaplotype::Hap1);
+        assert_eq!(hap2.source_haplotype, SourceHaplotype::Hap2);
+        assert!(hap1.source.uri.ends_with("/HG00097.hap1.bed.gz"));
+        assert!(hap2.source.uri.ends_with("/HG00097.hap2.bed.gz"));
+        assert_ne!(hap1.source.generation, hap2.source.generation);
+
+        assert!(validate_evaluation_database_name(PHASED_METHYLATION_EVALUATION_DATABASE).is_ok());
+        assert!(
+            validate_evaluation_database_name("gnomad_lr_y1_scratch_other_evaluation").is_err()
+        );
+    }
+
+    #[test]
+    fn fixed_rows_reject_cross_source_or_cross_region_records() {
+        let prepared = prepare_fixed_phased_methylation_source(
+            &evaluation_target(),
+            PHASED_METHYLATION_EVALUATION_AUTHORIZATION_ID,
+            SourceHaplotype::Hap2,
+            PHASED_METHYLATION_EVALUATION_START,
+            PHASED_METHYLATION_EVALUATION_STOP,
+        )
+        .unwrap();
+        let fixture = |position, source_type| MethylationRecord {
+            chrom: "chr22".into(),
+            source_start0: position - 1,
+            source_end0: position,
+            position,
+            methylation: 50.0,
+            source_type,
+            coverage: 2,
+            estimated_modified_count: 1,
+            estimated_unmodified_count: 1,
+            discretized_methylation: 50.0,
+        };
+        assert!(fixed_phased_methylation_rows(
+            &prepared,
+            evaluation_target().database(),
+            "single-owner-evaluation",
+            vec![fixture(47_040_000, MethylationSourceType::Hap1)],
+        )
+        .is_err());
+        assert!(fixed_phased_methylation_rows(
+            &prepared,
+            evaluation_target().database(),
+            "single-owner-evaluation",
+            vec![fixture(47_039_999, MethylationSourceType::Hap2)],
+        )
+        .is_err());
     }
 
     #[test]

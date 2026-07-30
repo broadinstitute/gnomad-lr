@@ -13,7 +13,8 @@ compile_error!("gnomad-lr requires the default `clickhouse` feature");
 use clap::Parser;
 use cli::{
     parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
-    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1PhasedMethylationSmokeArgs, Y1TargetKindArg,
+    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1PhasedMethylationEvaluationArgs,
+    Y1PhasedMethylationSmokeArgs, Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
@@ -52,6 +53,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::SmokeY1PhasedMethylation(args) => {
             tokio::task::spawn_blocking(move || run_y1_phased_methylation_smoke(args)).await??;
+        }
+        Commands::EvaluateY1PhasedMethylation(args) => {
+            tokio::task::spawn_blocking(move || run_y1_phased_methylation_evaluation(args))
+                .await??;
         }
         Commands::FinalizeY1Contig(args) => {
             tokio::task::spawn_blocking(move || run_y1_finalization(args, false)).await??;
@@ -208,6 +213,32 @@ fn write_json_report<T: serde::Serialize>(
     std::fs::write(path, serde_json::to_vec_pretty(report)?)?;
     println!("{}", serde_json::to_string_pretty(report)?);
     Ok(())
+}
+
+fn run_y1_phased_methylation_evaluation(
+    args: Y1PhasedMethylationEvaluationArgs,
+) -> anyhow::Result<()> {
+    let target = y1::ClickHouseTarget::new(
+        &args.endpoint,
+        y1::PHASED_METHYLATION_EVALUATION_DATABASE,
+        y1::TargetKind::Scratch,
+        y1::AuthSource::Environment {
+            username_variable: y1::Y1_WORKER_USERNAME_ENV.to_string(),
+            password_variable: y1::Y1_WORKER_PASSWORD_ENV.to_string(),
+        },
+        args.allow_remote,
+        false,
+    )?;
+    let mut report_file = reserve_new_json_report(&args.report_path)?;
+    let receipt = match y1::run_phased_methylation_evaluation(&target) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            drop(report_file);
+            let _ = std::fs::remove_file(&args.report_path);
+            return Err(error);
+        }
+    };
+    write_reserved_json_report(&mut report_file, &receipt)
 }
 
 fn run_y1_phased_methylation_smoke(args: Y1PhasedMethylationSmokeArgs) -> anyhow::Result<()> {
