@@ -176,22 +176,6 @@ pub struct Y1PhasedMethylationSmokeArgs {
     #[arg(long)]
     pub database: String,
 
-    /// Credential source for the one smoke writer
-    #[arg(long, value_enum)]
-    pub auth_source: Y1AuthSourceArg,
-
-    /// Environment variable containing the smoke writer username
-    #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_USER")]
-    pub username_env: String,
-
-    /// Environment variable containing the smoke writer password
-    #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_PASSWORD")]
-    pub password_env: String,
-
-    /// Exact ClickHouse currentUser() required for the smoke writer
-    #[arg(long)]
-    pub worker_principal: String,
-
     /// Acknowledge that the endpoint is not loopback
     #[arg(long)]
     pub allow_remote: bool,
@@ -604,10 +588,6 @@ mod tests {
             "http://127.0.0.1:8123",
             "--database",
             "gnomad_lr_y1_scratch_phased_methylation_smoke_v5_unit_0123456789ab",
-            "--auth-source",
-            "environment",
-            "--worker-principal",
-            "smoke_writer",
             "--report-path",
             "/tmp/receipt.json",
         ];
@@ -622,6 +602,10 @@ mod tests {
             ["--source-haplotype", "hap2"],
             ["--region", "chr21:1-10"],
             ["--target-kind", "serving"],
+            ["--auth-source", "none"],
+            ["--username-env", "ADMIN_USER"],
+            ["--password-env", "ADMIN_PASSWORD"],
+            ["--worker-principal", "default"],
         ] {
             let mut args = base.to_vec();
             args.extend(forbidden);

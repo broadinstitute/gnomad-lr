@@ -211,24 +211,19 @@ fn write_json_report<T: serde::Serialize>(
 }
 
 fn run_y1_phased_methylation_smoke(args: Y1PhasedMethylationSmokeArgs) -> anyhow::Result<()> {
-    let auth = match args.auth_source {
-        Y1AuthSourceArg::None => y1::AuthSource::None,
-        Y1AuthSourceArg::PrivateNetwork => y1::AuthSource::PrivateNetwork,
-        Y1AuthSourceArg::Environment => y1::AuthSource::Environment {
-            username_variable: args.username_env,
-            password_variable: args.password_env,
-        },
-    };
     let target = y1::ClickHouseTarget::new(
         &args.endpoint,
         &args.database,
         y1::TargetKind::Scratch,
-        auth,
+        y1::AuthSource::Environment {
+            username_variable: y1::Y1_WORKER_USERNAME_ENV.to_string(),
+            password_variable: y1::Y1_WORKER_PASSWORD_ENV.to_string(),
+        },
         args.allow_remote,
         false,
     )?;
     let mut report_file = reserve_new_json_report(&args.report_path)?;
-    let receipt = match y1::run_phased_methylation_smoke(&target, &args.worker_principal) {
+    let receipt = match y1::run_phased_methylation_smoke(&target) {
         Ok(receipt) => receipt,
         Err(error) => {
             drop(report_file);

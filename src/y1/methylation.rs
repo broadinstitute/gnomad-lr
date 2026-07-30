@@ -36,6 +36,7 @@ const PHASED_METHYLATION_SMOKE_CHROM: &str = "chr22";
 const PHASED_METHYLATION_SMOKE_START: u32 = 20_000_000;
 const PHASED_METHYLATION_SMOKE_STOP: u32 = 20_010_000;
 const PHASED_METHYLATION_SMOKE_TABLE: &str = "lr_y1_methylation_phased_staging";
+const PHASED_METHYLATION_SMOKE_PRINCIPAL: &str = "gnomad_lr_y1_worker";
 const SMOKE_KEY_HASH_DOMAIN: &[u8] = b"phased-methylation-smoke-key-v1";
 const SMOKE_CONTENT_HASH_DOMAIN: &[u8] = b"phased-methylation-smoke-content-v1";
 
@@ -926,14 +927,38 @@ fn encode_rowbinary_string(value: &str, output: &mut Vec<u8>) -> anyhow::Result<
     Ok(())
 }
 
+fn validate_smoke_release_identity(
+    backend_revision: &str,
+    worker_build_identity: &str,
+) -> anyhow::Result<()> {
+    if backend_revision.len() != 40
+        || !backend_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("phased-methylation smoke requires a full lowercase 40-hex backend revision");
+    }
+    let expected = format!("gnomad-lr/{backend_revision}/host-release/features-clickhouse");
+    if worker_build_identity != expected {
+        bail!(
+            "phased-methylation smoke requires the clean revision-bound host release identity {expected:?}; got {worker_build_identity:?}"
+        );
+    }
+    Ok(())
+}
+
 /// Execute the only repository-authorized phased-methylation smoke. No caller
-/// can select a manifest, source URI, sample, haplotype, layer, or interval.
+/// can select a manifest, source URI, sample, haplotype, layer, interval,
+/// authentication mode, credential variable names, or expected principal.
 pub fn run_phased_methylation_smoke(
     target: &ClickHouseTarget,
-    expected_principal: &str,
 ) -> anyhow::Result<PhasedMethylationSmokeReceipt> {
+    validate_smoke_release_identity(
+        crate::pool::BACKEND_REVISION,
+        crate::pool::WORKER_BUILD_IDENTITY,
+    )?;
     let prepared = prepare_phased_methylation_smoke(target)?;
-    let authenticated_principal = target.attest_current_user(expected_principal)?;
+    let authenticated_principal = target.attest_current_user(PHASED_METHYLATION_SMOKE_PRINCIPAL)?;
     target.attest_synchronous_inserts()?;
     attest_fresh_y1_schema(target)?;
 
@@ -1674,6 +1699,40 @@ mod tests {
         fn readback(&self) -> anyhow::Result<SmokeReadback> {
             self.readback_calls.set(self.readback_calls.get() + 1);
             Ok(self.readback.clone())
+        }
+    }
+
+    #[test]
+    fn smoke_release_identity_rejects_unversioned_dirty_and_nonrelease_builds() {
+        let revision = "5".repeat(40);
+        let release = format!("gnomad-lr/{revision}/host-release/features-clickhouse");
+        assert!(validate_smoke_release_identity(&revision, &release).is_ok());
+
+        for (candidate_revision, candidate_identity) in [
+            (
+                "unversioned-development-build".to_string(),
+                "gnomad-lr/0.1.0/development-build".to_string(),
+            ),
+            (
+                revision.clone(),
+                format!("gnomad-lr/{revision}-dirty/host-release/features-clickhouse"),
+            ),
+            (
+                revision.clone(),
+                format!("gnomad-lr/{revision}/host-test/features-clickhouse"),
+            ),
+            (
+                "A".repeat(40),
+                format!(
+                    "gnomad-lr/{}/host-release/features-clickhouse",
+                    "A".repeat(40)
+                ),
+            ),
+        ] {
+            assert!(
+                validate_smoke_release_identity(&candidate_revision, &candidate_identity).is_err(),
+                "accepted revision={candidate_revision:?} identity={candidate_identity:?}"
+            );
         }
     }
 
