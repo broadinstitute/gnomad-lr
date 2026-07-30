@@ -174,18 +174,20 @@
       "acquired_verified_on": "2026-07-29",
       "cohort": "hgsvc_hprc",
       "modality": "per_sample_methylation_total,per_haplotype_methylation",
-      "classification": "discovery_complete_immutable_identity_blocked",
-      "source_version": "terra-talk-LR-gnomADLR_supplement-gnomAD_LR-LR_sample-snapshot-pending",
+      "classification": "frozen_immutable_identity_runtime_reads_ready_load_blocked",
+      "source_version": "terra-talk-LR-gnomADLR_supplement-gnomAD_LR-LR_sample-2026-07-30T13:18:26Z-sha256-1c3314f2f1ea2e99374a31b8e858d5851021e3913e216574fd2ac83656879485",
       "uri": "methylation-phased-source-manifest.json",
       "immutable_uri": "repository file whose canonical payload hash is recorded in content_sha256",
-      "generation": "none; blocked contract is not load-ready",
-      "byte_size": 680346,
+      "generation": "none; repository manifest binds each remote object generation independently",
+      "byte_size": 1791265,
       "checksum": {
         "algorithm": "canonical_json_sha256",
-        "value": "b2124fa4a427b88f4446e519217ee9290593a068212f69167d7fc931688e9806"
+        "value": "f585cbc2b806dcb52944af2ecabe634338a41323f89e3938336235c7729e8743"
       },
       "sidecars": [
-        "haplotype-methylation-source-manifest.tsv (SHA-256 a0ea03cb7af9a0bf39ca6831bb93c02acfcc71606ee3427dbf9abded28e2bca4)"
+        "haplotype-methylation-source-manifest.tsv (SHA-256 a0ea03cb7af9a0bf39ca6831bb93c02acfcc71606ee3427dbf9abded28e2bca4)",
+        "terra-lr-sample-normalized-snapshot.json (SHA-256 1c3314f2f1ea2e99374a31b8e858d5851021e3913e216574fd2ac83656879485)",
+        "methylation-phased-gcs-object-metadata.tsv (SHA-256 9250ef5a4df19d03621c6db6f06d7065f12ca6727baf2513b086d54bba18908c)"
       ],
       "coordinate_convention": "GRCh38 BED 0-based half-open [start0,end0); canonical browser position=start0+1",
       "schema_contract": "exact nine columns: chrom,start0,end0,mod_score,type,coverage,estimated_modified_count,estimated_unmodified_count,discretized_mod_score; Total/hap1/hap2 are separate typed layers",
@@ -218,8 +220,8 @@
       ],
       "expected_sample_count": 292,
       "expected_sample_ids": "exact sorted samples array in methylation-phased-source-manifest.json with 292=231+60+1 classification",
-      "license_scientific_provenance": "gnomAD data terms; narrow Terra LR_sample discovery paths are frozen, but the entity snapshot and immutable per-object metadata are not yet available.",
-      "allowed_serving_mode": "blocked_missing_immutable_source_metadata_and_join_orientation"
+      "license_scientific_provenance": "gnomAD data terms; exact normalized Terra LR_sample snapshot and all 1,386 GCS generation/size/MD5/create/update identities are frozen. source_haplotype remains a source BED label, not VCF phase orientation.",
+      "allowed_serving_mode": "blocked_pending_atomic_attempt_ledger_and_join_orientation"
     },
     {
       "id": "shared-grch38-gene-annotations-unresolved",

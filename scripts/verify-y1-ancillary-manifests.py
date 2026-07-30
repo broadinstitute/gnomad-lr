@@ -182,44 +182,33 @@ for entry in samples:
     else:
         assert all(obj["discovery_uri"] is None for obj in entry["objects"].values())
 
-# This checked D0 contract is intentionally blocked. If a future generated
-# manifest is load-ready, the alternate branch requires complete immutable
-# identity for all six objects before verification can pass.
-if v2["load_readiness"]["load_authorized"]:
-    assert v2["terra_entity_snapshot"]["captured_at"]
-    assert v2["terra_entity_snapshot"]["entity_snapshot_sha256"]
-    for entry in by_status["source_present"]:
-        assert entry["authorized_object_count"] == 6
-        for obj in entry["objects"].values():
-            immutable = obj["immutable_identity"]
-            assert obj["load_authorized"] is True
-            require_fields(immutable, {"uri", "generation", "byte_size", "checksum", "created_at", "immutable_read_uri"}, entry["entry_id"])
-            assert immutable["generation"].isdigit() and immutable["byte_size"] > 0
-            assert immutable["checksum"]["algorithm"] != "none" and immutable["checksum"]["value"]
-            assert immutable["immutable_read_uri"] != immutable["uri"]
-elif v2["terra_entity_snapshot"]["status"] == "frozen_normalized_snapshot_complete":
-    assert v2["load_readiness"]["status"] == "blocked_pending_runtime_immutable_identity_verification"
-    assert v2["load_readiness"]["blockers"] == [
-        "runtime generation/size/checksum revalidation and generation-bound GCS reads are not implemented"
-    ]
-    assert v2["terra_entity_snapshot"]["captured_at"]
-    assert v2["terra_entity_snapshot"]["entity_snapshot_sha256"]
-    for entry in by_status["source_present"]:
-        assert entry["authorized_object_count"] == 0
-        for obj in entry["objects"].values():
-            immutable = obj["immutable_identity"]
-            assert obj["load_authorized"] is False
-            require_fields(immutable, {"uri", "generation", "byte_size", "checksum", "created_at", "immutable_read_uri"}, entry["entry_id"])
-            assert immutable["generation"].isdigit() and immutable["byte_size"] > 0
-            assert immutable["checksum"]["algorithm"] != "none" and immutable["checksum"]["value"]
-            assert immutable["immutable_read_uri"] != immutable["uri"]
-else:
-    assert v2["load_readiness"]["status"] == "blocked_missing_immutable_source_metadata"
-    assert len(v2["load_readiness"]["blockers"]) == 3
-    assert v2["terra_entity_snapshot"]["captured_at"] is None
-    assert v2["terra_entity_snapshot"]["entity_snapshot_sha256"] is None
-    assert all(entry["authorized_object_count"] == 0 for entry in samples)
-    assert all(not obj["load_authorized"] and obj["immutable_identity"] is None for entry in samples for obj in entry["objects"].values())
+# Runtime immutable reads are ready, while overall loading remains blocked on
+# the explicitly separate atomic attempt-ledger/finalizer milestone.
+assert v2["load_readiness"] == {
+    "status": "blocked_pending_atomic_attempt_ledger",
+    "load_authorized": False,
+    "immutable_source_reads_ready": True,
+    "blockers": [
+        "atomic methylation attempt/lease ledger and direct-canonical finalizer are not implemented"
+    ],
+}
+assert v2["terra_entity_snapshot"]["entity_snapshot_sha256"] == "1c3314f2f1ea2e99374a31b8e858d5851021e3913e216574fd2ac83656879485"
+assert v2["gcs_object_metadata_ledger"]["sha256"] == "9250ef5a4df19d03621c6db6f06d7065f12ca6727baf2513b086d54bba18908c"
+assert "pending" not in v2["source_version"]
+for entry in by_status["source_present"]:
+    assert entry["authorized_object_count"] == 0
+    for obj in entry["objects"].values():
+        immutable = obj["immutable_identity"]
+        assert obj["load_authorized"] is False
+        require_fields(
+            immutable,
+            {"uri", "generation", "byte_size", "checksum", "created_at", "updated_at", "immutable_read_uri"},
+            entry["entry_id"],
+        )
+        assert immutable["generation"].isdigit() and immutable["byte_size"] > 0
+        assert immutable["checksum"]["algorithm"] == "md5_base64" and immutable["checksum"]["value"]
+        assert immutable["created_at"] and immutable["updated_at"]
+        assert immutable["immutable_read_uri"] == f"{immutable['uri']}?generation={immutable['generation']}"
 
 skip = by_status["source_marked_skip"][0]
 assert skip["sample_id"] == "HG00272" and skip["authorized_object_count"] == 0
@@ -246,4 +235,4 @@ assert all(source["allowed_serving_mode"] != "accepted_y1" for source in ancilla
     "inventory unexpectedly authorizes Y1 ancillary serving before acceptance"
 )
 
-print("Y1 ancillary manifests verified: v1 232-source history superseded; v2 is 292=231+60+1 and fail-closed on immutable metadata")
+print("Y1 ancillary manifests verified: v2 is frozen 292=231+60+1, immutable reads ready, and loading blocked on atomic ledger")

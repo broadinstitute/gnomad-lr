@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Generate the repository-owned Y1 phased methylation v2 manifest.
 
-The checked narrow discovery TSV establishes only sample membership and the four
-phased paths. It is deliberately insufficient to authorize a read. A normalized
-Terra entity snapshot can be supplied later, but must pin every object and a
-separately discovered combined BED index before the generated contract becomes
-load-ready. The Terra wide entity-table download is never an accepted input.
+The checked narrow discovery TSV establishes only sample membership and four
+phased paths. The repository-owned normalized Terra snapshot and accepted GCS
+metadata ledger bind all six objects per source-present sample, including the
+independently discovered combined BED index. The Terra wide entity-table
+response is never an accepted input, and loading remains blocked on the
+separate atomic attempt-ledger/finalizer milestone.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import json
@@ -20,6 +22,13 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = ROOT / "sources" / "y1"
 DISCOVERY_SHA256 = "a0ea03cb7af9a0bf39ca6831bb93c02acfcc71606ee3427dbf9abded28e2bca4"
+FROZEN_SNAPSHOT_SHA256 = "1c3314f2f1ea2e99374a31b8e858d5851021e3913e216574fd2ac83656879485"
+GCS_METADATA_SHA256 = "9250ef5a4df19d03621c6db6f06d7065f12ca6727baf2513b086d54bba18908c"
+GCS_METADATA_FIELDS = (
+    "sample_id", "slot", "source_field", "discovery_uri", "generation", "byte_size",
+    "checksum_algorithm", "checksum_value", "created_at", "updated_at", "immutable_read_uri",
+    "metageneration", "crc32c_base64", "md5_base64", "etag",
+)
 DISCOVERY_FIELDS = ("sample_id", "hap1_bed", "hap1_tbi", "hap2_bed", "hap2_tbi")
 TERRA_FIELDS = ("cpg_combined_bed", "cpg_hap1_bed", "cpg_hap1_bed_idx", "cpg_hap2_bed", "cpg_hap2_bed_idx")
 WORKSPACE = {"namespace": "talk-LR-gnomADLR_supplement", "name": "gnomAD_LR"}
@@ -33,10 +42,8 @@ OBJECT_SLOTS = {
     "hap2_bed": "cpg_hap2_bed",
     "hap2_bed_index": "cpg_hap2_bed_idx",
 }
-BLOCKERS = [
-    "frozen Terra LR_sample entity snapshot, capture time, and snapshot SHA-256 are unavailable",
-    "cpg_combined_bed paths and generation-pinned combined BED indexes are unavailable",
-    "object generations, byte sizes, checksums, creation times, and generation-bound read URIs are unavailable for the 231 phased source pairs",
+LOAD_BLOCKERS = [
+    "atomic methylation attempt/lease ledger and direct-canonical finalizer are not implemented"
 ]
 
 
@@ -136,17 +143,22 @@ def immutable_object(value: Any, label: str, expected_uri: str | None = None) ->
     if (
         not isinstance(checksum, dict)
         or set(checksum) != {"algorithm", "value"}
-        or not isinstance(checksum["algorithm"], str)
-        or not checksum["algorithm"]
-        or checksum["algorithm"] == "none"
+        or checksum["algorithm"] != "md5_base64"
         or not isinstance(checksum["value"], str)
         or not checksum["value"]
     ):
-        raise SystemExit(f"{label}: checksum must be complete")
+        raise SystemExit(f"{label}: checksum must be complete MD5/base64")
+    try:
+        decoded_md5 = base64.b64decode(checksum["value"], validate=True)
+    except (ValueError, base64.binascii.Error):
+        raise SystemExit(f"{label}: checksum must be valid MD5/base64") from None
+    if len(decoded_md5) != 16:
+        raise SystemExit(f"{label}: checksum must decode to exactly 16 MD5 bytes")
     if not isinstance(value["created_at"], str) or not value["created_at"]:
         raise SystemExit(f"{label}: created_at must be nonempty")
-    if not isinstance(value["immutable_read_uri"], str) or not value["immutable_read_uri"] or value["immutable_read_uri"] == value["uri"]:
-        raise SystemExit(f"{label}: immutable_read_uri must bind the read to immutable object identity")
+    expected_read_uri = f"{value['uri']}?generation={value['generation']}"
+    if value["immutable_read_uri"] != expected_read_uri:
+        raise SystemExit(f"{label}: immutable_read_uri must contain only the exact declared generation")
     return dict(value)
 
 
@@ -198,6 +210,61 @@ def read_snapshot(path: Path, roster: list[str], discovery: dict[str, dict[str, 
     }, resolved
 
 
+def read_metadata_ledger(
+    path: Path, immutable: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    raw = path.read_bytes()
+    actual_hash = sha256_bytes(raw)
+    if actual_hash != GCS_METADATA_SHA256:
+        raise SystemExit(
+            f"GCS metadata ledger SHA-256 drift: expected {GCS_METADATA_SHA256}, got {actual_hash}"
+        )
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if tuple(reader.fieldnames or ()) != GCS_METADATA_FIELDS:
+            raise SystemExit("GCS metadata ledger fields differ from the accepted frozen ledger")
+        rows = list(reader)
+    if len(rows) != 1386:
+        raise SystemExit(f"GCS metadata ledger must contain exactly 1386 rows, got {len(rows)}")
+
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        key = (row["sample_id"], row["slot"])
+        if key in seen:
+            raise SystemExit(f"duplicate GCS metadata identity for {key}")
+        seen.add(key)
+        sample = immutable.get(row["sample_id"])
+        if sample is None or row["slot"] not in sample:
+            raise SystemExit(f"GCS metadata ledger has cross-roster/slot identity {key}")
+        obj = sample[row["slot"]]
+        expected = {
+            "source_field": OBJECT_SLOTS[row["slot"]],
+            "discovery_uri": obj["uri"],
+            "generation": obj["generation"],
+            "byte_size": str(obj["byte_size"]),
+            "checksum_algorithm": obj["checksum"]["algorithm"],
+            "checksum_value": obj["checksum"]["value"],
+            "created_at": obj["created_at"],
+            "immutable_read_uri": obj["immutable_read_uri"],
+            "md5_base64": obj["checksum"]["value"],
+        }
+        for field, value in expected.items():
+            if row[field] != value:
+                raise SystemExit(f"{key}: GCS metadata ledger {field} differs from frozen snapshot")
+        if row["checksum_algorithm"] != "md5_base64" or not row["updated_at"]:
+            raise SystemExit(f"{key}: GCS metadata ledger lacks complete MD5/update metadata")
+        obj["updated_at"] = row["updated_at"]
+    if len(seen) != sum(len(objects) for objects in immutable.values()):
+        raise SystemExit("GCS metadata ledger does not cover every frozen object exactly once")
+    return {
+        "path": path.name,
+        "sha256": actual_hash,
+        "record_count": len(rows),
+        "fields": list(GCS_METADATA_FIELDS),
+        "status": "accepted_frozen_object_metadata_complete",
+    }
+
+
 def discovered_objects(row: dict[str, str]) -> dict[str, str | None]:
     return {
         "combined_bed": None,
@@ -209,7 +276,13 @@ def discovered_objects(row: dict[str, str]) -> dict[str, str | None]:
     }
 
 
-def generate(discovery_path: Path, roster_path: Path, historical_path: Path, terra_snapshot: Path | None) -> dict[str, Any]:
+def generate(
+    discovery_path: Path,
+    roster_path: Path,
+    historical_path: Path,
+    terra_snapshot: Path,
+    gcs_metadata_ledger: Path,
+) -> dict[str, Any]:
     discovery = read_discovery(discovery_path)
     roster = read_roster(roster_path)
     discovery_ids = set(discovery)
@@ -221,32 +294,21 @@ def generate(discovery_path: Path, roster_path: Path, historical_path: Path, ter
         raise SystemExit("roster classification must be exactly 292 = 231 source_present + 60 no_methylation_output + 1 source_marked_skip")
     history = validate_history(historical_path, discovery_ids)
 
-    if terra_snapshot is None:
-        terra = {
-            "workspace": WORKSPACE,
-            "entity_type": ENTITY_TYPE,
-            "source_fields": list(TERRA_FIELDS),
-            "captured_at": None,
-            "entity_snapshot_sha256": None,
-            "status": "blocked_missing_frozen_entity_snapshot",
-        }
-        immutable: dict[str, dict[str, Any]] = {}
-        readiness = {
-            "status": "blocked_missing_immutable_source_metadata",
-            "load_authorized": False,
-            "blockers": BLOCKERS,
-        }
-    else:
-        terra, immutable = read_snapshot(terra_snapshot, roster, discovery)
-        if set(immutable) != discovery_ids:
-            raise SystemExit("normalized Terra snapshot did not resolve all 231 source-present samples")
-        readiness = {
-            "status": "blocked_pending_runtime_immutable_identity_verification",
-            "load_authorized": False,
-            "blockers": [
-                "runtime generation/size/checksum revalidation and generation-bound GCS reads are not implemented"
-            ],
-        }
+    terra, immutable = read_snapshot(terra_snapshot, roster, discovery)
+    if terra["entity_snapshot_sha256"] != FROZEN_SNAPSHOT_SHA256:
+        raise SystemExit(
+            f"normalized Terra snapshot SHA-256 drift: expected {FROZEN_SNAPSHOT_SHA256}, "
+            f"got {terra['entity_snapshot_sha256']}"
+        )
+    if set(immutable) != discovery_ids:
+        raise SystemExit("normalized Terra snapshot did not resolve all 231 source-present samples")
+    metadata_ledger = read_metadata_ledger(gcs_metadata_ledger, immutable)
+    readiness = {
+        "status": "blocked_pending_atomic_attempt_ledger",
+        "load_authorized": False,
+        "immutable_source_reads_ready": True,
+        "blockers": LOAD_BLOCKERS,
+    }
 
     entries = []
     for sample_id in roster:
@@ -256,7 +318,7 @@ def generate(discovery_path: Path, roster_path: Path, historical_path: Path, ter
             discovered: dict[str, str | None] = {}
         elif sample_id in discovery:
             status = "source_present"
-            reason = "complete frozen discovery hap1/hap2 pair; immutable Terra/object metadata is required before loading"
+            reason = "complete frozen six-object generation/size/MD5 identity; loading remains blocked pending the atomic attempt ledger"
             discovered = discovered_objects(discovery[sample_id])
         else:
             status = "no_methylation_output"
@@ -290,7 +352,10 @@ def generate(discovery_path: Path, roster_path: Path, historical_path: Path, ter
         "cohort": "hgsvc_hprc",
         "reference_genome": "GRCh38",
         "modalities": ["per_sample_methylation_total", "per_haplotype_methylation"],
-        "source_version": "terra-talk-LR-gnomADLR_supplement-gnomAD_LR-LR_sample-snapshot-pending",
+        "source_version": (
+            "terra-talk-LR-gnomADLR_supplement-gnomAD_LR-LR_sample-"
+            f"2026-07-30T13:18:26Z-sha256-{FROZEN_SNAPSHOT_SHA256}"
+        ),
         "supersedes": history,
         "discovery_manifest": {
             "path": discovery_path.name,
@@ -300,6 +365,7 @@ def generate(discovery_path: Path, roster_path: Path, historical_path: Path, ter
             "wide_entity_table_used": False,
         },
         "terra_entity_snapshot": terra,
+        "gcs_object_metadata_ledger": metadata_ledger,
         "roster": {
             "path": roster_path.name,
             "expected_samples": len(roster),
@@ -333,12 +399,27 @@ def main() -> None:
     parser.add_argument("--discovery-manifest", type=Path, default=SOURCES / "haplotype-methylation-source-manifest.tsv")
     parser.add_argument("--roster", type=Path, default=SOURCES / "hgsvc_hprc_y1_chr22.roster.txt")
     parser.add_argument("--historical-manifest", type=Path, default=SOURCES / "methylation-sample-manifest.json")
-    parser.add_argument("--terra-snapshot", type=Path)
+    parser.add_argument(
+        "--terra-snapshot",
+        type=Path,
+        default=SOURCES / "terra-lr-sample-normalized-snapshot.json",
+    )
+    parser.add_argument(
+        "--gcs-metadata-ledger",
+        type=Path,
+        default=SOURCES / "methylation-phased-gcs-object-metadata.tsv",
+    )
     parser.add_argument("--output", type=Path, default=SOURCES / "methylation-phased-source-manifest.json")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
 
-    payload = generate(args.discovery_manifest, args.roster, args.historical_manifest, args.terra_snapshot)
+    payload = generate(
+        args.discovery_manifest,
+        args.roster,
+        args.historical_manifest,
+        args.terra_snapshot,
+        args.gcs_metadata_ledger,
+    )
     encoded = json.dumps(payload, indent=2) + "\n"
     if args.check:
         if not args.output.exists() or args.output.read_text() != encoded:

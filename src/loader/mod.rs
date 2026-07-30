@@ -2,6 +2,7 @@ pub mod bed_reader;
 pub mod coverage;
 pub mod haplotypes;
 pub mod histograms;
+pub mod immutable_gcs;
 pub mod metadata;
 pub mod methylation;
 pub mod prescan;

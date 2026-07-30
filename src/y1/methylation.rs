@@ -5,10 +5,12 @@
 //! resolves generation-bound read identities from the repository v2 manifest
 //! and is restricted to a fenced scratch [`ClickHouseTarget`]. The checked D0
 //! manifest is intentionally blocked, so no source read or database mutation is
-//! currently authorized.
+//! authorized until the separate atomic attempt ledger exists. The immutable
+//! reader is implemented and independently testable without weakening that gate.
 
 use super::contig::grch38_contig_length;
 use super::{ClickHouseTarget, TargetKind};
+use crate::loader::immutable_gcs::{HttpGcsBackend, ImmutableGcsObject};
 use crate::loader::strict_bed_reader::{StrictBedLines, StrictBedStream, ValidatedBedRecord};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -258,6 +261,7 @@ pub struct ImmutableObjectIdentity {
     checksum_algorithm: String,
     checksum: String,
     created_at: String,
+    updated_at: String,
     immutable_read_uri: String,
 }
 
@@ -281,8 +285,8 @@ pub struct PreparedMethylationAttempt {
 }
 
 /// Resolve a typed task against the checked immutable manifest. This performs
-/// no read and no ClickHouse mutation. The checked D0 manifest fails here with
-/// its exact missing-metadata blockers.
+/// no read and no ClickHouse mutation. The frozen manifest remains blocked here
+/// solely on the separate atomic attempt-ledger/finalizer milestone.
 pub fn prepare_methylation_attempt(
     target: &ClickHouseTarget,
     task: &Y1MethylationTaskSpec,
@@ -339,12 +343,11 @@ pub fn prepare_methylation_attempt(
             .unwrap_or_else(|| "unspecified manifest readiness blocker".to_string());
         bail!("methylation v2 source is not load-ready: {blockers}");
     }
-    // Shape validation of repository metadata is not runtime object validation.
-    // Keep even a hand-edited/rehashed load_authorized manifest blocked until a
-    // concrete GCS implementation revalidates metadata and binds both reads to
-    // the declared generations without a check/read TOCTOU gap.
-    if !runtime_immutable_reads_enabled() || !runtime_atomic_methylation_ledger_enabled() {
-        bail!("Y1 methylation runtime generation/size/checksum verification, generation-bound reads, and atomic attempt/lease ownership are not implemented");
+    // Shape validation of repository metadata is not runtime object validation;
+    // open_prepared_methylation_records performs exact-generation GCS checks.
+    // Overall loading remains independently blocked on attempt/lease ownership.
+    if !runtime_atomic_methylation_ledger_enabled() {
+        bail!("Y1 methylation loading is disabled until the separate atomic attempt/lease ledger milestone is implemented");
     }
 
     let entry = manifest
@@ -405,10 +408,6 @@ pub fn prepare_methylation_attempt(
     })
 }
 
-fn runtime_immutable_reads_enabled() -> bool {
-    false
-}
-
 fn runtime_atomic_methylation_ledger_enabled() -> bool {
     false
 }
@@ -467,8 +466,22 @@ fn resolve_immutable_object(
         checksum_algorithm: checksum_string("algorithm")?,
         checksum: checksum_string("value")?,
         created_at: string("created_at")?,
+        updated_at: string("updated_at")?,
         immutable_read_uri,
     })
+}
+
+impl ImmutableObjectIdentity {
+    fn as_gcs_object(&self) -> ImmutableGcsObject {
+        ImmutableGcsObject {
+            uri: self.uri.clone(),
+            generation: self.generation.clone(),
+            byte_size: self.byte_size,
+            checksum_algorithm: self.checksum_algorithm.clone(),
+            checksum: self.checksum.clone(),
+            immutable_read_uri: self.immutable_read_uri.clone(),
+        }
+    }
 }
 
 /// Open the generation-bound prepared source and parse strict records lazily.
@@ -476,9 +489,14 @@ pub fn open_prepared_methylation_records(
     prepared: &PreparedMethylationAttempt,
 ) -> anyhow::Result<MethylationRecordStream> {
     let expected_type = prepared.expected_type;
-    let lines = StrictBedStream::open_region(
-        &prepared.source.immutable_read_uri,
-        &prepared.index.immutable_read_uri,
+    let backend =
+        Arc::new(HttpGcsBackend::new().context(
+            "failed to initialize read-only GCS backend for immutable methylation source",
+        )?);
+    let lines = StrictBedStream::open_immutable_region(
+        backend,
+        &prepared.source.as_gcs_object(),
+        &prepared.index.as_gcs_object(),
         &prepared.chrom,
         prepared.start,
         prepared.stop,
@@ -815,7 +833,7 @@ mod tests {
             reference_genome: "GRCh38".into(),
             source_manifest_id: "hgsvc-hprc-y1-phased-methylation-v2".into(),
             source_manifest_hash:
-                "b2124fa4a427b88f4446e519217ee9290593a068212f69167d7fc931688e9806".into(),
+                "f585cbc2b806dcb52944af2ecabe634338a41323f89e3938336235c7729e8743".into(),
             manifest_entry_id: "hgsvc_hprc:HG00097".into(),
             data_layer: MethylationDataLayer::SourcePhased,
             source_haplotype: Some(SourceHaplotype::Hap1),
@@ -909,13 +927,11 @@ mod tests {
         .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("not load-ready"));
-        assert!(message.contains("frozen Terra LR_sample entity snapshot"));
-        assert!(message.contains("generation-pinned combined BED indexes"));
-        assert!(message.contains("generation-bound read URIs"));
+        assert!(message.contains("atomic methylation attempt/lease ledger"));
     }
 
     #[test]
-    fn rehashed_load_authorized_manifest_still_cannot_bypass_runtime_identity_gate() {
+    fn rehashed_load_authorized_manifest_still_cannot_bypass_atomic_ledger_gate() {
         let source_path = Path::new("sources/y1/methylation-phased-source-manifest.json");
         let mut manifest: Value =
             serde_json::from_slice(&std::fs::read(source_path).unwrap()).unwrap();
@@ -943,7 +959,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert!(error
             .to_string()
-            .contains("runtime generation/size/checksum verification"));
+            .contains("separate atomic attempt/lease ledger milestone"));
     }
 
     fn finalization_spec(data_layer: MethylationDataLayer) -> Y1MethylationFinalizationSpec {

@@ -3,14 +3,20 @@
 //! This intentionally does not replace the legacy `BedStream`. Every open,
 //! index, decode, worker, and line-shape failure is observable as an error item.
 
+use crate::loader::immutable_gcs::{
+    validate_source_index_pair, ImmutableGcsBackend, ImmutableGcsObject, ImmutableGcsReader,
+};
 use anyhow::{bail, Context};
+#[cfg(test)]
 use genohype_core::io::get_reader;
+use genohype_core::io::BoxedReader;
 use noodles::bgzf;
 use noodles::csi::BinningIndex;
 use noodles::tabix;
 use std::io::{BufRead, BufReader, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 const ZERO_CHUNK_VALIDATION_MAX_DECOMPRESSED_BYTES: u64 = 1024 * 1024;
@@ -55,6 +61,7 @@ pub struct StrictBedStream {
 impl StrictBedStream {
     /// Open an explicitly indexed BED source for a one-based inclusive browser
     /// interval. The equivalent BED interval is `[start - 1, stop)`.
+    #[cfg(test)]
     pub fn open_region<V>(
         bed_path: &str,
         index_path: &str,
@@ -75,9 +82,63 @@ impl StrictBedStream {
 
         let index = load_tabix_index(index_path)
             .with_context(|| format!("failed to load required tabix index {index_path}"))?;
+        // Open synchronously even for a zero-chunk query. A successful zero-row
+        // receipt still attests that the declared source object was openable.
+        let reader = open_bed_source(bed_path)?;
+        Self::open_readers(reader, index, chrom, start, stop, validator, false)
+    }
+
+    /// Open a BED/TBI pair only after both exact GCS generations have been
+    /// metadata-revalidated. Every subsequent range request remains generation
+    /// qualified and response-bound by [`ImmutableGcsReader`].
+    pub fn open_immutable_region<V>(
+        backend: Arc<dyn ImmutableGcsBackend>,
+        bed: &ImmutableGcsObject,
+        index: &ImmutableGcsObject,
+        chrom: &str,
+        start: u32,
+        stop: u32,
+        validator: V,
+    ) -> anyhow::Result<Self>
+    where
+        V: StrictBedRecordValidator,
+    {
+        if start == 0 || start > stop {
+            bail!("browser interval must be nonempty and one-based inclusive");
+        }
+        validate_source_index_pair(bed, index)?;
+        let index_reader = ImmutableGcsReader::open(backend.clone(), index)
+            .context("failed to open immutable generation-bound tabix index")?;
+        let index = load_tabix_index_reader(Box::new(index_reader))
+            .context("failed to decode immutable generation-bound tabix index")?;
+        let bed_reader = ImmutableGcsReader::open(backend, bed)
+            .context("failed to open immutable generation-bound BED source")?;
+        Self::open_readers(
+            Box::new(bed_reader),
+            index,
+            chrom,
+            start,
+            stop,
+            validator,
+            true,
+        )
+    }
+
+    fn open_readers<V>(
+        reader: BoxedReader,
+        index: tabix::Index,
+        chrom: &str,
+        start: u32,
+        stop: u32,
+        validator: V,
+        immutable_pair_verified: bool,
+    ) -> anyhow::Result<Self>
+    where
+        V: StrictBedRecordValidator,
+    {
         let index_header = index
             .header()
-            .ok_or_else(|| anyhow::anyhow!("tabix index {index_path} has no header"))?;
+            .ok_or_else(|| anyhow::anyhow!("tabix index has no header"))?;
         let line_comment_prefix = index_header.line_comment_prefix();
         let ref_seq_id = index_header
             .reference_sequence_names()
@@ -86,12 +147,7 @@ impl StrictBedStream {
                 let bytes: &[u8] = name.as_ref();
                 bytes == chrom.as_bytes()
             })
-            .ok_or_else(|| {
-                anyhow::anyhow!("chrom {chrom} not found in tabix index {index_path}")
-            })?;
-
-        // noodles intervals are one-based. This is the same genomic interval as
-        // BED/tabix [start - 1, stop); post-filtering below uses BED start0.
+            .ok_or_else(|| anyhow::anyhow!("chrom {chrom} not found in tabix index"))?;
         let interval_start = noodles::core::Position::try_from(start as usize)?;
         let interval_end = noodles::core::Position::try_from(stop as usize)?;
         let interval = noodles::core::region::Interval::from(interval_start..=interval_end);
@@ -99,15 +155,16 @@ impl StrictBedStream {
             .query(ref_seq_id, interval)
             .with_context(|| format!("failed to query tabix chunks for {chrom}:{start}-{stop}"))?;
 
-        // Open synchronously even for a zero-chunk query. A successful zero-row
-        // receipt still attests that the declared source object was openable;
-        // missing/revoked sources must never be converted to clean EOF.
-        let reader = open_bed_source(bed_path)?;
         if chunks.is_empty() {
+            if immutable_pair_verified {
+                return Ok(Self {
+                    lines: StrictBedLines::spawn(|_| Ok(())),
+                });
+            }
             validate_zero_chunk_source(reader, &index, &validator).with_context(|| {
                 format!("zero-chunk source/index validation failed for {chrom}:{start}-{stop}")
             })?;
-            unreachable!("zero-chunk completion is disabled until an exact binding exists");
+            unreachable!("unbound zero-chunk completion is disabled");
         }
         let chrom = chrom.to_string();
         let source_start0 = start - 1;
@@ -355,27 +412,40 @@ where
     }
 }
 
+#[cfg(test)]
 fn open_bed_source(bed_path: &str) -> anyhow::Result<genohype_core::io::BoxedReader> {
     get_reader(bed_path).with_context(|| format!("failed to open strict BED source {bed_path}"))
 }
 
+#[cfg(test)]
 fn load_tabix_index(index_path: &str) -> anyhow::Result<tabix::Index> {
     let reader = get_reader(index_path)
         .with_context(|| format!("failed to open tabix index {index_path}"))?;
+    load_tabix_index_reader(reader)
+        .with_context(|| format!("failed to decode tabix index {index_path}"))
+}
+
+fn load_tabix_index_reader(reader: BoxedReader) -> anyhow::Result<tabix::Index> {
     let mut tbi_reader = tabix::io::Reader::new(reader);
     tbi_reader
         .read_index()
-        .with_context(|| format!("failed to decode tabix index {index_path}"))
+        .context("failed to decode tabix index")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loader::immutable_gcs::{
+        GcsObjectMetadata, GcsObjectRequest, GcsRangeResponse, ImmutableGcsObject,
+    };
     use crate::y1::methylation::{parse_methylation_source_record, MethylationSourceType};
     use noodles::core::Position;
     use noodles::csi::binning_index::index::reference_sequence::bin::Chunk;
+    use std::collections::BTreeMap;
     use std::io::{Cursor, Write};
+    use std::ops::Range;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_path(label: &str) -> PathBuf {
@@ -482,6 +552,55 @@ mod tests {
     fn remove_fixture(bed_path: &PathBuf, index_path: &PathBuf) {
         let _ = std::fs::remove_file(bed_path);
         let _ = std::fs::remove_file(index_path);
+    }
+
+    struct FixtureGcsBackend {
+        objects: BTreeMap<String, Vec<u8>>,
+        ranges: Mutex<Vec<(String, String, Range<u64>)>>,
+    }
+
+    impl ImmutableGcsBackend for FixtureGcsBackend {
+        fn metadata(&self, request: &GcsObjectRequest) -> anyhow::Result<GcsObjectMetadata> {
+            let bytes = self
+                .objects
+                .get(&request.object)
+                .ok_or_else(|| anyhow::anyhow!("missing fixture object"))?;
+            Ok(GcsObjectMetadata {
+                generation: request.generation.clone(),
+                byte_size: bytes.len() as u64,
+                md5_base64: request.md5_base64.clone(),
+            })
+        }
+
+        fn read_range(
+            &self,
+            request: &GcsObjectRequest,
+            range: Range<u64>,
+        ) -> anyhow::Result<GcsRangeResponse> {
+            self.ranges.lock().unwrap().push((
+                request.object.clone(),
+                request.generation.clone(),
+                range.clone(),
+            ));
+            let bytes = self.objects.get(&request.object).unwrap();
+            Ok(GcsRangeResponse {
+                generation: request.generation.clone(),
+                total_size: bytes.len() as u64,
+                range_start: range.start,
+                data: bytes[range.start as usize..range.end as usize].to_vec(),
+            })
+        }
+    }
+
+    fn immutable_fixture_object(uri: &str, generation: &str, size: usize) -> ImmutableGcsObject {
+        ImmutableGcsObject {
+            uri: uri.to_string(),
+            generation: generation.to_string(),
+            byte_size: size as u64,
+            checksum_algorithm: "md5_base64".into(),
+            checksum: "Mhw89IbtUJFk7eweGYH+yA==".into(),
+            immutable_read_uri: format!("{uri}?generation={generation}"),
+        }
     }
 
     #[test]
@@ -610,6 +729,43 @@ mod tests {
                 "chr22\t149\t150\t25\tTotal\t4\t1\t3\t25".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn immutable_generation_bound_backend_reads_bed_and_tbi_successfully() {
+        let (bed_path, index_path) = indexed_fixture("immutable-backend");
+        let bed_bytes = std::fs::read(&bed_path).unwrap();
+        let index_bytes = std::fs::read(&index_path).unwrap();
+        remove_fixture(&bed_path, &index_path);
+        let bed_uri = "gs://fixture/HG00097.hap1.bed.gz";
+        let index_uri = "gs://fixture/HG00097.hap1.bed.gz.tbi";
+        let backend = Arc::new(FixtureGcsBackend {
+            objects: BTreeMap::from([
+                ("HG00097.hap1.bed.gz".into(), bed_bytes.clone()),
+                ("HG00097.hap1.bed.gz.tbi".into(), index_bytes.clone()),
+            ]),
+            ranges: Mutex::new(Vec::new()),
+        });
+        let rows: anyhow::Result<Vec<_>> = StrictBedStream::open_immutable_region(
+            backend.clone(),
+            &immutable_fixture_object(bed_uri, "42", bed_bytes.len()),
+            &immutable_fixture_object(index_uri, "43", index_bytes.len()),
+            "chr22",
+            100,
+            150,
+            total_validator(),
+        )
+        .unwrap()
+        .records()
+        .collect();
+        assert_eq!(rows.unwrap().len(), 2);
+        let ranges = backend.ranges.lock().unwrap();
+        assert!(ranges
+            .iter()
+            .any(|(object, generation, _)| { object.ends_with(".bed.gz") && generation == "42" }));
+        assert!(ranges
+            .iter()
+            .any(|(object, generation, _)| { object.ends_with(".tbi") && generation == "43" }));
     }
 
     #[test]
