@@ -141,7 +141,7 @@ pub struct MirrorTaskObject {
     pub immutable_read_uri: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhasedMirrorTaskSpec {
     pub schema_version: u16,
@@ -452,10 +452,51 @@ fn exact_task_object(object: &LedgerObject) -> MirrorTaskObject {
     }
 }
 
+fn descriptor_ordinal(descriptor_id: &str) -> anyhow::Result<usize> {
+    let encoded = descriptor_id
+        .strip_prefix("custom_")
+        .ok_or_else(|| anyhow::anyhow!("phased mirror descriptor ID is not canonical custom_N"))?;
+    if encoded.is_empty()
+        || !encoded.bytes().all(|byte| byte.is_ascii_digit())
+        || (encoded.len() > 1 && encoded.starts_with('0'))
+    {
+        bail!("phased mirror descriptor ID is not canonical custom_N");
+    }
+    encoded
+        .parse()
+        .context("phased mirror descriptor ordinal is out of range")
+}
+
+fn canonical_task(descriptor_id: &str) -> anyhow::Result<&'static PhasedMirrorTaskSpec> {
+    let ordinal = descriptor_ordinal(descriptor_id)?;
+    static TASKS: OnceCell<Vec<PhasedMirrorTaskSpec>> = OnceCell::new();
+    let tasks = TASKS.get_or_try_init(|| {
+        let tasks: Vec<PhasedMirrorTaskSpec> = serde_json::from_str(include_str!(
+            "../../manifests/y1/phased-methylation-mirror-chr22-canary.json"
+        ))
+        .context("checked phased mirror task manifest is invalid")?;
+        if tasks.len() != 462 {
+            bail!("checked phased mirror task manifest does not contain 462 tasks");
+        }
+        Ok::<_, anyhow::Error>(tasks)
+    })?;
+    let task = tasks
+        .get(ordinal)
+        .ok_or_else(|| anyhow::anyhow!("phased mirror descriptor ordinal is out of range"))?;
+    if task.coordinator_task_id != descriptor_id {
+        bail!("checked phased mirror task manifest is not canonically ordered");
+    }
+    Ok(task)
+}
+
 pub fn validate_task_against_ledger(
     task: &PhasedMirrorTaskSpec,
     descriptor_id: &str,
 ) -> anyhow::Result<()> {
+    let expected = canonical_task(descriptor_id)?;
+    if task != expected {
+        bail!("phased mirror task does not equal its canonical manifest ordinal");
+    }
     task.validate_shape(descriptor_id)?;
     let ledger = verified_ledger()?;
     let objects = ledger
@@ -852,6 +893,39 @@ mod tests {
         assert_eq!(tasks.len(), 462);
         for (index, task) in tasks.iter().enumerate() {
             validate_task_against_ledger(task, &format!("custom_{index}")).unwrap();
+        }
+    }
+
+    #[test]
+    fn complete_valid_task_cannot_move_to_another_ordinal() {
+        let tasks: Vec<PhasedMirrorTaskSpec> = serde_json::from_str(include_str!(
+            "../../manifests/y1/phased-methylation-mirror-chr22-canary.json"
+        ))
+        .unwrap();
+        let mut moved = tasks[2].clone();
+        moved.coordinator_task_id = "custom_0".into();
+        assert!(validate_task_against_ledger(&moved, "custom_0").is_err());
+    }
+
+    #[test]
+    fn noncanonical_and_out_of_range_descriptor_ids_fail() {
+        let task = manifest_task();
+        for descriptor_id in [
+            "custom_00",
+            "custom_01",
+            "custom_",
+            "custom_-1",
+            "custom_+1",
+            "custom_462",
+            "custom_999999999999999999999999999999999999999999999999",
+            "other_0",
+        ] {
+            let mut rewritten = task.clone();
+            rewritten.coordinator_task_id = descriptor_id.into();
+            assert!(
+                validate_task_against_ledger(&rewritten, descriptor_id).is_err(),
+                "{descriptor_id}"
+            );
         }
     }
 
