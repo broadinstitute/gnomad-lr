@@ -1,10 +1,11 @@
--- Raw source-phased rows. source_haplotype is the BED hap1/hap2 label (1/2),
--- not a VCF strand. Joined serving remains blocked until orientation approval.
+-- Reserved compatibility table. Operational v5 phased attempts write directly
+-- to lr_y1_methylation_phased; this exact-shape table is not a publication hop.
 CREATE TABLE IF NOT EXISTS lr_y1_methylation_phased_staging (
-    ancillary_run_id String, attempt_id String,
+    ancillary_run_id String, task_id String, attempt_id String, lease_id String,
     release LowCardinality(String), cohort LowCardinality(String),
     reference_genome LowCardinality(String), modality LowCardinality(String),
-    source_version String, chrom LowCardinality(String),
+    source_version String, source_manifest_hash FixedString(64),
+    manifest_entry_id String, chrom LowCardinality(String),
     source_start0 UInt32, source_end0 UInt32, position UInt32,
     sample_id LowCardinality(String), source_haplotype UInt8,
     methylation Float32, coverage UInt32,
@@ -12,4 +13,4 @@ CREATE TABLE IF NOT EXISTS lr_y1_methylation_phased_staging (
     discretized_methylation Float32
 ) ENGINE = MergeTree()
 PARTITION BY (release, cohort, reference_genome, chrom, ancillary_run_id)
-ORDER BY (ancillary_run_id, attempt_id, chrom, position, sample_id, source_haplotype);
+ORDER BY (ancillary_run_id, task_id, attempt_id, lease_id, chrom, position, sample_id, source_haplotype);

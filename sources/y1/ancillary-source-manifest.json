@@ -168,21 +168,21 @@
       "mutable_convenience_uri": "gs://gnomad-lr-data/ancillary/methylation/methylation/"
     },
     {
-      "id": "hgsvc-hprc-phased-methylation-v2-blocked",
+      "id": "hgsvc-hprc-phased-methylation-v2-raw-smoke-ready",
       "release": "y1",
       "reference_genome": "GRCh38",
       "acquired_verified_on": "2026-07-29",
       "cohort": "hgsvc_hprc",
       "modality": "per_sample_methylation_total,per_haplotype_methylation",
-      "classification": "frozen_immutable_identity_runtime_reads_ready_load_blocked",
+      "classification": "frozen_immutable_identity_fenced_raw_smoke_ready_join_blocked",
       "source_version": "terra-talk-LR-gnomADLR_supplement-gnomAD_LR-LR_sample-2026-07-30T13:18:26Z-sha256-1c3314f2f1ea2e99374a31b8e858d5851021e3913e216574fd2ac83656879485",
       "uri": "methylation-phased-source-manifest.json",
       "immutable_uri": "repository file whose canonical payload hash is recorded in content_sha256",
       "generation": "none; repository manifest binds each remote object generation independently",
-      "byte_size": 1791265,
+      "byte_size": 1787579,
       "checksum": {
         "algorithm": "canonical_json_sha256",
-        "value": "f585cbc2b806dcb52944af2ecabe634338a41323f89e3938336235c7729e8743"
+        "value": "08e394bd5d4cb25f0d830403f54773b32b77eb072443df3931ca577ae54d5ec2"
       },
       "sidecars": [
         "haplotype-methylation-source-manifest.tsv (SHA-256 a0ea03cb7af9a0bf39ca6831bb93c02acfcc71606ee3427dbf9abded28e2bca4)",
@@ -221,7 +221,7 @@
       "expected_sample_count": 292,
       "expected_sample_ids": "exact sorted samples array in methylation-phased-source-manifest.json with 292=231+60+1 classification",
       "license_scientific_provenance": "gnomAD data terms; exact normalized Terra LR_sample snapshot and all 1,386 GCS generation/size/MD5/create/update identities are frozen. source_haplotype remains a source BED label, not VCF phase orientation.",
-      "allowed_serving_mode": "blocked_pending_atomic_attempt_ledger_and_join_orientation"
+      "allowed_serving_mode": "blocked_join_pending_orientation_raw_smoke_allowed"
     },
     {
       "id": "shared-grch38-gene-annotations-unresolved",

@@ -1,15 +1,14 @@
-//! Typed, fail-closed Y1 methylation foundation.
+//! Typed, fail-closed Y1 methylation loading and in-place raw finalization.
 //!
-//! This module does not adapt the legacy methylation command or pool action. A
-//! task names a checked manifest entry, never a path or sample ID. Preparation
-//! resolves generation-bound read identities from the repository v2 manifest
-//! and is restricted to a fenced scratch [`ClickHouseTarget`]. The checked D0
-//! manifest is intentionally blocked, so no source read or database mutation is
-//! authorized until the separate atomic attempt ledger exists. The immutable
-//! reader is implemented and independently testable without weakening that gate.
+//! This path never adapts the legacy free-form methylation command. A task names
+//! an exact checked manifest entry plus run/task/attempt/lease ownership. Workers
+//! append principal-bound receipts and write directly to the inactive canonical
+//! raw table; finalization fences that principal, resolves one authoritative
+//! ledger snapshot, removes failed-attempt prefixes, and freezes without an
+//! active pointer or joined-serving authorization.
 
 use super::contig::grch38_contig_length;
-use super::{ClickHouseTarget, TargetKind};
+use super::{ClickHouseTarget, TargetKind, WorkerWriteFence};
 use crate::loader::immutable_gcs::{HttpGcsBackend, ImmutableGcsObject};
 use crate::loader::strict_bed_reader::{StrictBedLines, StrictBedStream, ValidatedBedRecord};
 use anyhow::{bail, Context};
@@ -19,6 +18,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +32,20 @@ impl MethylationDataLayer {
         match self {
             Self::SampleTotal => "per_sample_methylation_total",
             Self::SourcePhased => "per_haplotype_methylation",
+        }
+    }
+
+    fn value(self) -> &'static str {
+        match self {
+            Self::SampleTotal => "sample_total",
+            Self::SourcePhased => "source_phased",
+        }
+    }
+
+    fn table(self) -> &'static str {
+        match self {
+            Self::SampleTotal => "lr_y1_methylation",
+            Self::SourcePhased => "lr_y1_methylation_phased",
         }
     }
 }
@@ -189,6 +203,8 @@ pub struct Y1MethylationTaskSpec {
     pub task_id: String,
     pub attempt_id: String,
     pub lease_id: String,
+    /// Unix epoch milliseconds after which this assignment may not write or be finalized.
+    pub lease_expires_at_ms: u64,
     pub release: String,
     pub cohort: String,
     pub reference_genome: String,
@@ -225,6 +241,9 @@ impl Y1MethylationTaskSpec {
         {
             bail!("Y1 methylation tasks are restricted to y1/hgsvc_hprc/GRCh38");
         }
+        if self.lease_expires_at_ms == 0 {
+            bail!("methylation task requires a nonzero lease_expires_at_ms");
+        }
         if self.source_manifest_hash.len() != 64
             || !self
                 .source_manifest_hash
@@ -253,7 +272,7 @@ impl Y1MethylationTaskSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ImmutableObjectIdentity {
     uri: String,
     generation: String,
@@ -271,11 +290,15 @@ pub struct PreparedMethylationAttempt {
     task_id: String,
     attempt_id: String,
     lease_id: String,
+    lease_expires_at_ms: u64,
+    source_manifest_id: String,
     source_manifest_hash: String,
     manifest_entry_id: String,
     sample_id: String,
     data_layer: MethylationDataLayer,
     source_haplotype: Option<SourceHaplotype>,
+    source_object_slot: String,
+    source_index_object_slot: String,
     expected_type: MethylationSourceType,
     chrom: String,
     start: u32,
@@ -285,8 +308,7 @@ pub struct PreparedMethylationAttempt {
 }
 
 /// Resolve a typed task against the checked immutable manifest. This performs
-/// no read and no ClickHouse mutation. The frozen manifest remains blocked here
-/// solely on the separate atomic attempt-ledger/finalizer milestone.
+/// no source read and no ClickHouse mutation.
 pub fn prepare_methylation_attempt(
     target: &ClickHouseTarget,
     task: &Y1MethylationTaskSpec,
@@ -345,11 +367,6 @@ pub fn prepare_methylation_attempt(
     }
     // Shape validation of repository metadata is not runtime object validation;
     // open_prepared_methylation_records performs exact-generation GCS checks.
-    // Overall loading remains independently blocked on attempt/lease ownership.
-    if !runtime_atomic_methylation_ledger_enabled() {
-        bail!("Y1 methylation loading is disabled until the separate atomic attempt/lease ledger milestone is implemented");
-    }
-
     let entry = manifest
         .get("samples")
         .and_then(Value::as_array)
@@ -394,11 +411,15 @@ pub fn prepare_methylation_attempt(
         task_id: task.task_id.clone(),
         attempt_id: task.attempt_id.clone(),
         lease_id: task.lease_id.clone(),
+        lease_expires_at_ms: task.lease_expires_at_ms,
+        source_manifest_id: task.source_manifest_id.clone(),
         source_manifest_hash: recorded_hash,
         manifest_entry_id: task.manifest_entry_id.clone(),
         sample_id: sample_id.to_string(),
         data_layer: task.data_layer,
         source_haplotype: task.source_haplotype,
+        source_object_slot: source_slot.to_string(),
+        source_index_object_slot: index_slot.to_string(),
         expected_type,
         chrom: task.chrom.clone(),
         start: task.start,
@@ -406,10 +427,6 @@ pub fn prepare_methylation_attempt(
         source,
         index,
     })
-}
-
-fn runtime_atomic_methylation_ledger_enabled() -> bool {
-    false
 }
 
 fn resolve_immutable_object(
@@ -557,6 +574,656 @@ impl Iterator for MethylationRecordStream {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MethylationAttemptCounts {
+    pub source_rows: u64,
+    pub canonical_rows: u64,
+    pub reject_rows: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MethylationAttemptReport {
+    pub identity: MethylationTaskOwnerIdentity,
+    pub worker_principal: String,
+    pub source_manifest_id: String,
+    pub source: ImmutableObjectIdentity,
+    pub index: ImmutableObjectIdentity,
+    pub state: MethylationLedgerState,
+    pub counts: MethylationAttemptCounts,
+    pub key_hash: String,
+    pub content_hash: String,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub elapsed_ms: u128,
+    pub canonical_table: String,
+    pub error: Option<String>,
+    pub published: bool,
+    pub joined_serving_allowed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MethylationAttemptReceipt {
+    ancillary_run_id: String,
+    modality: String,
+    chrom: String,
+    task_id: String,
+    attempt_id: String,
+    lease_id: String,
+    lease_expires_at_ms: u64,
+    worker_principal: String,
+    release: String,
+    cohort: String,
+    reference_genome: String,
+    sample_id: String,
+    data_layer: String,
+    source_haplotype: Option<u8>,
+    source_manifest_id: String,
+    source_manifest_hash: String,
+    manifest_entry_id: String,
+    source_object_slot: String,
+    source_uri: String,
+    source_generation: String,
+    source_size_bytes: u64,
+    source_checksum_algorithm: String,
+    source_checksum: String,
+    source_index_object_slot: String,
+    source_index_uri: String,
+    source_index_generation: String,
+    source_index_size_bytes: u64,
+    source_index_checksum_algorithm: String,
+    source_index_checksum: String,
+    interval_start: u32,
+    interval_end: u32,
+    state: String,
+    source_rows: u64,
+    staged_rows: u64,
+    reject_rows: u64,
+    key_hash: String,
+    content_hash: String,
+    error: Option<String>,
+    started_at_ms: u64,
+    finished_at_ms: u64,
+    revision: u64,
+}
+
+impl MethylationAttemptReceipt {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        prepared: &PreparedMethylationAttempt,
+        worker_principal: &str,
+        state: MethylationLedgerState,
+        counts: MethylationAttemptCounts,
+        key_hash: String,
+        content_hash: String,
+        error: Option<String>,
+        started_at_ms: u64,
+        finished_at_ms: u64,
+        revision: u64,
+    ) -> Self {
+        Self {
+            ancillary_run_id: prepared.ancillary_run_id.clone(),
+            modality: prepared.data_layer.modality().to_string(),
+            chrom: prepared.chrom.clone(),
+            task_id: prepared.task_id.clone(),
+            attempt_id: prepared.attempt_id.clone(),
+            lease_id: prepared.lease_id.clone(),
+            lease_expires_at_ms: prepared.lease_expires_at_ms,
+            worker_principal: worker_principal.to_string(),
+            release: "y1".into(),
+            cohort: "hgsvc_hprc".into(),
+            reference_genome: "GRCh38".into(),
+            sample_id: prepared.sample_id.clone(),
+            data_layer: prepared.data_layer.value().to_string(),
+            source_haplotype: prepared.source_haplotype.map(SourceHaplotype::value),
+            source_manifest_id: prepared.source_manifest_id.clone(),
+            source_manifest_hash: prepared.source_manifest_hash.clone(),
+            manifest_entry_id: prepared.manifest_entry_id.clone(),
+            source_object_slot: prepared.source_object_slot.clone(),
+            source_uri: prepared.source.uri.clone(),
+            source_generation: prepared.source.generation.clone(),
+            source_size_bytes: prepared.source.byte_size,
+            source_checksum_algorithm: prepared.source.checksum_algorithm.clone(),
+            source_checksum: prepared.source.checksum.clone(),
+            source_index_object_slot: prepared.source_index_object_slot.clone(),
+            source_index_uri: prepared.index.uri.clone(),
+            source_index_generation: prepared.index.generation.clone(),
+            source_index_size_bytes: prepared.index.byte_size,
+            source_index_checksum_algorithm: prepared.index.checksum_algorithm.clone(),
+            source_index_checksum: prepared.index.checksum.clone(),
+            interval_start: prepared.start,
+            interval_end: prepared.stop,
+            state: match state {
+                MethylationLedgerState::Running => "running",
+                MethylationLedgerState::Failed => "failed",
+                MethylationLedgerState::Accepted => "accepted",
+            }
+            .into(),
+            source_rows: counts.source_rows,
+            staged_rows: counts.canonical_rows,
+            reject_rows: counts.reject_rows,
+            key_hash,
+            content_hash,
+            error,
+            started_at_ms,
+            finished_at_ms,
+            revision,
+        }
+    }
+
+    fn owner_identity(&self) -> MethylationTaskOwnerIdentity {
+        MethylationTaskOwnerIdentity {
+            ancillary_run_id: self.ancillary_run_id.clone(),
+            task_id: self.task_id.clone(),
+            attempt_id: self.attempt_id.clone(),
+            lease_id: self.lease_id.clone(),
+            data_layer: match self.data_layer.as_str() {
+                "sample_total" => MethylationDataLayer::SampleTotal,
+                "source_phased" => MethylationDataLayer::SourcePhased,
+                _ => MethylationDataLayer::SampleTotal,
+            },
+            sample_id: self.sample_id.clone(),
+            source_haplotype: match self.source_haplotype {
+                None => None,
+                Some(1) => Some(SourceHaplotype::Hap1),
+                Some(2) => Some(SourceHaplotype::Hap2),
+                Some(_) => None,
+            },
+            chrom: self.chrom.clone(),
+            start: self.interval_start,
+            stop: self.interval_end,
+            source_manifest_hash: self.source_manifest_hash.clone(),
+            manifest_entry_id: self.manifest_entry_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CanonicalAttemptSnapshot {
+    rows: u64,
+    unique_keys: u64,
+    identity_violations: u64,
+    min_position: u32,
+    max_position: u32,
+}
+
+#[derive(Debug)]
+struct CanonicalHashes {
+    rows: u64,
+    key_hash: String,
+    content_hash: String,
+}
+
+fn epoch_ms() -> anyhow::Result<u64> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+    )?)
+}
+
+fn revision_now() -> anyhow::Result<u64> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+    )?)
+}
+
+fn latest_task_receipts(
+    target: &ClickHouseTarget,
+    ancillary_run_id: &str,
+    modality: &str,
+    chrom: &str,
+    task_id: Option<&str>,
+) -> anyhow::Result<Vec<MethylationAttemptReceipt>> {
+    let task_filter = if task_id.is_some() {
+        " AND task_id = {task_id:String}"
+    } else {
+        ""
+    };
+    let query = format!(
+        r#"WITH current_revisions AS (
+    SELECT task_id, max(revision) AS revision
+    FROM lr_y1_ancillary_task_attempts
+    WHERE ancillary_run_id = {{run:String}} AND modality = {{modality:String}} AND chrom = {{chrom:String}}{task_filter}
+    GROUP BY task_id
+)
+SELECT a.*
+FROM lr_y1_ancillary_task_attempts AS a
+INNER JOIN current_revisions AS c USING (task_id, revision)
+WHERE a.ancillary_run_id = {{run:String}} AND a.modality = {{modality:String}} AND a.chrom = {{chrom:String}}{task_filter}
+ORDER BY task_id, attempt_id, lease_id
+FORMAT JSONEachRow"#
+    );
+    let mut parameters = vec![
+        ("run", ancillary_run_id),
+        ("modality", modality),
+        ("chrom", chrom),
+    ];
+    if let Some(task_id) = task_id {
+        parameters.push(("task_id", task_id));
+    }
+    let body = target.query_text(&query, &parameters)?;
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .context("authoritative methylation ledger snapshot returned malformed JSON")
+        })
+        .collect()
+}
+
+fn receipt_matches_prepared(
+    receipt: &MethylationAttemptReceipt,
+    prepared: &PreparedMethylationAttempt,
+    worker_principal: &str,
+) -> bool {
+    receipt.ancillary_run_id == prepared.ancillary_run_id
+        && receipt.modality == prepared.data_layer.modality()
+        && receipt.chrom == prepared.chrom
+        && receipt.task_id == prepared.task_id
+        && receipt.attempt_id == prepared.attempt_id
+        && receipt.lease_id == prepared.lease_id
+        && receipt.lease_expires_at_ms == prepared.lease_expires_at_ms
+        && receipt.worker_principal == worker_principal
+        && receipt.release == "y1"
+        && receipt.cohort == "hgsvc_hprc"
+        && receipt.reference_genome == "GRCh38"
+        && receipt.sample_id == prepared.sample_id
+        && receipt.data_layer == prepared.data_layer.value()
+        && receipt.source_haplotype == prepared.source_haplotype.map(SourceHaplotype::value)
+        && receipt.source_manifest_id == prepared.source_manifest_id
+        && receipt.source_manifest_hash == prepared.source_manifest_hash
+        && receipt.manifest_entry_id == prepared.manifest_entry_id
+        && receipt.source_object_slot == prepared.source_object_slot
+        && receipt.source_uri == prepared.source.uri
+        && receipt.source_generation == prepared.source.generation
+        && receipt.source_size_bytes == prepared.source.byte_size
+        && receipt.source_checksum_algorithm == prepared.source.checksum_algorithm
+        && receipt.source_checksum == prepared.source.checksum
+        && receipt.source_index_object_slot == prepared.source_index_object_slot
+        && receipt.source_index_uri == prepared.index.uri
+        && receipt.source_index_generation == prepared.index.generation
+        && receipt.source_index_size_bytes == prepared.index.byte_size
+        && receipt.source_index_checksum_algorithm == prepared.index.checksum_algorithm
+        && receipt.source_index_checksum == prepared.index.checksum
+        && receipt.interval_start == prepared.start
+        && receipt.interval_end == prepared.stop
+}
+
+fn validate_claim_predecessor(
+    current: &[MethylationAttemptReceipt],
+    prepared: &PreparedMethylationAttempt,
+    now_ms: u64,
+) -> anyhow::Result<()> {
+    if current.len() > 1 {
+        bail!("methylation task has duplicate maximum-revision owners");
+    }
+    let Some(previous) = current.first() else {
+        return Ok(());
+    };
+    if previous.attempt_id == prepared.attempt_id || previous.lease_id == prepared.lease_id {
+        bail!("methylation retry must use a new attempt and lease identity");
+    }
+    match previous.state.as_str() {
+        "failed" => Ok(()),
+        "running" if previous.lease_expires_at_ms <= now_ms => Ok(()),
+        "running" => bail!("methylation task already has an unexpired current lease owner"),
+        "accepted" => bail!("methylation task already has an accepted current owner"),
+        _ => bail!("methylation task has an unsupported current ledger state"),
+    }
+}
+
+fn record_attempt_receipt(
+    target: &ClickHouseTarget,
+    receipt: &MethylationAttemptReceipt,
+) -> anyhow::Result<()> {
+    target.insert_json_each_row(
+        "lr_y1_ancillary_task_attempts",
+        std::slice::from_ref(receipt),
+    )
+}
+
+fn ensure_current_claim(
+    target: &ClickHouseTarget,
+    prepared: &PreparedMethylationAttempt,
+    worker_principal: &str,
+    claim_revision: u64,
+    now_ms: u64,
+) -> anyhow::Result<()> {
+    if now_ms >= prepared.lease_expires_at_ms {
+        bail!("methylation attempt lease expired");
+    }
+    let current = latest_task_receipts(
+        target,
+        &prepared.ancillary_run_id,
+        prepared.data_layer.modality(),
+        &prepared.chrom,
+        Some(&prepared.task_id),
+    )?;
+    if current.len() != 1
+        || current[0].revision != claim_revision
+        || current[0].state != "running"
+        || !receipt_matches_prepared(&current[0], prepared, worker_principal)
+    {
+        bail!("methylation attempt no longer owns the exact current task/lease claim");
+    }
+    Ok(())
+}
+
+fn canonical_hashes(
+    target: &ClickHouseTarget,
+    prepared: &PreparedMethylationAttempt,
+) -> anyhow::Result<CanonicalHashes> {
+    let table = prepared.data_layer.table();
+    let haplotype = prepared
+        .source_haplotype
+        .map(|value| value.value().to_string())
+        .unwrap_or_default();
+    let parameters = vec![
+        ("run", prepared.ancillary_run_id.as_str()),
+        ("task", prepared.task_id.as_str()),
+        ("attempt", prepared.attempt_id.as_str()),
+        ("lease", prepared.lease_id.as_str()),
+        ("modality", prepared.data_layer.modality()),
+        ("source_version", prepared.source_manifest_id.as_str()),
+        ("manifest_hash", prepared.source_manifest_hash.as_str()),
+        ("manifest_entry", prepared.manifest_entry_id.as_str()),
+        ("chrom", prepared.chrom.as_str()),
+        ("sample", prepared.sample_id.as_str()),
+        ("haplotype", haplotype.as_str()),
+    ];
+    let filter = "ancillary_run_id = {run:String} AND task_id = {task:String} AND attempt_id = {attempt:String} AND lease_id = {lease:String}";
+    let source_haplotype = if prepared.data_layer == MethylationDataLayer::SourcePhased {
+        ", source_haplotype"
+    } else {
+        ""
+    };
+    let body = target.query_text(
+        &format!(
+            "SELECT count() AS rows, uniqExact(tuple(chrom, position, sample_id{source_haplotype})) AS unique_keys, countIf(release != 'y1' OR cohort != 'hgsvc_hprc' OR reference_genome != 'GRCh38' OR modality != {{modality:String}} OR source_version != {{source_version:String}} OR source_manifest_hash != {{manifest_hash:String}} OR manifest_entry_id != {{manifest_entry:String}} OR chrom != {{chrom:String}} OR sample_id != {{sample:String}} OR source_start0 + 1 != source_end0 OR source_end0 != position OR position < {} OR position > {}{}) AS identity_violations, if(count()=0,0,min(position)) AS min_position, if(count()=0,0,max(position)) AS max_position FROM {table} WHERE {filter} FORMAT JSONEachRow",
+            prepared.start,
+            prepared.stop,
+            prepared.source_haplotype.map(|_| " OR source_haplotype != {haplotype:UInt8}".to_string()).unwrap_or_default(),
+        ),
+        &parameters,
+    )?;
+    let snapshot: CanonicalAttemptSnapshot =
+        serde_json::from_str(body.trim()).context("invalid methylation canonical snapshot")?;
+    if snapshot.identity_violations != 0
+        || snapshot.unique_keys != snapshot.rows
+        || (snapshot.rows != 0
+            && (snapshot.min_position < prepared.start || snapshot.max_position > prepared.stop))
+    {
+        bail!("methylation canonical attempt contains duplicate or cross-identity rows");
+    }
+    let key_columns = format!("chrom,position,sample_id{source_haplotype}");
+    let content_columns = if prepared.data_layer == MethylationDataLayer::SourcePhased {
+        "ancillary_run_id,task_id,attempt_id,lease_id,release,cohort,reference_genome,modality,source_version,source_manifest_hash,manifest_entry_id,chrom,source_start0,source_end0,position,sample_id,source_haplotype,methylation,coverage,estimated_modified_count,estimated_unmodified_count,discretized_methylation"
+    } else {
+        "ancillary_run_id,task_id,attempt_id,lease_id,release,cohort,reference_genome,modality,source_version,source_manifest_hash,manifest_entry_id,chrom,source_start0,source_end0,position,sample_id,methylation,coverage,estimated_modified_count,estimated_unmodified_count,discretized_methylation"
+    };
+    let order = format!("chrom,position,sample_id{source_haplotype}");
+    let domain = format!(
+        "methylation-key-v1\0{}\0{}\0{}\0{}\0{}",
+        prepared.ancillary_run_id,
+        prepared.task_id,
+        prepared.attempt_id,
+        prepared.lease_id,
+        snapshot.rows
+    );
+    let key_hash = target.query_sha256(
+        &format!(
+            "SELECT {key_columns} FROM {table} WHERE {filter} ORDER BY {order} FORMAT RowBinary"
+        ),
+        &parameters,
+        domain.as_bytes(),
+    )?;
+    let content_hash = target.query_sha256(
+        &format!("SELECT {content_columns} FROM {table} WHERE {filter} ORDER BY {order} FORMAT RowBinary"),
+        &parameters,
+        domain.replace("key-v1", "content-v1").as_bytes(),
+    )?;
+    Ok(CanonicalHashes {
+        rows: snapshot.rows,
+        key_hash,
+        content_hash,
+    })
+}
+
+fn claim_methylation_attempt(
+    target: &ClickHouseTarget,
+    prepared: &PreparedMethylationAttempt,
+    worker_principal: &str,
+    started_at_ms: u64,
+) -> anyhow::Result<(u64, CanonicalHashes)> {
+    let current = latest_task_receipts(
+        target,
+        &prepared.ancillary_run_id,
+        prepared.data_layer.modality(),
+        &prepared.chrom,
+        Some(&prepared.task_id),
+    )?;
+    validate_claim_predecessor(&current, prepared, started_at_ms)?;
+    let initial = canonical_hashes(target, prepared)?;
+    if initial.rows != 0 {
+        bail!("methylation attempt has orphan canonical rows before its claim");
+    }
+    let revision = revision_now()?;
+    let receipt = MethylationAttemptReceipt::new(
+        prepared,
+        worker_principal,
+        MethylationLedgerState::Running,
+        MethylationAttemptCounts {
+            source_rows: 0,
+            canonical_rows: 0,
+            reject_rows: 0,
+        },
+        initial.key_hash.clone(),
+        initial.content_hash.clone(),
+        None,
+        started_at_ms,
+        started_at_ms,
+        revision,
+    );
+    record_attempt_receipt(target, &receipt)?;
+    ensure_current_claim(target, prepared, worker_principal, revision, started_at_ms)?;
+    Ok((revision, initial))
+}
+
+fn methylation_json_row(
+    prepared: &PreparedMethylationAttempt,
+    record: &MethylationRecord,
+) -> Value {
+    let mut row = serde_json::json!({
+        "ancillary_run_id": prepared.ancillary_run_id,
+        "task_id": prepared.task_id,
+        "attempt_id": prepared.attempt_id,
+        "lease_id": prepared.lease_id,
+        "release": "y1",
+        "cohort": "hgsvc_hprc",
+        "reference_genome": "GRCh38",
+        "modality": prepared.data_layer.modality(),
+        "source_version": prepared.source_manifest_id,
+        "source_manifest_hash": prepared.source_manifest_hash,
+        "manifest_entry_id": prepared.manifest_entry_id,
+        "chrom": record.chrom,
+        "source_start0": record.source_start0,
+        "source_end0": record.source_end0,
+        "position": record.position,
+        "sample_id": prepared.sample_id,
+        "methylation": record.methylation,
+        "coverage": record.coverage,
+        "estimated_modified_count": record.estimated_modified_count,
+        "estimated_unmodified_count": record.estimated_unmodified_count,
+        "discretized_methylation": record.discretized_methylation,
+    });
+    if let Some(haplotype) = prepared.source_haplotype {
+        row["source_haplotype"] = Value::from(haplotype.value());
+    }
+    row
+}
+
+/// Claim and execute one exact typed interval attempt against the frozen source
+/// manifest. Every acknowledged batch is synchronously inserted into the
+/// inactive direct-canonical table and fenced by a current lease recheck.
+pub fn run_methylation_interval_attempt(
+    target: &ClickHouseTarget,
+    task: &Y1MethylationTaskSpec,
+    descriptor_id: &str,
+    manifest_path: &Path,
+    worker_principal: &str,
+    batch_records: usize,
+) -> anyhow::Result<MethylationAttemptReport> {
+    if batch_records == 0 {
+        bail!("methylation batch_records must be greater than zero");
+    }
+    let prepared = prepare_methylation_attempt(target, task, descriptor_id, manifest_path)?;
+    let authenticated = target
+        .attest_current_user(worker_principal)
+        .context("failed to bind methylation attempt to currentUser()")?;
+    target.attest_synchronous_inserts()?;
+    let started_at_ms = epoch_ms()?;
+    if started_at_ms >= prepared.lease_expires_at_ms {
+        bail!("methylation attempt lease is already expired");
+    }
+    let started = Instant::now();
+    let (claim_revision, _) =
+        claim_methylation_attempt(target, &prepared, &authenticated, started_at_ms)?;
+    let mut source_rows = 0u64;
+    let mut reject_rows = 0u64;
+    let execution = (|| -> anyhow::Result<()> {
+        let mut batch = Vec::with_capacity(batch_records);
+        for record in open_prepared_methylation_records(&prepared)? {
+            match record {
+                Ok(record) => {
+                    source_rows = source_rows.checked_add(1).context("source row overflow")?;
+                    batch.push(methylation_json_row(&prepared, &record));
+                }
+                Err(error) => {
+                    reject_rows = reject_rows.checked_add(1).context("reject row overflow")?;
+                    return Err(error);
+                }
+            }
+            if batch.len() == batch_records {
+                ensure_current_claim(
+                    target,
+                    &prepared,
+                    &authenticated,
+                    claim_revision,
+                    epoch_ms()?,
+                )?;
+                target.insert_json_each_row(prepared.data_layer.table(), &batch)?;
+                batch.clear();
+            }
+        }
+        if !batch.is_empty() {
+            ensure_current_claim(
+                target,
+                &prepared,
+                &authenticated,
+                claim_revision,
+                epoch_ms()?,
+            )?;
+            target.insert_json_each_row(prepared.data_layer.table(), &batch)?;
+        }
+        Ok(())
+    })();
+
+    ensure_current_claim(
+        target,
+        &prepared,
+        &authenticated,
+        claim_revision,
+        epoch_ms()?,
+    )
+    .context("stale/superseded methylation worker may not emit a terminal receipt")?;
+    let hashes = canonical_hashes(target, &prepared)?;
+    let accepted =
+        execution.is_ok() && reject_rows == 0 && hashes.rows == source_rows && source_rows != 0;
+    let error = if accepted {
+        None
+    } else {
+        Some(match execution {
+            Ok(()) if source_rows == 0 => "methylation interval produced no records".to_string(),
+            Ok(()) => format!(
+                "canonical rows {} do not equal parsed source rows {} or rejects were observed",
+                hashes.rows, source_rows
+            ),
+            Err(error) => format!("{error:#}"),
+        })
+    };
+    let finished_at_ms = epoch_ms()?;
+    ensure_current_claim(
+        target,
+        &prepared,
+        &authenticated,
+        claim_revision,
+        finished_at_ms,
+    )
+    .context("methylation lease expired or was superseded before terminal persistence")?;
+    let counts = MethylationAttemptCounts {
+        source_rows,
+        canonical_rows: hashes.rows,
+        reject_rows,
+    };
+    let state = if accepted {
+        MethylationLedgerState::Accepted
+    } else {
+        MethylationLedgerState::Failed
+    };
+    let terminal_revision = revision_now()?.max(
+        claim_revision
+            .checked_add(1)
+            .context("methylation claim revision overflow")?,
+    );
+    let terminal = MethylationAttemptReceipt::new(
+        &prepared,
+        &authenticated,
+        state,
+        counts.clone(),
+        hashes.key_hash.clone(),
+        hashes.content_hash.clone(),
+        error.clone(),
+        started_at_ms,
+        finished_at_ms,
+        terminal_revision,
+    );
+    record_attempt_receipt(target, &terminal)?;
+    let current = latest_task_receipts(
+        target,
+        &prepared.ancillary_run_id,
+        prepared.data_layer.modality(),
+        &prepared.chrom,
+        Some(&prepared.task_id),
+    )?;
+    if current.len() != 1
+        || current[0].revision != terminal_revision
+        || current[0].state != terminal.state
+        || !receipt_matches_prepared(&current[0], &prepared, &authenticated)
+    {
+        bail!("methylation terminal receipt was superseded or ambiguously persisted");
+    }
+    let report = MethylationAttemptReport {
+        identity: terminal.owner_identity(),
+        worker_principal: authenticated,
+        source_manifest_id: prepared.source_manifest_id,
+        source: prepared.source,
+        index: prepared.index,
+        state,
+        counts,
+        key_hash: hashes.key_hash,
+        content_hash: hashes.content_hash,
+        started_at_ms,
+        finished_at_ms,
+        elapsed_ms: started.elapsed().as_millis(),
+        canonical_table: prepared.data_layer.table().into(),
+        error: error.clone(),
+        published: false,
+        joined_serving_allowed: false,
+    };
+    if let Some(error) = error {
+        bail!("methylation attempt failed after durable terminal receipt: {error}");
+    }
+    Ok(report)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Y1MethylationFinalizationSpec {
@@ -572,7 +1239,7 @@ pub struct Y1MethylationFinalizationSpec {
 }
 
 /// Exact current task owner recorded by an authoritative expected-task set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MethylationTaskOwnerIdentity {
     pub ancillary_run_id: String,
     pub task_id: String,
@@ -588,7 +1255,7 @@ pub struct MethylationTaskOwnerIdentity {
     pub manifest_entry_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MethylationLedgerState {
     Running,
@@ -596,7 +1263,7 @@ pub enum MethylationLedgerState {
     Accepted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MethylationLeaseOwnership {
     Current,
@@ -611,9 +1278,8 @@ pub struct MethylationResolvedAttempt {
     pub ownership: MethylationLeaseOwnership,
 }
 
-/// A provider may create this only after one atomic read has resolved both the
-/// expected task owners and the latest attempt states. No such provider exists
-/// in D0; this type documents the non-bypassable finalization boundary.
+/// Constructed only after one authoritative query has resolved both the exact
+/// expected task owners and their latest attempt/lease states.
 #[derive(Debug, Clone)]
 pub struct AuthoritativeMethylationLedgerSnapshot {
     atomically_resolved: bool,
@@ -632,15 +1298,670 @@ pub struct MethylationFinalizationPlan {
     pub joined_serving_allowed: bool,
 }
 
-/// Runtime finalization is deliberately unavailable until an atomic ownership
-/// ledger can produce [`AuthoritativeMethylationLedgerSnapshot`]. Caller-
-/// supplied accepted-attempt IDs are not part of this API.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct FrozenMethylationAttempt {
+    pub identity: MethylationTaskOwnerIdentity,
+    pub lease_expires_at_ms: u64,
+    pub worker_principal: String,
+    pub source_manifest_id: String,
+    pub source: ImmutableObjectIdentity,
+    pub index: ImmutableObjectIdentity,
+    pub counts: MethylationAttemptCounts,
+    pub key_hash: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MethylationFinalizationReport {
+    pub contract_version: u16,
+    pub schema_version: u16,
+    pub ancillary_run_id: String,
+    pub release: String,
+    pub cohort: String,
+    pub reference_genome: String,
+    pub modality: String,
+    pub data_layer: MethylationDataLayer,
+    pub chrom: String,
+    pub source_manifest_id: String,
+    pub source_manifest_hash: String,
+    pub task_manifest_sha256: String,
+    pub worker_principal: String,
+    pub operator_identity: String,
+    pub expected_tasks: u32,
+    pub source_rows: u64,
+    pub canonical_rows: u64,
+    pub reject_rows: u64,
+    pub key_hash: String,
+    pub content_hash: String,
+    pub frozen_at_ms: u64,
+    pub attempts: Vec<FrozenMethylationAttempt>,
+    pub frozen: bool,
+    pub accepted: bool,
+    pub pointer_activated: bool,
+    pub published: bool,
+    pub joined_serving_allowed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AncillaryRunReceipt<'a> {
+    ancillary_run_id: &'a str,
+    release: &'static str,
+    cohort: &'static str,
+    reference_genome: &'static str,
+    modality: &'a str,
+    data_layer: &'a str,
+    chrom: &'a str,
+    source_version: &'a str,
+    source_manifest_id: &'a str,
+    source_manifest_hash: &'a str,
+    scope: &'static str,
+    state: &'a str,
+    expected_tasks: u32,
+    source_rows: u64,
+    canonical_rows: u64,
+    reject_rows: u64,
+    key_hash: &'a str,
+    content_hash: &'a str,
+    worker_principal: &'a str,
+    peak_rss_bytes: u64,
+    frozen_at_ms: u64,
+    report_json: &'a str,
+    revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PhysicalContribution {
+    task_id: String,
+    attempt_id: String,
+    lease_id: String,
+}
+
+type SampleLayerIntervals = BTreeMap<(String, Option<u8>), Vec<(u32, u32)>>;
+
+fn validate_finalization_tasks(
+    target: &ClickHouseTarget,
+    tasks: &[Y1MethylationTaskSpec],
+    manifest_path: &Path,
+) -> anyhow::Result<Vec<PreparedMethylationAttempt>> {
+    let Some(first) = tasks.first() else {
+        bail!("methylation finalization task manifest is empty");
+    };
+    let mut task_ids = BTreeSet::new();
+    let mut attempts = BTreeSet::new();
+    let mut intervals = SampleLayerIntervals::new();
+    let mut prepared = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if task.ancillary_run_id != first.ancillary_run_id
+            || task.release != first.release
+            || task.cohort != first.cohort
+            || task.reference_genome != first.reference_genome
+            || task.source_manifest_id != first.source_manifest_id
+            || task.source_manifest_hash != first.source_manifest_hash
+            || task.data_layer != first.data_layer
+            || task.chrom != first.chrom
+        {
+            bail!("methylation finalization tasks change a run/layer/contig/manifest identity");
+        }
+        if !task_ids.insert(task.task_id.clone())
+            || !attempts.insert((task.attempt_id.clone(), task.lease_id.clone()))
+        {
+            bail!("methylation finalization manifest has duplicate task or attempt/lease identity");
+        }
+        let value =
+            prepare_methylation_attempt(target, task, &task.coordinator_task_id, manifest_path)?;
+        intervals
+            .entry((
+                value.sample_id.clone(),
+                value.source_haplotype.map(SourceHaplotype::value),
+            ))
+            .or_default()
+            .push((value.start, value.stop));
+        prepared.push(value);
+    }
+    for task_intervals in intervals.values_mut() {
+        task_intervals.sort_unstable();
+        if task_intervals.windows(2).any(|pair| pair[1].0 <= pair[0].1) {
+            bail!("methylation finalization manifest overlaps one sample/layer/haplotype interval");
+        }
+    }
+    Ok(prepared)
+}
+
+fn all_ledger_attempts(
+    target: &ClickHouseTarget,
+    prepared: &PreparedMethylationAttempt,
+) -> anyhow::Result<BTreeSet<(String, String, String)>> {
+    let body = target.query_text(
+        "SELECT task_id, attempt_id, lease_id FROM lr_y1_ancillary_task_attempts WHERE ancillary_run_id = {run:String} AND modality = {modality:String} AND chrom = {chrom:String} GROUP BY task_id, attempt_id, lease_id FORMAT JSONEachRow",
+        &[
+            ("run", &prepared.ancillary_run_id),
+            ("modality", prepared.data_layer.modality()),
+            ("chrom", &prepared.chrom),
+        ],
+    )?;
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let row: PhysicalContribution = serde_json::from_str(line)
+                .context("methylation ledger attempt inventory is malformed")?;
+            Ok((row.task_id, row.attempt_id, row.lease_id))
+        })
+        .collect()
+}
+
+fn physical_contributions(
+    target: &ClickHouseTarget,
+    prepared: &PreparedMethylationAttempt,
+) -> anyhow::Result<Vec<PhysicalContribution>> {
+    let body = target.query_text(
+        &format!(
+            "SELECT task_id, attempt_id, lease_id FROM {} WHERE ancillary_run_id = {{run:String}} GROUP BY task_id, attempt_id, lease_id ORDER BY task_id, attempt_id, lease_id FORMAT JSONEachRow",
+            prepared.data_layer.table()
+        ),
+        &[("run", &prepared.ancillary_run_id)],
+    )?;
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .context("methylation canonical contribution inventory is malformed")
+        })
+        .collect()
+}
+
+fn cleanup_nonaccepted_contributions(
+    target: &ClickHouseTarget,
+    prepared: &[PreparedMethylationAttempt],
+) -> anyhow::Result<()> {
+    let first = &prepared[0];
+    let known = all_ledger_attempts(target, first)?;
+    let accepted = prepared
+        .iter()
+        .map(|value| {
+            (
+                value.task_id.clone(),
+                value.attempt_id.clone(),
+                value.lease_id.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for row in physical_contributions(target, first)? {
+        let key = (row.task_id, row.attempt_id, row.lease_id);
+        if !known.contains(&key) {
+            bail!("orphan methylation canonical contribution has no attempt-ledger identity");
+        }
+        if !accepted.contains(&key) {
+            target.execute_with_params(
+                &format!(
+                    "ALTER TABLE {} DELETE WHERE ancillary_run_id = {{run:String}} AND task_id = {{task:String}} AND attempt_id = {{attempt:String}} AND lease_id = {{lease:String}} SETTINGS mutations_sync = 2",
+                    first.data_layer.table()
+                ),
+                &[
+                    ("run", &first.ancillary_run_id),
+                    ("task", &key.0),
+                    ("attempt", &key.1),
+                    ("lease", &key.2),
+                ],
+            )?;
+        }
+    }
+    let remaining = physical_contributions(target, first)?
+        .into_iter()
+        .map(|row| (row.task_id, row.attempt_id, row.lease_id))
+        .collect::<BTreeSet<_>>();
+    if remaining != accepted {
+        bail!("frozen methylation canonical contributions do not exactly equal accepted owners");
+    }
+    Ok(())
+}
+
+fn authoritative_snapshot(
+    target: &ClickHouseTarget,
+    prepared: &[PreparedMethylationAttempt],
+    worker_principal: &str,
+    frozen_at_ms: u64,
+) -> anyhow::Result<(
+    AuthoritativeMethylationLedgerSnapshot,
+    Vec<MethylationAttemptReceipt>,
+)> {
+    let first = &prepared[0];
+    let receipts = latest_task_receipts(
+        target,
+        &first.ancillary_run_id,
+        first.data_layer.modality(),
+        &first.chrom,
+        None,
+    )?;
+    if receipts.len() != prepared.len() {
+        bail!("authoritative methylation query did not return exactly one current owner per expected task");
+    }
+    let expected = prepared
+        .iter()
+        .map(|value| {
+            (
+                value.task_id.as_str(),
+                MethylationTaskOwnerIdentity {
+                    ancillary_run_id: value.ancillary_run_id.clone(),
+                    task_id: value.task_id.clone(),
+                    attempt_id: value.attempt_id.clone(),
+                    lease_id: value.lease_id.clone(),
+                    data_layer: value.data_layer,
+                    sample_id: value.sample_id.clone(),
+                    source_haplotype: value.source_haplotype,
+                    chrom: value.chrom.clone(),
+                    start: value.start,
+                    stop: value.stop,
+                    source_manifest_hash: value.source_manifest_hash.clone(),
+                    manifest_entry_id: value.manifest_entry_id.clone(),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let by_task = prepared
+        .iter()
+        .map(|value| (value.task_id.as_str(), value))
+        .collect::<BTreeMap<_, _>>();
+    let mut resolved = Vec::with_capacity(receipts.len());
+    for receipt in &receipts {
+        let value = by_task
+            .get(receipt.task_id.as_str())
+            .context("ledger contains a task outside the expected methylation manifest")?;
+        if !receipt_matches_prepared(receipt, value, worker_principal)
+            || receipt.state != "accepted"
+            || receipt.lease_expires_at_ms <= frozen_at_ms
+            || receipt.error.is_some()
+            || receipt.reject_rows != 0
+            || receipt.source_rows == 0
+            || receipt.source_rows != receipt.staged_rows
+            || receipt.key_hash.len() != 64
+            || receipt.content_hash.len() != 64
+        {
+            bail!("authoritative methylation owner is stale, expired, nonaccepted, malformed, or cross-identity");
+        }
+        resolved.push(MethylationResolvedAttempt {
+            identity: receipt.owner_identity(),
+            state: MethylationLedgerState::Accepted,
+            ownership: MethylationLeaseOwnership::Current,
+        });
+    }
+    Ok((
+        AuthoritativeMethylationLedgerSnapshot {
+            atomically_resolved: true,
+            expected_task_owners: expected.into_values().collect(),
+            resolved_attempts: resolved,
+        },
+        receipts,
+    ))
+}
+
+fn aggregate_attempt_hashes<'a>(
+    domain: &[u8],
+    values: impl Iterator<Item = (&'a str, &'a str, &'a str)>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    for (task, key, content) in values {
+        for value in [task, key, content] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn build_frozen_report(
+    target: &ClickHouseTarget,
+    prepared: &[PreparedMethylationAttempt],
+    receipts: &[MethylationAttemptReceipt],
+    worker_principal: &str,
+    operator_identity: &str,
+    task_manifest_sha256: &str,
+    frozen_at_ms: u64,
+) -> anyhow::Result<MethylationFinalizationReport> {
+    let first = &prepared[0];
+    let by_task = receipts
+        .iter()
+        .map(|receipt| (receipt.task_id.as_str(), receipt))
+        .collect::<BTreeMap<_, _>>();
+    let mut attempts = Vec::with_capacity(prepared.len());
+    let mut source_rows = 0u64;
+    let mut canonical_rows = 0u64;
+    for value in prepared {
+        let receipt = by_task
+            .get(value.task_id.as_str())
+            .context("accepted methylation owner disappeared")?;
+        let hashes = canonical_hashes(target, value)?;
+        if hashes.rows != receipt.staged_rows
+            || hashes.key_hash != receipt.key_hash
+            || hashes.content_hash != receipt.content_hash
+        {
+            bail!("frozen methylation rows differ from their accepted attempt receipt");
+        }
+        source_rows = source_rows
+            .checked_add(receipt.source_rows)
+            .context("methylation source row total overflow")?;
+        canonical_rows = canonical_rows
+            .checked_add(hashes.rows)
+            .context("methylation canonical row total overflow")?;
+        attempts.push(FrozenMethylationAttempt {
+            identity: receipt.owner_identity(),
+            lease_expires_at_ms: receipt.lease_expires_at_ms,
+            worker_principal: receipt.worker_principal.clone(),
+            source_manifest_id: receipt.source_manifest_id.clone(),
+            source: value.source.clone(),
+            index: value.index.clone(),
+            counts: MethylationAttemptCounts {
+                source_rows: receipt.source_rows,
+                canonical_rows: receipt.staged_rows,
+                reject_rows: receipt.reject_rows,
+            },
+            key_hash: receipt.key_hash.clone(),
+            content_hash: receipt.content_hash.clone(),
+        });
+    }
+    attempts.sort_by(|left, right| left.identity.task_id.cmp(&right.identity.task_id));
+    let key_hash = aggregate_attempt_hashes(
+        b"gnomad-lr-y1-methylation-frozen-keys-v1\0",
+        attempts.iter().map(|attempt| {
+            (
+                attempt.identity.task_id.as_str(),
+                attempt.key_hash.as_str(),
+                "",
+            )
+        }),
+    );
+    let content_hash = aggregate_attempt_hashes(
+        b"gnomad-lr-y1-methylation-frozen-content-v1\0",
+        attempts.iter().map(|attempt| {
+            (
+                attempt.identity.task_id.as_str(),
+                attempt.key_hash.as_str(),
+                attempt.content_hash.as_str(),
+            )
+        }),
+    );
+    Ok(MethylationFinalizationReport {
+        contract_version: 1,
+        schema_version: super::Y1_SCHEMA_VERSION,
+        ancillary_run_id: first.ancillary_run_id.clone(),
+        release: "y1".into(),
+        cohort: "hgsvc_hprc".into(),
+        reference_genome: "GRCh38".into(),
+        modality: first.data_layer.modality().into(),
+        data_layer: first.data_layer,
+        chrom: first.chrom.clone(),
+        source_manifest_id: first.source_manifest_id.clone(),
+        source_manifest_hash: first.source_manifest_hash.clone(),
+        task_manifest_sha256: task_manifest_sha256.into(),
+        worker_principal: worker_principal.into(),
+        operator_identity: operator_identity.into(),
+        expected_tasks: u32::try_from(prepared.len())?,
+        source_rows,
+        canonical_rows,
+        reject_rows: 0,
+        key_hash,
+        content_hash,
+        frozen_at_ms,
+        attempts,
+        frozen: true,
+        accepted: true,
+        pointer_activated: false,
+        published: false,
+        joined_serving_allowed: false,
+    })
+}
+
+fn record_ancillary_run(
+    target: &ClickHouseTarget,
+    prepared: &PreparedMethylationAttempt,
+    state: &str,
+    worker_principal: &str,
+    report: Option<&MethylationFinalizationReport>,
+    message: &str,
+) -> anyhow::Result<()> {
+    let zero = "0".repeat(64);
+    let report_json = match report {
+        Some(value) => serde_json::to_string(value)?,
+        None => message.to_string(),
+    };
+    let row = AncillaryRunReceipt {
+        ancillary_run_id: &prepared.ancillary_run_id,
+        release: "y1",
+        cohort: "hgsvc_hprc",
+        reference_genome: "GRCh38",
+        modality: prepared.data_layer.modality(),
+        data_layer: prepared.data_layer.value(),
+        chrom: &prepared.chrom,
+        source_version: &prepared.source_manifest_id,
+        source_manifest_id: &prepared.source_manifest_id,
+        source_manifest_hash: &prepared.source_manifest_hash,
+        scope: "bounded_intervals",
+        state,
+        expected_tasks: report.map(|value| value.expected_tasks).unwrap_or(0),
+        source_rows: report.map(|value| value.source_rows).unwrap_or(0),
+        canonical_rows: report.map(|value| value.canonical_rows).unwrap_or(0),
+        reject_rows: report.map(|value| value.reject_rows).unwrap_or(0),
+        key_hash: report.map(|value| value.key_hash.as_str()).unwrap_or(&zero),
+        content_hash: report
+            .map(|value| value.content_hash.as_str())
+            .unwrap_or(&zero),
+        worker_principal,
+        peak_rss_bytes: 0,
+        frozen_at_ms: report.map(|value| value.frozen_at_ms).unwrap_or(0),
+        report_json: &report_json,
+        revision: revision_now()?,
+    };
+    target.insert_json_each_row("lr_y1_ancillary_runs", std::slice::from_ref(&row))
+}
+
+fn read_durable_methylation_report(
+    target: &ClickHouseTarget,
+    prepared: &PreparedMethylationAttempt,
+) -> anyhow::Result<Option<(String, MethylationFinalizationReport)>> {
+    let body = target.query_text(
+        "WITH max_revision AS (SELECT max(revision) AS revision FROM lr_y1_ancillary_runs WHERE ancillary_run_id = {run:String} AND modality = {modality:String} AND data_layer = {layer:String} AND chrom = {chrom:String}) SELECT state, report_json, worker_principal, source_manifest_id, source_manifest_hash, expected_tasks, source_rows, canonical_rows, reject_rows, key_hash, content_hash, frozen_at_ms FROM lr_y1_ancillary_runs WHERE ancillary_run_id = {run:String} AND modality = {modality:String} AND data_layer = {layer:String} AND chrom = {chrom:String} AND revision = (SELECT revision FROM max_revision) FORMAT JSONEachRow",
+        &[
+            ("run", &prepared.ancillary_run_id),
+            ("modality", prepared.data_layer.modality()),
+            ("layer", prepared.data_layer.value()),
+            ("chrom", &prepared.chrom),
+        ],
+    )?;
+    let lines = body
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    if lines.len() != 1 {
+        bail!("methylation run ledger has duplicate maximum-revision receipts");
+    }
+    #[derive(Deserialize)]
+    struct Row {
+        state: String,
+        report_json: String,
+        worker_principal: String,
+        source_manifest_id: String,
+        source_manifest_hash: String,
+        expected_tasks: u32,
+        source_rows: u64,
+        canonical_rows: u64,
+        reject_rows: u64,
+        key_hash: String,
+        content_hash: String,
+        frozen_at_ms: u64,
+    }
+    let row: Row = serde_json::from_str(lines[0]).context("malformed methylation run receipt")?;
+    if !matches!(row.state.as_str(), "frozen" | "accepted_frozen") {
+        return Ok(None);
+    }
+    let report: MethylationFinalizationReport = serde_json::from_str(&row.report_json)
+        .context("durable methylation frozen report is malformed")?;
+    if row.worker_principal != report.worker_principal
+        || row.source_manifest_id != report.source_manifest_id
+        || row.source_manifest_hash != report.source_manifest_hash
+        || row.expected_tasks != report.expected_tasks
+        || row.source_rows != report.source_rows
+        || row.canonical_rows != report.canonical_rows
+        || row.reject_rows != report.reject_rows
+        || row.key_hash != report.key_hash
+        || row.content_hash != report.content_hash
+        || row.frozen_at_ms != report.frozen_at_ms
+    {
+        bail!("durable methylation run columns disagree with report_json");
+    }
+    Ok(Some((row.state, report)))
+}
+
+/// Fence the exact writer, resolve one authoritative current-owner snapshot,
+/// clean failed prefixes, and durably freeze raw rows in place. This never
+/// writes `lr_y1_active_ancillary`, summary/availability tables, or joined data.
+pub fn finalize_methylation_run(
+    target: &ClickHouseTarget,
+    fence: &WorkerWriteFence,
+    task_manifest_path: &Path,
+    source_manifest_path: &Path,
+    operator_identity: &str,
+) -> anyhow::Result<MethylationFinalizationReport> {
+    if target.kind() != TargetKind::Scratch || operator_identity.trim().is_empty() {
+        bail!("methylation finalization requires a scratch target and operator identity");
+    }
+    let task_bytes = std::fs::read(task_manifest_path)
+        .with_context(|| format!("failed to read {}", task_manifest_path.display()))?;
+    let tasks: Vec<Y1MethylationTaskSpec> =
+        serde_json::from_slice(&task_bytes).context("invalid typed methylation task manifest")?;
+    let prepared = validate_finalization_tasks(target, &tasks, source_manifest_path)?;
+    let first = &prepared[0];
+    let task_manifest_sha256 = format!("{:x}", Sha256::digest(&task_bytes));
+
+    if let Some((state, persisted)) = read_durable_methylation_report(target, first)? {
+        fence.attest_fenced_and_drained(target)?;
+        let (_, receipts) =
+            authoritative_snapshot(target, &prepared, fence.principal(), persisted.frozen_at_ms)?;
+        let verified = build_frozen_report(
+            target,
+            &prepared,
+            &receipts,
+            fence.principal(),
+            operator_identity,
+            &task_manifest_sha256,
+            persisted.frozen_at_ms,
+        )?;
+        if verified != persisted {
+            bail!("durable methylation frozen report differs from exact ledger/canonical revalidation");
+        }
+        if state == "frozen" {
+            record_ancillary_run(
+                target,
+                first,
+                "accepted_frozen",
+                fence.principal(),
+                Some(&verified),
+                "",
+            )?;
+        }
+        return Ok(verified);
+    }
+
+    record_ancillary_run(
+        target,
+        first,
+        "freezing",
+        fence.principal(),
+        None,
+        operator_identity,
+    )?;
+    let result = (|| -> anyhow::Result<MethylationFinalizationReport> {
+        let before = epoch_ms()?;
+        let (snapshot, _) = authoritative_snapshot(target, &prepared, fence.principal(), before)?;
+        let spec = Y1MethylationFinalizationSpec {
+            ancillary_run_id: first.ancillary_run_id.clone(),
+            release: "y1".into(),
+            cohort: "hgsvc_hprc".into(),
+            reference_genome: "GRCh38".into(),
+            source_manifest_hash: first.source_manifest_hash.clone(),
+            data_layer: first.data_layer,
+            chrom: first.chrom.clone(),
+            expected_tasks: u32::try_from(prepared.len())?,
+            activate: false,
+        };
+        reconcile_authoritative_attempts(&spec, &snapshot)?;
+        fence.apply_and_drain(target)?;
+        let frozen_at_ms = epoch_ms()?;
+        let (snapshot, receipts) =
+            authoritative_snapshot(target, &prepared, fence.principal(), frozen_at_ms)?;
+        reconcile_authoritative_attempts(&spec, &snapshot)?;
+        cleanup_nonaccepted_contributions(target, &prepared)?;
+        let report = build_frozen_report(
+            target,
+            &prepared,
+            &receipts,
+            fence.principal(),
+            operator_identity,
+            &task_manifest_sha256,
+            frozen_at_ms,
+        )?;
+        record_ancillary_run(
+            target,
+            first,
+            "frozen",
+            fence.principal(),
+            Some(&report),
+            "",
+        )?;
+        let (_, reread_receipts) =
+            authoritative_snapshot(target, &prepared, fence.principal(), frozen_at_ms)?;
+        let reread = build_frozen_report(
+            target,
+            &prepared,
+            &reread_receipts,
+            fence.principal(),
+            operator_identity,
+            &task_manifest_sha256,
+            frozen_at_ms,
+        )?;
+        if reread != report {
+            bail!("methylation canonical candidate changed after durable frozen receipt");
+        }
+        record_ancillary_run(
+            target,
+            first,
+            "accepted_frozen",
+            fence.principal(),
+            Some(&report),
+            "",
+        )?;
+        Ok(report)
+    })();
+    if let Err(error) = &result {
+        if read_durable_methylation_report(target, first)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let _ = record_ancillary_run(
+                target,
+                first,
+                "finalization_failed",
+                fence.principal(),
+                None,
+                &format!("{operator_identity}: {error:#}"),
+            );
+        }
+    }
+    result
+}
+
+/// Caller-supplied accepted-attempt IDs are not part of this planning API. The
+/// operational finalizer above is the only public path that constructs a live
+/// authoritative snapshot.
 pub fn plan_methylation_finalization(
     target: &ClickHouseTarget,
     spec: &Y1MethylationFinalizationSpec,
 ) -> anyhow::Result<MethylationFinalizationPlan> {
     validate_finalization_spec(target, spec)?;
-    bail!("Y1 methylation finalization is disabled: no atomic authoritative expected-task/attempt/lease ledger integration is implemented")
+    bail!("Y1 methylation finalization requires the fenced operational finalizer or an authoritative provider snapshot")
 }
 
 fn validate_finalization_spec(
@@ -667,7 +1988,7 @@ fn validate_finalization_spec(
         bail!("finalization requires a nonempty authoritative expected task set");
     }
     if spec.activate {
-        bail!("D0 methylation finalization cannot activate any ancillary pointer");
+        bail!("raw methylation finalization cannot activate any ancillary pointer");
     }
     Ok(())
 }
@@ -681,21 +2002,21 @@ pub fn plan_methylation_finalization_from_snapshot(
     let accepted_attempts = reconcile_authoritative_attempts(spec, snapshot)?;
     Ok(match spec.data_layer {
         MethylationDataLayer::SampleTotal => MethylationFinalizationPlan {
-            staging_table: "lr_y1_methylation_staging",
+            staging_table: "lr_y1_methylation",
             canonical_table: "lr_y1_methylation",
             accepted_attempts,
-            derive_total_summary: true,
+            derive_total_summary: false,
             requires_unique_canonical_keys: true,
-            materialize_availability_from_roster: true,
+            materialize_availability_from_roster: false,
             joined_serving_allowed: false,
         },
         MethylationDataLayer::SourcePhased => MethylationFinalizationPlan {
-            staging_table: "lr_y1_methylation_phased_staging",
+            staging_table: "lr_y1_methylation_phased",
             canonical_table: "lr_y1_methylation_phased",
             accepted_attempts,
             derive_total_summary: false,
             requires_unique_canonical_keys: true,
-            materialize_availability_from_roster: true,
+            materialize_availability_from_roster: false,
             joined_serving_allowed: false,
         },
     })
@@ -828,12 +2149,13 @@ mod tests {
             task_id: "task-1".into(),
             attempt_id: "attempt-1".into(),
             lease_id: "lease-1".into(),
+            lease_expires_at_ms: u64::MAX,
             release: "y1".into(),
             cohort: "hgsvc_hprc".into(),
             reference_genome: "GRCh38".into(),
             source_manifest_id: "hgsvc-hprc-y1-phased-methylation-v2".into(),
             source_manifest_hash:
-                "f585cbc2b806dcb52944af2ecabe634338a41323f89e3938336235c7729e8743".into(),
+                "08e394bd5d4cb25f0d830403f54773b32b77eb072443df3931ca577ae54d5ec2".into(),
             manifest_entry_id: "hgsvc_hprc:HG00097".into(),
             data_layer: MethylationDataLayer::SourcePhased,
             source_haplotype: Some(SourceHaplotype::Hap1),
@@ -914,52 +2236,156 @@ mod tests {
         assert!(total.validate("descriptor-1").is_err());
         total.source_haplotype = None;
         assert!(total.validate("descriptor-1").is_ok());
+        total.lease_expires_at_ms = 0;
+        assert!(total.validate("descriptor-1").is_err());
     }
 
     #[test]
-    fn checked_manifest_fails_closed_with_exact_immutable_metadata_blockers() {
-        let error = prepare_methylation_attempt(
+    fn checked_load_ready_manifest_resolves_exact_generation_size_and_md5_identities() {
+        let prepared = prepare_methylation_attempt(
             &scratch_target(),
             &task(),
             "descriptor-1",
             Path::new("sources/y1/methylation-phased-source-manifest.json"),
         )
-        .unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("not load-ready"));
-        assert!(message.contains("atomic methylation attempt/lease ledger"));
+        .unwrap();
+        assert_eq!(prepared.sample_id, "HG00097");
+        assert_eq!(prepared.source.checksum_algorithm, "md5_base64");
+        assert_eq!(prepared.index.checksum_algorithm, "md5_base64");
+        assert!(prepared.source.byte_size > 0);
+        assert!(prepared.index.byte_size > 0);
+
+        let mut stale = task();
+        stale.source_manifest_hash =
+            "f585cbc2b806dcb52944af2ecabe634338a41323f89e3938336235c7729e8743".into();
+        assert!(prepare_methylation_attempt(
+            &scratch_target(),
+            &stale,
+            "descriptor-1",
+            Path::new("sources/y1/methylation-phased-source-manifest.json"),
+        )
+        .is_err());
     }
 
     #[test]
-    fn rehashed_load_authorized_manifest_still_cannot_bypass_atomic_ledger_gate() {
+    fn claim_predecessor_rejects_live_concurrency_and_accepts_only_fenced_retry() {
         let source_path = Path::new("sources/y1/methylation-phased-source-manifest.json");
-        let mut manifest: Value =
-            serde_json::from_slice(&std::fs::read(source_path).unwrap()).unwrap();
-        manifest.as_object_mut().unwrap().remove("content_sha256");
-        manifest["load_readiness"] = serde_json::json!({
-            "status": "load_ready",
-            "load_authorized": true,
-            "blockers": [],
-        });
-        let hash = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&manifest).unwrap())
+        let original =
+            prepare_methylation_attempt(&scratch_target(), &task(), "descriptor-1", source_path)
+                .unwrap();
+        let receipt = |state: MethylationLedgerState, expires: u64| {
+            let mut value = MethylationAttemptReceipt::new(
+                &original,
+                "writer_a",
+                state,
+                MethylationAttemptCounts {
+                    source_rows: 1,
+                    canonical_rows: 1,
+                    reject_rows: 0,
+                },
+                "a".repeat(64),
+                "b".repeat(64),
+                None,
+                1,
+                2,
+                3,
+            );
+            value.lease_expires_at_ms = expires;
+            value
+        };
+        let mut retry_task = task();
+        retry_task.attempt_id = "attempt-2".into();
+        retry_task.lease_id = "lease-2".into();
+        let retry = prepare_methylation_attempt(
+            &scratch_target(),
+            &retry_task,
+            "descriptor-1",
+            source_path,
+        )
+        .unwrap();
+
+        assert!(validate_claim_predecessor(
+            &[receipt(MethylationLedgerState::Running, 100)],
+            &retry,
+            50,
+        )
+        .is_err());
+        assert!(validate_claim_predecessor(
+            &[receipt(MethylationLedgerState::Running, 49)],
+            &retry,
+            50,
+        )
+        .is_ok());
+        assert!(validate_claim_predecessor(
+            &[receipt(MethylationLedgerState::Failed, 100)],
+            &retry,
+            50,
+        )
+        .is_ok());
+        assert!(validate_claim_predecessor(
+            &[receipt(MethylationLedgerState::Accepted, 100)],
+            &retry,
+            50,
+        )
+        .is_err());
+        assert!(validate_claim_predecessor(
+            &[
+                receipt(MethylationLedgerState::Failed, 49),
+                receipt(MethylationLedgerState::Failed, 49),
+            ],
+            &retry,
+            50,
+        )
+        .is_err());
+
+        let mut reused = retry.clone();
+        reused.attempt_id = original.attempt_id.clone();
+        assert!(validate_claim_predecessor(
+            &[receipt(MethylationLedgerState::Failed, 49)],
+            &reused,
+            50,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn receipt_identity_rejects_principal_source_index_and_haplotype_substitution() {
+        let prepared = prepare_methylation_attempt(
+            &scratch_target(),
+            &task(),
+            "descriptor-1",
+            Path::new("sources/y1/methylation-phased-source-manifest.json"),
+        )
+        .unwrap();
+        let base = MethylationAttemptReceipt::new(
+            &prepared,
+            "writer_a",
+            MethylationLedgerState::Accepted,
+            MethylationAttemptCounts {
+                source_rows: 1,
+                canonical_rows: 1,
+                reject_rows: 0,
+            },
+            "a".repeat(64),
+            "b".repeat(64),
+            None,
+            1,
+            2,
+            3,
         );
-        manifest["content_sha256"] = Value::String(hash.clone());
-        let path = std::env::temp_dir().join(format!(
-            "gnomad-lr-methylation-runtime-gate-{}.json",
-            std::process::id()
-        ));
-        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let mut forged_task = task();
-        forged_task.source_manifest_hash = hash;
-        let error =
-            prepare_methylation_attempt(&scratch_target(), &forged_task, "descriptor-1", &path)
-                .unwrap_err();
-        std::fs::remove_file(path).unwrap();
-        assert!(error
-            .to_string()
-            .contains("separate atomic attempt/lease ledger milestone"));
+        assert!(receipt_matches_prepared(&base, &prepared, "writer_a"));
+        assert!(!receipt_matches_prepared(&base, &prepared, "writer_b"));
+        let mut substitutions = vec![base.clone(), base.clone(), base.clone()];
+        substitutions[0].source_generation = "other".into();
+        substitutions[1].source_index_checksum = "other".into();
+        substitutions[2].source_haplotype = Some(2);
+        for substitution in substitutions {
+            assert!(!receipt_matches_prepared(
+                &substitution,
+                &prepared,
+                "writer_a"
+            ));
+        }
     }
 
     fn finalization_spec(data_layer: MethylationDataLayer) -> Y1MethylationFinalizationSpec {
@@ -1009,14 +2435,14 @@ mod tests {
     }
 
     #[test]
-    fn runtime_finalization_is_blocked_without_atomic_ledger_integration() {
+    fn unfenced_planning_entrypoint_cannot_construct_an_authoritative_snapshot() {
         let spec = finalization_spec(MethylationDataLayer::SampleTotal);
         let error = plan_methylation_finalization(&scratch_target(), &spec).unwrap_err();
-        assert!(error.to_string().contains("atomic authoritative"));
+        assert!(error.to_string().contains("fenced operational finalizer"));
     }
 
     #[test]
-    fn authoritative_snapshot_keeps_total_summary_separate_and_phased_unjoined() {
+    fn authoritative_snapshot_plans_direct_canonical_raw_only_and_unjoined() {
         let total_spec = finalization_spec(MethylationDataLayer::SampleTotal);
         let total = plan_methylation_finalization_from_snapshot(
             &scratch_target(),
@@ -1024,7 +2450,9 @@ mod tests {
             &accepted_snapshot(owner(&total_spec)),
         )
         .unwrap();
-        assert!(total.derive_total_summary);
+        assert!(!total.derive_total_summary);
+        assert!(!total.materialize_availability_from_roster);
+        assert_eq!(total.staging_table, total.canonical_table);
         assert!(!total.joined_serving_allowed);
         assert_eq!(total.accepted_attempts[0].attempt_id, "attempt-2");
 
@@ -1036,6 +2464,8 @@ mod tests {
         )
         .unwrap();
         assert!(!phased.derive_total_summary);
+        assert!(!phased.materialize_availability_from_roster);
+        assert_eq!(phased.staging_table, phased.canonical_table);
         assert!(!phased.joined_serving_allowed);
         assert_eq!(phased.canonical_table, "lr_y1_methylation_phased");
     }

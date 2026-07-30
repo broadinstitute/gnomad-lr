@@ -12,11 +12,13 @@ pub use interval::{
     run_pool_interval_attempt, PoolY1AttemptReport, PoolY1JobSpec, PoolY1TargetSpec, PoolY1TaskSpec,
 };
 pub use methylation::{
-    open_prepared_methylation_records, parse_methylation_record, plan_methylation_finalization,
-    plan_methylation_finalization_from_snapshot, prepare_methylation_attempt,
-    AuthoritativeMethylationLedgerSnapshot, ImmutableObjectIdentity, MethylationDataLayer,
-    MethylationFinalizationPlan, MethylationLeaseOwnership, MethylationLedgerState,
-    MethylationRecord, MethylationResolvedAttempt, MethylationSourceType,
+    finalize_methylation_run, open_prepared_methylation_records, parse_methylation_record,
+    plan_methylation_finalization, plan_methylation_finalization_from_snapshot,
+    prepare_methylation_attempt, run_methylation_interval_attempt,
+    AuthoritativeMethylationLedgerSnapshot, FrozenMethylationAttempt, ImmutableObjectIdentity,
+    MethylationAttemptCounts, MethylationAttemptReport, MethylationDataLayer,
+    MethylationFinalizationPlan, MethylationFinalizationReport, MethylationLeaseOwnership,
+    MethylationLedgerState, MethylationRecord, MethylationResolvedAttempt, MethylationSourceType,
     MethylationTaskOwnerIdentity, PreparedMethylationAttempt, SourceHaplotype,
     Y1MethylationFinalizationSpec, Y1MethylationTaskSpec,
 };

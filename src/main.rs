@@ -13,7 +13,8 @@ compile_error!("gnomad-lr requires the default `clickhouse` feature");
 use clap::Parser;
 use cli::{
     parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
-    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1TargetKindArg,
+    Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1MethylationFinalizeArgs, Y1MethylationLoadArgs,
+    Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
@@ -49,6 +50,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::LoadY1Interval(args) => {
             tokio::task::spawn_blocking(move || run_y1_interval(args)).await??;
+        }
+        Commands::LoadY1Methylation(args) => {
+            tokio::task::spawn_blocking(move || run_y1_methylation(args)).await??;
+        }
+        Commands::FinalizeY1Methylation(args) => {
+            tokio::task::spawn_blocking(move || run_y1_methylation_finalization(args)).await??;
         }
         Commands::FinalizeY1Contig(args) => {
             tokio::task::spawn_blocking(move || run_y1_finalization(args, false)).await??;
@@ -165,6 +172,44 @@ fn worker_target(
         args.allow_remote,
         args.allow_serving,
     )
+}
+
+fn run_y1_methylation(args: Y1MethylationLoadArgs) -> anyhow::Result<()> {
+    let target = worker_target(
+        &args.target,
+        &args.worker_username_env,
+        &args.worker_password_env,
+    )?;
+    let task_bytes = std::fs::read(&args.task)?;
+    let task: y1::Y1MethylationTaskSpec = serde_json::from_slice(&task_bytes)?;
+    let descriptor_id = task.coordinator_task_id.clone();
+    let report = y1::run_methylation_interval_attempt(
+        &target,
+        &task,
+        &descriptor_id,
+        &args.source_manifest,
+        &args.worker_principal,
+        args.batch_records,
+    )?;
+    write_json_report(&args.report, &report)
+}
+
+fn run_y1_methylation_finalization(args: Y1MethylationFinalizeArgs) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let worker = worker_target(
+        &args.target,
+        &args.worker_username_env,
+        &args.worker_password_env,
+    )?;
+    let fence = y1::WorkerWriteFence::new(&target, worker, &args.worker_principal)?;
+    let report = y1::finalize_methylation_run(
+        &target,
+        &fence,
+        &args.task_manifest,
+        &args.source_manifest,
+        &args.operator_identity,
+    )?;
+    write_json_report(&args.report, &report)
 }
 
 fn run_y1_finalization(args: Y1FinalizeArgs, chr22_compatibility: bool) -> anyhow::Result<()> {
