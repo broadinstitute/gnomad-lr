@@ -11,5 +11,5 @@ workers = 32
 with_coordinator = true
 worker_binary = "target/release/gnomad-lr-worker"
 subnet = "gnomad-v4-dev-main"
-pool_db_path = "gs://gnomad-lr-data/pool-ops/ops.db"
+pool_db_path = "gs://gnomad-lr-data/pool-ops/ordinary-chr22-r3-20260731/ops.db"
 service_account = "gnomad-lr-sa@gnomadev.iam.gserviceaccount.com"
