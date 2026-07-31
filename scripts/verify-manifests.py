@@ -51,11 +51,16 @@ y1_tables = {
     "lr_y1_carriers",
 }
 y1_sql_dir = ROOT / "sql" / "y1"
-actual_y1_files = {path.stem for path in y1_sql_dir.glob("*.sql")}
+actual_y1_files = {path.stem for path in y1_sql_dir.glob("lr_*.sql")}
 assert actual_y1_files == y1_tables, (
     f"Y1 DDL inventory mismatch: missing={sorted(y1_tables - actual_y1_files)}, "
     f"unexpected={sorted(actual_y1_files - y1_tables)}"
 )
+access_sql = (y1_sql_dir / "access.sql").read_text()
+assert "CREATE USER IF NOT EXISTS gnomad_lr_y1_pool_writer" in access_sql
+assert "IDENTIFIED WITH no_password" in access_sql
+assert "ON gnomad_lr_y1_scratch_v5_chr22_pool_r3.*" in access_sql
+assert "ON *.*" not in access_sql
 for table in sorted(y1_tables):
     ddl = (y1_sql_dir / f"{table}.sql").read_text()
     assert f"CREATE TABLE IF NOT EXISTS {table}" in ddl
