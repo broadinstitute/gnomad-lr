@@ -14,7 +14,7 @@ clickhouse = ["genohype-core/clickhouse"]
 [dependencies]
 # Keep the reusable data and pool layers on the same immutable public revision.
 # Update both entries together and regenerate Cargo.lock.
-genohype-core = { git = "https://github.com/broadinstitute/genohype.git", rev = "78dc914c148b594d0002222e5fe410832c16eabc", features = ["genomic", "gcp"] }
+genohype-core = { git = "https://github.com/broadinstitute/genohype.git", rev = "39b2f2a99f191acb49cf18d9a96a26fb62cd29d4", features = ["genomic", "gcp"] }
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -22,7 +22,7 @@ serde_json = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
 base64 = "0.22"
-genohype-pool = { git = "https://github.com/broadinstitute/genohype.git", rev = "78dc914c148b594d0002222e5fe410832c16eabc" }
+genohype-pool = { git = "https://github.com/broadinstitute/genohype.git", rev = "39b2f2a99f191acb49cf18d9a96a26fb62cd29d4" }
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

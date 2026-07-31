@@ -19,7 +19,7 @@
     "samples": 231,
     "bytes": 127463220748
   },
-  "genohype_revision": "78dc914c148b594d0002222e5fe410832c16eabc",
+  "genohype_revision": "39b2f2a99f191acb49cf18d9a96a26fb62cd29d4",
   "worker_principal": "gnomad_lr_y1_phased_worker",
   "authentication": "named_passwordless_private_user",
   "allowed_writes": [

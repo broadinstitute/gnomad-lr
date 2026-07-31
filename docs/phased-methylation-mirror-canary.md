@@ -4,7 +4,7 @@ This path loads **raw source hap1/hap2 labels only** from the accepted mirror in
 
 ## Checked inputs
 
-- Genohype core, pool, lockfile, and install target: `78dc914c148b594d0002222e5fe410832c16eabc`.
+- Genohype core, pool, lockfile, and install target: `39b2f2a99f191acb49cf18d9a96a26fb62cd29d4`.
 - Ledger: `sources/y1/methylation-phased-mirror-ledger.json`, declared content SHA-256 `97355c54...3241`, raw SHA-256 `7f4e15a9...b78b`, 924 objects / 231 samples / 127,463,220,748 bytes.
 - Tasks: `manifests/y1/phased-methylation-mirror-chr22-canary.json`, exactly 462 in sample then hap1/hap2 order. Regenerate/check with:
 
