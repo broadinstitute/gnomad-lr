@@ -194,8 +194,11 @@ impl ClickHouseTarget {
             && self.kind == other.kind
     }
 
-    pub(crate) fn uses_environment_auth(&self) -> bool {
-        matches!(self.auth, AuthSource::Environment { .. })
+    pub(crate) fn uses_dedicated_principal_auth(&self) -> bool {
+        matches!(
+            self.auth,
+            AuthSource::PasswordlessUser { .. } | AuthSource::Environment { .. }
+        )
     }
 
     pub fn attest_current_user(&self, expected: &str) -> anyhow::Result<String> {
@@ -371,10 +374,8 @@ impl WorkerWriteFence {
         if administrator.kind() != TargetKind::Scratch || !administrator.same_destination(&worker) {
             bail!("worker fence requires distinct credentials for the same scratch destination");
         }
-        if !worker.uses_environment_auth() {
-            bail!(
-                "worker fence requires a dedicated environment-authenticated ClickHouse principal"
-            );
+        if !worker.uses_dedicated_principal_auth() {
+            bail!("worker fence requires a dedicated named ClickHouse principal");
         }
         validate_identifier(principal, "worker principal")?;
         Ok(Self {
@@ -554,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_fence_requires_a_separate_environment_authenticated_principal() {
+    fn writer_fence_requires_a_separate_named_principal() {
         let administrator =
             scratch("http://127.0.0.1:8123", "gnomad_lr_y1_scratch_v5_unit").unwrap();
         let unauthenticated_worker = administrator.clone();
@@ -564,6 +565,24 @@ mod tests {
             "gnomad_lr_y1_worker"
         )
         .is_err());
+
+        let passwordless_worker = ClickHouseTarget::new(
+            "http://127.0.0.1:8123",
+            "gnomad_lr_y1_scratch_v5_unit",
+            TargetKind::Scratch,
+            AuthSource::PasswordlessUser {
+                username: "gnomad_lr_y1_worker".into(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        WorkerWriteFence::new(
+            &administrator,
+            passwordless_worker,
+            "gnomad_lr_y1_worker",
+        )
+        .unwrap();
 
         let other_database = ClickHouseTarget::new(
             "http://127.0.0.1:8123",

@@ -277,9 +277,8 @@ async fn handle_y1_interval_tasks(
         &job.target.endpoint,
         &job.target.database,
         crate::y1::TargetKind::Scratch,
-        crate::y1::AuthSource::Environment {
-            username_variable: crate::y1::Y1_WORKER_USERNAME_ENV.to_string(),
-            password_variable: crate::y1::Y1_WORKER_PASSWORD_ENV.to_string(),
+        crate::y1::AuthSource::PasswordlessUser {
+            username: job.target.worker_principal.clone(),
         },
         true,
         false,

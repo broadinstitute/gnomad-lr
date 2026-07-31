@@ -45,13 +45,13 @@ target/debug/gnomad-lr init-y1 \
   --auth-source none
 ```
 
-Remote targets require `--allow-remote --auth-source environment`; administrator/finalizer credentials are read from `Y1_CLICKHOUSE_USER` and `Y1_CLICKHOUSE_PASSWORD` by default. Serving-class schema operations additionally require `--allow-serving`. These acknowledgements do not make surveyed Y1 writes acceptable before the remaining acceptance gates pass.
+Remote targets require `--allow-remote` plus an explicit auth source. Operators use `none` over an IAP loopback tunnel or `private-network` inside the VPC. Pool writers use a named passwordless principal on the private endpoint; no ClickHouse secret is required. Serving-class schema operations additionally require `--allow-serving`. These acknowledgements do not make surveyed Y1 writes acceptable before the remaining acceptance gates pass.
 
-Every v5 primary writer must use one dedicated ClickHouse principal. Its exact username is supplied as `--worker-principal` (and as `target.worker_principal` in a pool payload), while its credentials are read from `Y1_CLICKHOUSE_WORKER_USER` and `Y1_CLICKHOUSE_WORKER_PASSWORD`. The authenticated username must match exactly or loading/finalization fails closed. Provisioning must grant that user only the `SELECT, INSERT` access needed on the fresh candidate database; the separate finalizer administrator must be able to `ALTER USER` and read `system.users`/`system.processes`. For example (password and administrator grants remain secret/infrastructure-managed):
+Every v5 primary writer must use one dedicated ClickHouse principal. Its exact username is supplied as `--worker-principal` (and as `target.worker_principal` in a pool payload). Use `--auth-source passwordless-user` for a direct worker connection, or `--worker-auth-source passwordless-user` when finalization also needs a separate operator/admin auth source. The authenticated username must match exactly or loading/finalization fails closed. Provisioning grants only `SELECT, INSERT` on the fresh candidate database; the separate finalizer administrator must be able to `ALTER USER` and read `system.users`/`system.processes`. See `sql/y1/access.sql`:
 
 ```sql
-CREATE USER gnomad_lr_y1_worker IDENTIFIED WITH sha256_password BY 'REPLACE_SECRET' SETTINGS async_insert = 0;
-GRANT SELECT, INSERT ON gnomad_lr_y1_scratch_v5_fresh.* TO gnomad_lr_y1_worker;
+CREATE USER IF NOT EXISTS gnomad_lr_y1_pool_writer IDENTIFIED WITH no_password SETTINGS async_insert = 0;
+GRANT SELECT, INSERT ON gnomad_lr_y1_scratch_v5_chr22_pool_r3.* TO gnomad_lr_y1_pool_writer;
 ```
 
 Finalization appends `freezing`, attests that task leases are terminal, executes `ALTER USER <worker> SETTINGS readonly = 1, async_insert = 0`, verifies those settings through the worker credentials, drains that principal's active `INSERT` queries from `system.processes`, and reattests terminal leases before any snapshot. The worker fence is never lifted by this binary. A missing principal, credential, privilege, or fence attestation stops finalization without a snapshot.
@@ -62,8 +62,8 @@ The bounded source path is scratch-only, requires an adjacent TBI plus immutable
 target/debug/gnomad-lr load-y1-interval \
   --endpoint http://127.0.0.1:8126 \
   --database gnomad_lr_y1_scratch_v5_demo \
-  --target-kind scratch --auth-source environment \
-  --worker-principal gnomad_lr_y1_worker \
+  --target-kind scratch --auth-source passwordless-user \
+  --worker-principal gnomad_lr_y1_pool_writer \
   --cohort aou \
   --vcf gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.chr22.vcf.gz \
   --source-generation GENERATION --source-checksum MD5_BASE64 \

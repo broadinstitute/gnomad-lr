@@ -16,6 +16,8 @@ use std::time::Instant;
 pub struct PoolY1TargetSpec {
     pub endpoint: String,
     pub database: String,
+    /// Exact authentication contract for private-network pool workers.
+    pub authentication: String,
     /// Exact dedicated ClickHouse user that the finalizer will set read-only.
     pub worker_principal: String,
 }
@@ -115,6 +117,9 @@ impl PoolY1JobSpec {
         }
         if self.batch_records == 0 {
             bail!("batch_records must be greater than zero");
+        }
+        if self.target.authentication != "named_passwordless_private_user" {
+            bail!("strict Y1 jobs require named_passwordless_private_user authentication");
         }
         if self.target.worker_principal.trim().is_empty() {
             bail!("strict Y1 jobs require the dedicated ClickHouse worker_principal");
@@ -699,11 +704,15 @@ mod tests {
             target: PoolY1TargetSpec {
                 endpoint: "http://10.0.0.2:8123".into(),
                 database: "gnomad_lr_y1_scratch_v5_fresh".into(),
+                authentication: "named_passwordless_private_user".into(),
                 worker_principal: "gnomad_lr_y1_worker".into(),
             },
             batch_records: 250,
         };
         job.validate().unwrap();
+        job.target.authentication = "environment".into();
+        assert!(job.validate().is_err());
+        job.target.authentication = "named_passwordless_private_user".into();
         job.target.worker_principal.clear();
         assert!(job.validate().is_err());
     }

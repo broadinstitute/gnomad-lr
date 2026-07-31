@@ -64,6 +64,7 @@ pub enum Y1TargetKindArg {
 pub enum Y1AuthSourceArg {
     None,
     PrivateNetwork,
+    PasswordlessUser,
     Environment,
 }
 
@@ -116,6 +117,10 @@ pub struct Y1IntervalArgs {
     /// Dedicated ClickHouse writer that finalization will database-fence
     #[arg(long)]
     pub worker_principal: String,
+
+    /// Worker credential source; defaults to --auth-source when omitted
+    #[arg(long, value_enum)]
+    pub worker_auth_source: Option<Y1AuthSourceArg>,
 
     /// Environment variable containing the dedicated worker username
     #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_USER")]
@@ -210,6 +215,10 @@ pub struct Y1FinalizeArgs {
     /// Exact dedicated ClickHouse worker principal to set read-only and drain
     #[arg(long)]
     pub worker_principal: String,
+
+    /// Worker credential source; use passwordless-user with a network-authenticated administrator
+    #[arg(long, value_enum)]
+    pub worker_auth_source: Option<Y1AuthSourceArg>,
 
     /// Environment variable containing that worker principal's username
     #[arg(long, default_value = "Y1_CLICKHOUSE_WORKER_USER")]
@@ -556,6 +565,8 @@ mod tests {
             "none",
             "--worker-principal",
             "gnomad_lr_y1_worker",
+            "--worker-auth-source",
+            "passwordless-user",
             "--manifest",
             "chr1.json",
             "--independent-counts",
@@ -566,7 +577,13 @@ mod tests {
             "chr1-report.json",
         ])
         .unwrap();
-        assert!(matches!(cli.command, Commands::FinalizeY1Contig(_)));
+        match cli.command {
+            Commands::FinalizeY1Contig(args) => assert_eq!(
+                args.worker_auth_source,
+                Some(super::Y1AuthSourceArg::PasswordlessUser)
+            ),
+            _ => panic!("expected finalize-y1-contig"),
+        }
     }
 
     #[test]

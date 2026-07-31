@@ -141,6 +141,9 @@ fn y1_target(args: &Y1InitArgs) -> anyhow::Result<y1::ClickHouseTarget> {
     let auth = match args.auth_source {
         Y1AuthSourceArg::None => y1::AuthSource::None,
         Y1AuthSourceArg::PrivateNetwork => y1::AuthSource::PrivateNetwork,
+        Y1AuthSourceArg::PasswordlessUser => anyhow::bail!(
+            "passwordless-user requires a named worker principal; for finalization use an operator --auth-source plus --worker-auth-source passwordless-user"
+        ),
         Y1AuthSourceArg::Environment => y1::AuthSource::Environment {
             username_variable: args.username_env.clone(),
             password_variable: args.password_env.clone(),
@@ -158,6 +161,8 @@ fn y1_target(args: &Y1InitArgs) -> anyhow::Result<y1::ClickHouseTarget> {
 
 fn worker_target(
     args: &Y1InitArgs,
+    worker_auth_source: Option<Y1AuthSourceArg>,
+    worker_principal: &str,
     username_env: &str,
     password_env: &str,
 ) -> anyhow::Result<y1::ClickHouseTarget> {
@@ -165,14 +170,22 @@ fn worker_target(
         Y1TargetKindArg::Scratch => y1::TargetKind::Scratch,
         Y1TargetKindArg::Serving => y1::TargetKind::Serving,
     };
+    let auth = match worker_auth_source.unwrap_or(args.auth_source) {
+        Y1AuthSourceArg::None => y1::AuthSource::None,
+        Y1AuthSourceArg::PrivateNetwork => y1::AuthSource::PrivateNetwork,
+        Y1AuthSourceArg::PasswordlessUser => y1::AuthSource::PasswordlessUser {
+            username: worker_principal.to_string(),
+        },
+        Y1AuthSourceArg::Environment => y1::AuthSource::Environment {
+            username_variable: username_env.to_string(),
+            password_variable: password_env.to_string(),
+        },
+    };
     y1::ClickHouseTarget::new(
         &args.endpoint,
         &args.database,
         kind,
-        y1::AuthSource::Environment {
-            username_variable: username_env.to_string(),
-            password_variable: password_env.to_string(),
-        },
+        auth,
         args.allow_remote,
         args.allow_serving,
     )
@@ -182,6 +195,8 @@ fn run_y1_finalization(args: Y1FinalizeArgs, chr22_compatibility: bool) -> anyho
     let target = y1_target(&args.target)?;
     let worker = worker_target(
         &args.target,
+        args.worker_auth_source,
+        &args.worker_principal,
         &args.worker_username_env,
         &args.worker_password_env,
     )?;
@@ -304,6 +319,8 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
     }
     let target = worker_target(
         &args.target,
+        args.worker_auth_source,
+        &args.worker_principal,
         &args.worker_username_env,
         &args.worker_password_env,
     )?;
@@ -459,6 +476,60 @@ fn direct_y1_report(
 #[cfg(test)]
 mod direct_y1_tests {
     use super::*;
+
+    #[test]
+    fn worker_target_exposes_named_passwordless_auth() {
+        let target_args = Y1InitArgs {
+            endpoint: "http://10.0.0.2:8123".into(),
+            database: "gnomad_lr_y1_scratch_v5_unit".into(),
+            target_kind: Y1TargetKindArg::Scratch,
+            auth_source: Y1AuthSourceArg::PasswordlessUser,
+            username_env: "IGNORED_USER".into(),
+            password_env: "IGNORED_PASSWORD".into(),
+            allow_remote: true,
+            allow_serving: false,
+        };
+        worker_target(
+            &target_args,
+            None,
+            "gnomad_lr_y1_pool_writer",
+            "IGNORED_WORKER_USER",
+            "IGNORED_WORKER_PASSWORD",
+        )
+        .unwrap();
+        let error = worker_target(
+            &target_args,
+            None,
+            "default",
+            "IGNORED_WORKER_USER",
+            "IGNORED_WORKER_PASSWORD",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("default ClickHouse principal"));
+    }
+
+    #[test]
+    fn finalizer_can_separate_operator_and_passwordless_worker_auth() {
+        let target_args = Y1InitArgs {
+            endpoint: "http://127.0.0.1:8123".into(),
+            database: "gnomad_lr_y1_scratch_v5_unit".into(),
+            target_kind: Y1TargetKindArg::Scratch,
+            auth_source: Y1AuthSourceArg::None,
+            username_env: "IGNORED_USER".into(),
+            password_env: "IGNORED_PASSWORD".into(),
+            allow_remote: false,
+            allow_serving: false,
+        };
+        y1_target(&target_args).unwrap();
+        worker_target(
+            &target_args,
+            Some(Y1AuthSourceArg::PasswordlessUser),
+            "gnomad_lr_y1_pool_writer",
+            "IGNORED_WORKER_USER",
+            "IGNORED_WORKER_PASSWORD",
+        )
+        .unwrap();
+    }
 
     #[test]
     fn direct_loader_report_preserves_principal_bound_attempt_shape() {
