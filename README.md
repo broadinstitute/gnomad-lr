@@ -178,6 +178,40 @@ target/debug/gnomad-lr load methylation --chrom chr22 --start 20000000 \
   --stop 21000000 --limit 1000 ...
 ```
 
+## Fixed Y1 chr22 operator commands
+
+Two repository scripts package the proven fixed-database loop without adding another
+binary or serving/publication state. Both are dry-run by default and have `--help`.
+The load command refuses an existing database, writer, pool, firewall, or ops prefix;
+it preserves exact job and finalization receipts, gates each cohort at one worker,
+and defaults to eight workers (the hard maximum is eight):
+
+```bash
+# Inspect only; performs no build, network request, cloud command, or write.
+./scripts/load-y1-fixed-chr22.sh
+
+# Create and load HGSVC/HPRC + AoU chr22, then reconcile 292 metadata rows.
+./scripts/load-y1-fixed-chr22.sh --execute \
+  --confirm-empty-fixed-database gnomad_lr_y1_scratch_v5_current \
+  --artifacts /absolute/path/to/new/load-receipts
+```
+
+On success the pool, generated firewall, GCS ops prefix, and disposable writer are
+removed while `gnomad_lr_y1_scratch_v5_current` remains. To remove that fixed database
+later, use the separately confirmed drop command. It first records run/table counts
+and refuses active pool resources, active writer queries, a non-v5 database, or writer
+grants outside this database:
+
+```bash
+./scripts/drop-y1-fixed.sh                    # dry-run
+./scripts/drop-y1-fixed.sh --execute \
+  --confirm-drop gnomad_lr_y1_scratch_v5_current \
+  --artifacts /absolute/path/to/new/drop-receipts
+```
+
+The fixed database is intentionally not a serving pointer and these commands do not
+load coverage, STR, or methylation.
+
 ## Distributed pool workflow
 
 Build the custom worker before creating/updating a Genohype pool:

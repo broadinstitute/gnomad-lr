@@ -15,6 +15,7 @@ python3 scripts/test-reconcile-y1-chr22-source.py
 python3 scripts/test-reconcile-y1-contig-source.py
 python3 scripts/test-verify-y1-chr22-signatures.py
 python3 scripts/test-verify-worker-artifact.py
+python3 scripts/test-y1-fixed-commands.py
 python3 scripts/generate-y1-chr22-manifest.py --source-manifest sources/y1/primary-source-manifest.json --cohort hgsvc_hprc --run-id ignored-when-checking --attempt ignored-when-checking --output manifests/y1/hgsvc-hprc-chr22-1mb.json --check
 python3 scripts/generate-y1-chr22-manifest.py --source-manifest sources/y1/primary-source-manifest.json --cohort aou --run-id ignored-when-checking --attempt ignored-when-checking --output manifests/y1/aou-chr22-1mb.json --check
 python3 scripts/generate-y1-chr22-manifest.py --source-manifest sources/y1/primary-source-manifest.json --cohort hgsvc_hprc --run-id ignored-when-checking --attempt ignored-when-checking --output manifests/y1/hgsvc-hprc-chr22-1mb-r3.json --check
