@@ -70,12 +70,12 @@ hdr "ClickHouse on $CH_VM"
 CH_SQL=$(cat <<'SQL'
 echo "## databases"
 curl -s --max-time 30 --data-binary "SELECT name FROM system.databases WHERE name NOT IN ('system','default','information_schema','INFORMATION_SCHEMA') ORDER BY name FORMAT TabSeparated" http://127.0.0.1:8123/
-echo "## active chr22 pointers"
-for db in $(curl -s --max-time 30 --data-binary "SELECT name FROM system.databases WHERE name LIKE 'gnomad_lr_y1_serving%' OR name LIKE 'gnomad_lr_y1_scratch_chr22%' FORMAT TabSeparated" http://127.0.0.1:8123/); do
-  curl -s --max-time 30 --data-binary "SELECT '$db', cohort, run_id FROM $db.lr_y1_active_partitions FINAL WHERE run_id != '' FORMAT TabSeparated" http://127.0.0.1:8123/ 2>/dev/null
+echo "## accepted Y1 runs"
+for db in $(curl -s --max-time 30 --data-binary "SELECT name FROM system.databases WHERE name LIKE 'gnomad_lr_y1%' FORMAT TabSeparated" http://127.0.0.1:8123/); do
+  curl -s --max-time 30 --data-binary "SELECT '$db', cohort, run_id, chrom, state FROM $db.lr_y1_load_runs FINAL WHERE state = 'accepted_frozen' ORDER BY cohort, run_id FORMAT TabSeparated" http://127.0.0.1:8123/ 2>/dev/null
 done
-echo "## rows in the largest LR tables"
-curl -s --max-time 45 --data-binary "SELECT database, table, sum(rows) FROM system.parts WHERE active AND database LIKE 'gnomad_lr%' AND table IN ('lr_y1_summaries','lr_y1_carriers','lr_y1_coverage','lr_methylation_canonical_prototype','lr_str_histograms','lr_y1_methylation_phased_staging') GROUP BY database, table ORDER BY database, table FORMAT TabSeparated" http://127.0.0.1:8123/
+echo "## rows in LR tables"
+curl -s --max-time 45 --data-binary "SELECT database, table, sum(rows) FROM system.parts WHERE active AND database LIKE 'gnomad_lr%' AND table IN ('lr_y1_summaries','lr_y1_alleles','lr_y1_frequencies','lr_y1_carriers','lr_y1_metadata','lr_y1_coverage','lr_y1_str_histograms','lr_y1_methylation','lr_y1_methylation_summary','lr_y1_methylation_availability') GROUP BY database, table ORDER BY database, table FORMAT TabSeparated" http://127.0.0.1:8123/
 echo "## disk"
 df -h /data | tail -1 | awk '{print "  /data "$2" total, "$4" free ("$5" used)"}'
 SQL
@@ -93,9 +93,9 @@ fi
 hdr "docs"
 cat <<'EOF'
   ~/notebooks/genohype-eco/workspaces/gnomad-lr/concepts/y1-chr22-loading/
-    03-fast-path-plan.md      the plan
-    01-clickhouse-access.md   credentials
-    02-pool-operations.md     pool runbook
+    overview.md               architecture and current behavior
+    01-clickhouse-access.md   credentials and tunnels
+    02-pool-operations.md     pool commands
 
   checks
     ./scripts/verify.sh
