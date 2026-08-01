@@ -163,51 +163,9 @@ impl VcfStream {
                 }
             };
             let mut bgzf_data = bgzf::Reader::new(reader);
-            let query = noodles::csi::io::Query::new(&mut bgzf_data, chunks);
-            let mut buf_query = BufReader::new(query);
-            let mut bytes = Vec::new();
-            let tail = loop {
-                bytes.clear();
-                let count = match buf_query.read_until(b'\n', &mut bytes) {
-                    Ok(count) => count,
-                    Err(error) => {
-                        let _ = tx.send(Err(error.into()));
-                        return;
-                    }
-                };
-                if count == 0 {
-                    break None;
-                }
-                if !bytes.ends_with(b"\n") {
-                    // A CSI query stops at its virtual chunk end even when its
-                    // final buffered read has spilled into the next VCF row.
-                    // Complete that row from the underlying BGZF stream before
-                    // deciding whether it is an off-interval spill record.
-                    break Some(std::mem::take(&mut bytes));
-                }
-                bytes.pop();
-                if let Err(error) = send_indexed_record(&mut bytes, &tx, &chrom_owned, start, stop)
-                {
-                    let _ = tx.send(Err(error));
-                    return;
-                }
-            };
-            drop(buf_query);
-
-            if let Some(mut tail) = tail {
-                match bgzf_data.read_until(b'\n', &mut tail) {
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = tx.send(Err(error.into()));
-                        return;
-                    }
-                }
-                if tail.ends_with(b"\n") {
-                    tail.pop();
-                }
-                if let Err(error) = send_indexed_record(&mut tail, &tx, &chrom_owned, start, stop) {
-                    let _ = tx.send(Err(error));
-                }
+            let mut query = noodles::csi::io::Query::new(&mut bgzf_data, chunks);
+            if let Err(error) = stream_indexed_records(&mut query, &tx, &chrom_owned, start, stop) {
+                let _ = tx.send(Err(error));
             }
         });
 
@@ -220,6 +178,27 @@ impl VcfStream {
     /// Iterate over data lines. I/O and BGZF decoding errors are never discarded.
     pub fn records(self) -> impl Iterator<Item = anyhow::Result<String>> + Send {
         self.lines
+    }
+}
+
+fn stream_indexed_records<R: BufRead>(
+    query: &mut R,
+    tx: &mpsc::SyncSender<anyhow::Result<String>>,
+    expected_chrom: &str,
+    start: u32,
+    stop: u32,
+) -> anyhow::Result<()> {
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        let count = query.read_until(b'\n', &mut bytes)?;
+        if count == 0 {
+            return Ok(());
+        }
+        if bytes.ends_with(b"\n") {
+            bytes.pop();
+        }
+        send_indexed_record(&mut bytes, tx, expected_chrom, start, stop)?;
     }
 }
 
@@ -361,13 +340,14 @@ pub fn info_first_u32(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<u
 
 #[cfg(test)]
 mod tests {
-    use super::VcfStream;
+    use super::{stream_indexed_records, VcfStream};
     use noodles::bgzf;
     use noodles::core::Position;
     use noodles::csi::binning_index::index::reference_sequence::bin::Chunk;
     use noodles::tabix;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn indexed_fixture(label: &str, records: &[(u32, &str)]) -> (PathBuf, PathBuf) {
@@ -409,6 +389,49 @@ mod tests {
         let mut index_writer = tabix::io::Writer::new(file);
         index_writer.write_index(&indexer.build()).unwrap();
         (path, index_path)
+    }
+
+    fn explicit_chunk_fixture(label: &str, records: &[Vec<u8>]) -> (PathBuf, Vec<Chunk>) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "gnomad-lr-vcf-explicit-{label}-{}-{nonce}.vcf.gz",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = bgzf::Writer::new(file);
+        writeln!(writer, "##fileformat=VCFv4.3").unwrap();
+        writeln!(writer, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO").unwrap();
+        writer.flush().unwrap();
+
+        let chunks = records
+            .iter()
+            .map(|record| {
+                let start = writer.virtual_position();
+                writer.write_all(record).unwrap();
+                let end = writer.virtual_position();
+                Chunk::new(start, end)
+            })
+            .collect();
+        writer.finish().unwrap();
+        (path, chunks)
+    }
+
+    fn collect_explicit_chunks(
+        path: &PathBuf,
+        chunks: Vec<Chunk>,
+        start: u32,
+        stop: u32,
+    ) -> anyhow::Result<Vec<String>> {
+        let file = std::fs::File::open(path).unwrap();
+        let mut bgzf_reader = bgzf::Reader::new(file);
+        let mut query = noodles::csi::io::Query::new(&mut bgzf_reader, chunks);
+        let (sender, receiver) = mpsc::sync_channel(16);
+        stream_indexed_records(&mut query, &sender, "chr1", start, stop)?;
+        drop(sender);
+        receiver.into_iter().collect()
     }
 
     fn remove_fixture(path: &PathBuf, index_path: &PathBuf) {
@@ -455,6 +478,103 @@ mod tests {
             adjacent_rows.unwrap(),
             [second.to_string(), third.to_string()]
         );
+    }
+
+    #[test]
+    fn noncontiguous_chunks_do_not_merge_a_gap_prefix_with_the_next_record() {
+        let prefix = "chr1\t10000\t.\tA\tC\t.\tPASS\tPAD=";
+        let first = format!("{prefix}{}", "x".repeat(8187 - prefix.len()));
+        let second = "chr1\t20000\t.\tG\tT\t.\tPASS\t.";
+        let records = vec![
+            format!("{first}\n").into_bytes(),
+            b"chr1\t15000\t.\tA\tG\t.\tPASS\t.\n".to_vec(),
+            format!("{second}\n").into_bytes(),
+        ];
+        let (path, chunks) = explicit_chunk_fixture("merge", &records);
+        assert!(chunks[0].end() < chunks[2].start());
+
+        let rows = collect_explicit_chunks(&path, vec![chunks[0], chunks[2]], 10_000, 20_000);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(rows.unwrap(), [first, second.to_string()]);
+    }
+
+    #[test]
+    fn noncontiguous_chunks_do_not_duplicate_a_record_after_seeking() {
+        let first = "chr1\t10000\t.\tA\tC\t.\tPASS\t.";
+        let second = "chr1\t20000\t.\tG\tT\t.\tPASS\t.";
+        let records = vec![
+            format!("{first}\n").into_bytes(),
+            b"chr1\t15000\t.\tA\tG\t.\tPASS\t.\n".to_vec(),
+            format!("{second}\n").into_bytes(),
+        ];
+        let (path, chunks) = explicit_chunk_fixture("duplicate", &records);
+        assert!(chunks[0].end() < chunks[2].start());
+
+        let rows = collect_explicit_chunks(&path, vec![chunks[0], chunks[2]], 10_000, 20_000);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(rows.unwrap(), [first.to_string(), second.to_string()]);
+    }
+
+    #[test]
+    fn chr1_multi_chunk_query_shape_is_exact_once_across_all_229_transitions() {
+        // The identity-checked chr1 TBI has 107 multi-chunk 1 Mb queries with
+        // this chunk-count distribution (336 chunks, 229 transitions).
+        let distribution = [
+            (2usize, 47usize),
+            (3, 27),
+            (4, 21),
+            (5, 4),
+            (6, 4),
+            (7, 1),
+            (8, 2),
+            (10, 1),
+        ];
+        let mut records = Vec::new();
+        let mut expected = Vec::new();
+        for i in 0..10u32 {
+            let selected = format!("chr1\t{}\t.\tA\tC\t.\tPASS\t.", 10_000 + 2 * i);
+            expected.push(selected.clone());
+            records.push(format!("{selected}\n").into_bytes());
+            if i < 9 {
+                records
+                    .push(format!("chr1\t{}\t.\tG\tT\t.\tPASS\t.\n", 10_001 + 2 * i).into_bytes());
+            }
+        }
+        let (path, all_chunks) = explicit_chunk_fixture("chr1-query-shape", &records);
+        let selected_chunks: Vec<_> = all_chunks.iter().step_by(2).copied().collect();
+
+        let mut query_count = 0;
+        let mut transition_count = 0;
+        for (chunk_count, repetitions) in distribution {
+            for _ in 0..repetitions {
+                let rows = collect_explicit_chunks(
+                    &path,
+                    selected_chunks[..chunk_count].to_vec(),
+                    10_000,
+                    10_018,
+                )
+                .unwrap();
+                assert_eq!(rows, expected[..chunk_count]);
+                query_count += 1;
+                transition_count += chunk_count - 1;
+            }
+        }
+        let _ = std::fs::remove_file(path);
+        assert_eq!(query_count, 107);
+        assert_eq!(transition_count, 229);
+    }
+
+    #[test]
+    fn indexed_crlf_and_unterminated_source_eof_match_line_semantics() {
+        let crlf = "chr1\t10000\t.\tA\tC\t.\tPASS\t.";
+        let eof = "chr1\t20000\t.\tG\tT\t.\tPASS\t.";
+        let records = vec![format!("{crlf}\r\n").into_bytes(), eof.as_bytes().to_vec()];
+        let (path, chunks) = explicit_chunk_fixture("crlf-eof", &records);
+        let contiguous = Chunk::new(chunks[0].start(), chunks[1].end());
+
+        let rows = collect_explicit_chunks(&path, vec![contiguous], 10_000, 20_000);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(rows.unwrap(), [crlf.to_string(), eof.to_string()]);
     }
 
     #[test]
