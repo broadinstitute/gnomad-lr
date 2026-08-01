@@ -15,6 +15,7 @@ CH_PRIVATE="http://192.168.0.15:8123"
 GH="${GENOHYPE_BIN:-$(command -v genohype || true)}"
 COORD_BIN="${GENOHYPE_WORKER_BIN:-$(command -v genohype-worker || true)}"
 MAX_WORKERS=8
+MAX_SCALE_ATTEMPTS=5
 TIMEOUT_SECONDS=7200
 EXECUTE=false
 CONFIRM=""
@@ -155,6 +156,30 @@ ch_query() {
   curl --silent --show-error --fail-with-body --data-binary "$1" "$CH_LOCAL/"
 }
 
+# New GCE workers can report ready before their SSH endpoint accepts the binary
+# upload. A failed scale may also leave some workers running, so always return to
+# zero before retrying; this is the same fail-safe transition used by on_exit.
+scale_workers_with_retry() {
+  local workers="$1" label="$2" log="$3" attempt=1
+  : >"$log"
+  while ((attempt <= MAX_SCALE_ATTEMPTS)); do
+    if "$GH" --config "$CFG" pool scale "$POOL" --workers "$workers" >>"$log" 2>&1; then
+      return 0
+    fi
+    checkpoint "LOAD $label scale workers=$workers failed attempt=$attempt/$MAX_SCALE_ATTEMPTS"
+    if ((attempt == MAX_SCALE_ATTEMPTS)); then
+      return 1
+    fi
+    if ! "$GH" --config "$CFG" pool scale "$POOL" --workers 0 >>"$log" 2>&1; then
+      echo "could not reset pool to zero after failed scale" >&2
+      return 1
+    fi
+    checkpoint "LOAD $label scale retry reset workers=0"
+    sleep $((attempt * 15))
+    ((attempt += 1))
+  done
+}
+
 write_pool_config() {
   cat >"$CFG" <<EOF
 [defaults]
@@ -266,11 +291,11 @@ submit_and_run() {
   printf '%s\n' "$job" >"$ARTIFACTS/$label-job-id.txt"
   checkpoint "LOAD $label submitted job=$job workers=0 tasks=51"
 
-  "$GH" --config "$CFG" pool scale "$POOL" --workers 1 >"$ARTIFACTS/$label-scale-1.log" 2>&1
+  scale_workers_with_retry 1 "$label" "$ARTIFACTS/$label-scale-1.log"
   poll_receipts gate "$job" "$run" "$cohort" "$manifest" "$ARTIFACTS/$label-one-worker-gate.json"
   checkpoint "LOAD $label one-worker gate accepted job=$job"
 
-  "$GH" --config "$CFG" pool scale "$POOL" --workers "$MAX_WORKERS" >"$ARTIFACTS/$label-scale-$MAX_WORKERS.log" 2>&1
+  scale_workers_with_retry "$MAX_WORKERS" "$label" "$ARTIFACTS/$label-scale-$MAX_WORKERS.log"
   poll_receipts complete "$job" "$run" "$cohort" "$manifest" "$ARTIFACTS/$label-durable-receipts.json"
   checkpoint "LOAD $label complete job=$job accepted=51/51 failed_attempts=0 rejects=0"
   "$GH" --config "$CFG" pool scale "$POOL" --workers 0 >"$ARTIFACTS/$label-scale-0.log" 2>&1

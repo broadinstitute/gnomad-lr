@@ -77,6 +77,10 @@ def main() -> None:
         load_text = LOAD.read_text()
         for required in (
             'MAX_WORKERS=8',
+            'MAX_SCALE_ATTEMPTS=5',
+            'scale_workers_with_retry 1',
+            'scale_workers_with_retry "$MAX_WORKERS"',
+            'scale retry reset workers=0',
             'poll_receipts gate',
             'accepted=51/51 failed_attempts=0 rejects=0',
             '"source_records":808853',
