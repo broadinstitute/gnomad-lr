@@ -767,6 +767,58 @@ fn validate_worker_provenance(
     Ok(())
 }
 
+fn validate_attempt_source_identity(
+    report: &serde_json::Value,
+    manifest_task: &PoolY1TaskSpec,
+    attempt_id: &str,
+) -> anyhow::Result<()> {
+    for (field, expected) in [
+        ("source_uri", manifest_task.source_uri.as_str()),
+        (
+            "source_generation",
+            manifest_task.source_generation.as_str(),
+        ),
+        (
+            "source_checksum_algorithm",
+            manifest_task.source_checksum_algorithm.as_str(),
+        ),
+        ("source_checksum", manifest_task.source_checksum.as_str()),
+        ("source_index_uri", manifest_task.source_index_uri.as_str()),
+        (
+            "source_index_generation",
+            manifest_task.source_index_generation.as_str(),
+        ),
+        (
+            "source_index_checksum_algorithm",
+            manifest_task.source_index_checksum_algorithm.as_str(),
+        ),
+        (
+            "source_index_checksum",
+            manifest_task.source_index_checksum.as_str(),
+        ),
+    ] {
+        if report.get(field).and_then(|value| value.as_str()) != Some(expected) {
+            bail!(
+                "attempt {attempt_id} report {field} does not match its manifest task source identity"
+            );
+        }
+    }
+    for (field, expected) in [
+        ("source_size_bytes", manifest_task.source_size_bytes),
+        (
+            "source_index_size_bytes",
+            manifest_task.source_index_size_bytes,
+        ),
+    ] {
+        if report.get(field).and_then(|value| value.as_u64()) != Some(expected) {
+            bail!(
+                "attempt {attempt_id} report {field} does not match its manifest task source identity"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_ledger_coverage(
     target: &ClickHouseTarget,
     run: &PoolY1TaskSpec,
@@ -839,6 +891,7 @@ FORMAT JSONEachRow
                 bail!("attempt {} report has inconsistent {field}", row.attempt_id);
             }
         }
+        validate_attempt_source_identity(&report, manifest_task, &row.attempt_id)?;
         let counts = StagedCounts {
             source_records: row.source_records,
             summaries: row.summary_rows,
@@ -865,18 +918,8 @@ FORMAT JSONEachRow
         let inserted_bytes = report
             .pointer("/inserted/bytes")
             .and_then(|value| value.as_u64());
-        if report.get("source_uri").and_then(|value| value.as_str())
-            != Some(manifest_task.source_uri.as_str())
-            || report
-                .get("source_generation")
-                .and_then(|value| value.as_str())
-                != Some(manifest_task.source_generation.as_str())
-            || report
-                .get("source_size_bytes")
-                .and_then(|value| value.as_u64())
-                != Some(manifest_task.source_size_bytes)
-            || report.get("start").and_then(|value| value.as_u64())
-                != Some(u64::from(manifest_task.start))
+        if report.get("start").and_then(|value| value.as_u64())
+            != Some(u64::from(manifest_task.start))
             || report.get("stop").and_then(|value| value.as_u64())
                 != Some(u64::from(manifest_task.stop))
             || report.get("published").and_then(|value| value.as_bool()) != Some(false)
@@ -1450,6 +1493,63 @@ mod tests {
     }
 
     #[test]
+    fn stale_but_valid_older_tbi_attempt_is_rejected_by_newer_finalization_manifest() {
+        let mut manifest_task = task_for("chr22", 0, 1, grch38_contig_length("chr22").unwrap());
+        manifest_task.source_index_generation = "3".into();
+        manifest_task.source_index_checksum = "AQEBAQEBAQEBAQEBAQEBAQ==".into();
+
+        let mut older_task = manifest_task.clone();
+        older_task.source_index_generation = "2".into();
+        older_task.source_index_checksum = "AAAAAAAAAAAAAAAAAAAAAA==".into();
+        older_task
+            .validate(&older_task.coordinator_task_id)
+            .unwrap();
+        manifest_task
+            .validate(&manifest_task.coordinator_task_id)
+            .unwrap();
+
+        let accepted_older_attempt = serde_json::json!({
+            "state": "accepted",
+            "source_uri": older_task.source_uri.as_str(),
+            "source_generation": older_task.source_generation.as_str(),
+            "source_size_bytes": older_task.source_size_bytes,
+            "source_checksum_algorithm": older_task.source_checksum_algorithm.as_str(),
+            "source_checksum": older_task.source_checksum.as_str(),
+            "source_index_uri": older_task.source_index_uri.as_str(),
+            "source_index_generation": older_task.source_index_generation.as_str(),
+            "source_index_size_bytes": older_task.source_index_size_bytes,
+            "source_index_checksum_algorithm": older_task.source_index_checksum_algorithm.as_str(),
+            "source_index_checksum": older_task.source_index_checksum.as_str(),
+        });
+        validate_attempt_source_identity(
+            &accepted_older_attempt,
+            &older_task,
+            "accepted-older-generation",
+        )
+        .unwrap();
+
+        let error = validate_attempt_source_identity(
+            &accepted_older_attempt,
+            &manifest_task,
+            "accepted-older-generation",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("source_index_generation"));
+
+        let mut legacy_report = accepted_older_attempt;
+        legacy_report
+            .as_object_mut()
+            .unwrap()
+            .remove("source_checksum");
+        assert!(validate_attempt_source_identity(
+            &legacy_report,
+            &older_task,
+            "legacy-without-vcf-checksum"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn retry_rows_are_verified_then_must_be_removed_before_freeze() {
         let (tasks, accepted, counts, states, physical) = snapshot();
         let before = validate_physical_attempts(
@@ -1657,6 +1757,13 @@ mod tests {
             source_uri: task.source_uri.clone(),
             source_generation: task.source_generation.clone(),
             source_size_bytes: task.source_size_bytes,
+            source_checksum_algorithm: task.source_checksum_algorithm.clone(),
+            source_checksum: task.source_checksum.clone(),
+            source_index_uri: task.source_index_uri.clone(),
+            source_index_generation: task.source_index_generation.clone(),
+            source_index_size_bytes: task.source_index_size_bytes,
+            source_index_checksum_algorithm: task.source_index_checksum_algorithm.clone(),
+            source_index_checksum: task.source_index_checksum.clone(),
             counts,
             transformation: transformation.clone(),
             inserted: super::super::InsertStats {
