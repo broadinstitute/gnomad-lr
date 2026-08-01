@@ -156,6 +156,10 @@ pub struct Y1IntervalArgs {
     #[arg(long)]
     pub index_checksum: String,
 
+    /// Immutable adjacent TBI object size in bytes
+    #[arg(long)]
+    pub index_size_bytes: u64,
+
     /// Inclusive one-based interval, for example chr22:20000000-20010000
     #[arg(long)]
     pub region: String,

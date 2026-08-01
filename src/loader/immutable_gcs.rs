@@ -117,10 +117,12 @@ pub fn validate_source_index_pair(
     source: &ImmutableGcsObject,
     index: &ImmutableGcsObject,
 ) -> anyhow::Result<(GcsObjectRequest, GcsObjectRequest)> {
-    let source = source.request().context("invalid immutable BED identity")?;
+    let source = source
+        .request()
+        .context("invalid immutable source identity")?;
     let index = index.request().context("invalid immutable TBI identity")?;
     if source.bucket != index.bucket || index.object != format!("{}.tbi", source.object) {
-        bail!("immutable BED/TBI identities must be an adjacent same-bucket source/index pair");
+        bail!("immutable source/TBI identities must be an adjacent same-bucket source/index pair");
     }
     Ok((source, index))
 }

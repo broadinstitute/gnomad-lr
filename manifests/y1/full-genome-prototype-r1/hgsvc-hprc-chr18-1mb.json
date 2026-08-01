@@ -19,7 +19,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_1",
@@ -41,7 +42,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_2",
@@ -63,7 +65,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_3",
@@ -85,7 +88,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_4",
@@ -107,7 +111,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_5",
@@ -129,7 +134,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_6",
@@ -151,7 +157,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_7",
@@ -173,7 +180,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_8",
@@ -195,7 +203,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_9",
@@ -217,7 +226,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_10",
@@ -239,7 +249,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_11",
@@ -261,7 +272,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_12",
@@ -283,7 +295,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_13",
@@ -305,7 +318,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_14",
@@ -327,7 +341,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_15",
@@ -349,7 +364,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_16",
@@ -371,7 +387,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_17",
@@ -393,7 +410,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_18",
@@ -415,7 +433,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_19",
@@ -437,7 +456,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_20",
@@ -459,7 +479,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_21",
@@ -481,7 +502,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_22",
@@ -503,7 +525,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_23",
@@ -525,7 +548,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_24",
@@ -547,7 +571,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_25",
@@ -569,7 +594,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_26",
@@ -591,7 +617,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_27",
@@ -613,7 +640,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_28",
@@ -635,7 +663,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_29",
@@ -657,7 +686,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_30",
@@ -679,7 +709,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_31",
@@ -701,7 +732,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_32",
@@ -723,7 +755,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_33",
@@ -745,7 +778,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_34",
@@ -767,7 +801,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_35",
@@ -789,7 +824,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_36",
@@ -811,7 +847,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_37",
@@ -833,7 +870,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_38",
@@ -855,7 +893,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_39",
@@ -877,7 +916,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_40",
@@ -899,7 +939,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_41",
@@ -921,7 +962,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_42",
@@ -943,7 +985,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_43",
@@ -965,7 +1008,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_44",
@@ -987,7 +1031,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_45",
@@ -1009,7 +1054,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_46",
@@ -1031,7 +1077,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_47",
@@ -1053,7 +1100,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_48",
@@ -1075,7 +1123,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_49",
@@ -1097,7 +1146,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_50",
@@ -1119,7 +1169,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_51",
@@ -1141,7 +1192,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_52",
@@ -1163,7 +1215,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_53",
@@ -1185,7 +1238,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_54",
@@ -1207,7 +1261,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_55",
@@ -1229,7 +1284,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_56",
@@ -1251,7 +1307,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_57",
@@ -1273,7 +1330,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_58",
@@ -1295,7 +1353,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_59",
@@ -1317,7 +1376,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_60",
@@ -1339,7 +1399,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_61",
@@ -1361,7 +1422,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_62",
@@ -1383,7 +1445,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_63",
@@ -1405,7 +1468,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_64",
@@ -1427,7 +1491,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_65",
@@ -1449,7 +1514,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_66",
@@ -1471,7 +1537,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_67",
@@ -1493,7 +1560,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_68",
@@ -1515,7 +1583,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_69",
@@ -1537,7 +1606,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_70",
@@ -1559,7 +1629,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_71",
@@ -1581,7 +1652,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_72",
@@ -1603,7 +1675,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_73",
@@ -1625,7 +1698,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_74",
@@ -1647,7 +1721,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_75",
@@ -1669,7 +1744,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_76",
@@ -1691,7 +1767,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_77",
@@ -1713,7 +1790,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_78",
@@ -1735,7 +1813,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_79",
@@ -1757,7 +1836,8 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   },
   {
     "coordinator_task_id": "custom_80",
@@ -1779,6 +1859,7 @@
     "source_index_uri": "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr18.vcf.gz.tbi",
     "source_index_generation": "1785249465886173",
     "source_index_checksum_algorithm": "md5_base64",
-    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ=="
+    "source_index_checksum": "4Gs19NK7c+txdKTbpmIieQ==",
+    "source_index_size_bytes": 80043
   }
 ]

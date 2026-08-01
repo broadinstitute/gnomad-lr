@@ -90,6 +90,7 @@ def generate(source: dict[str, Any], cohort: str, contig: str, run_id: str,
             "source_index_generation": str(index["mirror_generation"]),
             "source_index_checksum_algorithm": "md5_base64",
             "source_index_checksum": index["md5_base64"],
+            "source_index_size_bytes": int(index["size"]),
         })
     verify(tasks, contig)
     return tasks
@@ -106,8 +107,8 @@ def verify(tasks: list[dict[str, Any]], contig: str) -> None:
     else:
         raise ValueError("manifest uses an unsupported GRCh38 contig")
     invariant = ("run_id", "release", "cohort", "reference_genome", "chrom",
-                 "source_uri", "source_generation", "source_checksum",
-                 "source_index_uri", "source_index_generation", "source_index_checksum")
+                 "source_uri", "source_generation", "source_checksum", "source_size_bytes",
+                 "source_index_uri", "source_index_generation", "source_index_checksum", "source_index_size_bytes")
     for ordinal, task in enumerate(tasks):
         if task.get("coordinator_task_id") != f"custom_{ordinal}":
             raise ValueError(f"task {ordinal} has a non-deterministic coordinator ID")
@@ -142,6 +143,7 @@ def verify_source_identity(tasks: list[dict[str, Any]], source: dict[str, Any], 
         "source_index_uri": source_uri + ".tbi",
         "source_index_generation": str(index["mirror_generation"]),
         "source_index_checksum": index["md5_base64"],
+        "source_index_size_bytes": int(index["size"]),
     }
     if any(tasks[0].get(key) != value for key, value in expected.items()):
         raise ValueError("manifest identity differs from the checked source inventory")

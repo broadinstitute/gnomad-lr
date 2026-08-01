@@ -7,14 +7,17 @@
 //!
 //! Both modes yield raw tab-delimited lines one at a time without buffering.
 
+use crate::loader::immutable_gcs::{
+    validate_source_index_pair, ImmutableGcsBackend, ImmutableGcsObject, ImmutableGcsReader,
+};
 use anyhow::Context;
 use genohype_core::io::get_reader;
 use noodles::bgzf;
 use noodles::csi::BinningIndex;
 use noodles::tabix;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
-use std::sync::mpsc;
+use std::io::{BufRead, BufReader, Read, Seek};
+use std::sync::{mpsc, Arc};
 use tracing::info;
 
 /// A lightweight VCF line reader that streams from GCS via genohype-core.
@@ -107,72 +110,30 @@ impl VcfStream {
                     .with_context(|| format!("required tabix index is unavailable at {tbi_path}"));
             }
         };
-
-        info!("Using tabix index for {}:{}-{}", chrom, start, stop);
-
         let header_reader = get_reader(vcf_path)?;
-        let bgzf_header = bgzf::Reader::new(header_reader);
-        let mut vcf_header_reader = noodles::vcf::io::Reader::new(bgzf_header);
-        let header = vcf_header_reader.read_header()?;
-        let sample_names: Vec<String> = header
-            .sample_names()
-            .iter()
-            .map(|sample| sample.to_string())
-            .collect();
-        info!("Found {} samples in VCF header", sample_names.len());
+        let data_reader = get_reader(vcf_path)?;
+        open_indexed_region(index, header_reader, data_reader, chrom, start, stop)
+    }
 
-        let index_header = index
-            .header()
-            .ok_or_else(|| anyhow::anyhow!("tabix index has no header"))?;
-        let ref_seq_id = index_header
-            .reference_sequence_names()
-            .iter()
-            .position(|name| {
-                let bytes: &[u8] = name.as_ref();
-                bytes == chrom.as_bytes()
-            })
-            .ok_or_else(|| anyhow::anyhow!("chrom {chrom} not found in tabix index"))?;
-
-        let interval_start = noodles::core::Position::try_from(start.max(1) as usize)?;
-        let interval_end = noodles::core::Position::try_from(stop as usize)?;
-        let interval = noodles::core::region::Interval::from(interval_start..=interval_end);
-        let chunks = index.query(ref_seq_id, interval)?;
-
-        if chunks.is_empty() {
-            info!("No indexed chunks for region {}:{}-{}", chrom, start, stop);
-            return Ok(VcfStream {
-                sample_names,
-                lines: Box::new(std::iter::empty()),
-            });
-        }
-
-        info!("Found {} chunks for region", chunks.len());
-        let vcf_path_owned = vcf_path.to_string();
-        let chrom_owned = chrom.to_string();
-        let (tx, rx) = mpsc::sync_channel::<anyhow::Result<String>>(1024);
-
-        std::thread::spawn(move || {
-            let reader = match get_reader(&vcf_path_owned) {
-                Ok(reader) => reader,
-                Err(error) => {
-                    let _ =
-                        tx.send(Err(error).with_context(|| {
-                            format!("failed to open indexed VCF {vcf_path_owned}")
-                        }));
-                    return;
-                }
-            };
-            let mut bgzf_data = bgzf::Reader::new(reader);
-            let mut query = noodles::csi::io::Query::new(&mut bgzf_data, chunks);
-            if let Err(error) = stream_indexed_records(&mut query, &tx, &chrom_owned, start, stop) {
-                let _ = tx.send(Err(error));
-            }
-        });
-
-        Ok(VcfStream {
-            sample_names,
-            lines: Box::new(rx.into_iter()),
-        })
+    /// Open an exact immutable GCS VCF/TBI pair. Metadata, index, header, and
+    /// data byte ranges are all generation-qualified and identity-checked.
+    pub fn open_immutable_region(
+        backend: Arc<dyn ImmutableGcsBackend>,
+        source: &ImmutableGcsObject,
+        index: &ImmutableGcsObject,
+        chrom: &str,
+        start: u32,
+        stop: u32,
+    ) -> anyhow::Result<Self> {
+        validate_source_index_pair(source, index)?;
+        let index_reader = ImmutableGcsReader::open(backend.clone(), index)
+            .context("failed to open immutable VCF index")?;
+        let index = load_tabix_index_from_reader(index_reader)?;
+        let header_reader = ImmutableGcsReader::open(backend.clone(), source)
+            .context("failed to open immutable VCF header")?;
+        let data_reader = ImmutableGcsReader::open(backend, source)
+            .context("failed to open immutable VCF data")?;
+        open_indexed_region(index, header_reader, data_reader, chrom, start, stop)
     }
 
     /// Iterate over data lines. I/O and BGZF decoding errors are never discarded.
@@ -235,13 +196,87 @@ fn send_indexed_record(
         .map_err(|_| anyhow::anyhow!("indexed VCF receiver dropped before completion"))
 }
 
+fn open_indexed_region<H, D>(
+    index: tabix::Index,
+    header_reader: H,
+    data_reader: D,
+    chrom: &str,
+    start: u32,
+    stop: u32,
+) -> anyhow::Result<VcfStream>
+where
+    H: Read,
+    D: Read + Seek + Send + 'static,
+{
+    info!("Using tabix index for {}:{}-{}", chrom, start, stop);
+    let bgzf_header = bgzf::Reader::new(header_reader);
+    let mut vcf_header_reader = noodles::vcf::io::Reader::new(bgzf_header);
+    let header = vcf_header_reader.read_header()?;
+    let sample_names: Vec<String> = header
+        .sample_names()
+        .iter()
+        .map(|sample| sample.to_string())
+        .collect();
+    info!("Found {} samples in VCF header", sample_names.len());
+
+    let index_header = index
+        .header()
+        .ok_or_else(|| anyhow::anyhow!("tabix index has no header"))?;
+    let ref_seq_id = index_header
+        .reference_sequence_names()
+        .iter()
+        .position(|name| {
+            let bytes: &[u8] = name.as_ref();
+            bytes == chrom.as_bytes()
+        })
+        .ok_or_else(|| anyhow::anyhow!("chrom {chrom} not found in tabix index"))?;
+    let interval_start = noodles::core::Position::try_from(start.max(1) as usize)?;
+    let interval_end = noodles::core::Position::try_from(stop as usize)?;
+    let interval = noodles::core::region::Interval::from(interval_start..=interval_end);
+    let chunks = index.query(ref_seq_id, interval)?;
+    if chunks.is_empty() {
+        info!("No indexed chunks for region {}:{}-{}", chrom, start, stop);
+        return Ok(VcfStream {
+            sample_names,
+            lines: Box::new(std::iter::empty()),
+        });
+    }
+
+    info!("Found {} chunks for region", chunks.len());
+    let chrom_owned = chrom.to_string();
+    let (tx, rx) = mpsc::sync_channel::<anyhow::Result<String>>(1024);
+    std::thread::spawn(move || {
+        let mut bgzf_data = bgzf::Reader::new(data_reader);
+        let mut query = noodles::csi::io::Query::new(&mut bgzf_data, chunks);
+        if let Err(error) = stream_indexed_records(&mut query, &tx, &chrom_owned, start, stop) {
+            let _ = tx.send(Err(error));
+        }
+    });
+    Ok(VcfStream {
+        sample_names,
+        lines: Box::new(rx.into_iter()),
+    })
+}
+
 /// Read and preserve the raw VCF header required by the strict Y1 contract.
+#[allow(dead_code)]
 pub fn read_header_text(vcf_path: &str) -> anyhow::Result<String> {
-    let reader = get_reader(vcf_path)?;
+    read_header_text_from_reader(get_reader(vcf_path)?, vcf_path)
+}
+
+pub fn read_immutable_header_text(
+    backend: Arc<dyn ImmutableGcsBackend>,
+    source: &ImmutableGcsObject,
+) -> anyhow::Result<String> {
+    let reader =
+        ImmutableGcsReader::open(backend, source).context("failed to open immutable VCF header")?;
+    read_header_text_from_reader(reader, &source.immutable_read_uri)
+}
+
+fn read_header_text_from_reader<R: Read>(reader: R, label: &str) -> anyhow::Result<String> {
     let bgzf_reader = bgzf::Reader::new(reader);
     let buf_reader = BufReader::new(bgzf_reader);
     let mut lines = Vec::new();
-
     for line in buf_reader.lines() {
         let line = line?;
         if !line.starts_with('#') {
@@ -253,12 +288,14 @@ pub fn read_header_text(vcf_path: &str) -> anyhow::Result<String> {
             return Ok(lines.join("\n"));
         }
     }
-
-    anyhow::bail!("VCF header not found in {vcf_path}")
+    anyhow::bail!("VCF header not found in {label}")
 }
 
 fn load_tabix_index(tbi_path: &str) -> anyhow::Result<tabix::Index> {
-    let reader = get_reader(tbi_path)?;
+    load_tabix_index_from_reader(get_reader(tbi_path)?)
+}
+
+fn load_tabix_index_from_reader<R: Read>(reader: R) -> anyhow::Result<tabix::Index> {
     let mut tbi_reader = tabix::io::Reader::new(reader);
     Ok(tbi_reader.read_index()?)
 }
@@ -340,14 +377,20 @@ pub fn info_first_u32(info: &HashMap<&str, Option<&str>>, key: &str) -> Option<u
 
 #[cfg(test)]
 mod tests {
-    use super::{stream_indexed_records, VcfStream};
+    use super::{read_immutable_header_text, stream_indexed_records, VcfStream};
+    use crate::loader::immutable_gcs::{
+        GcsObjectMetadata, GcsObjectRequest, GcsRangeResponse, ImmutableGcsBackend,
+        ImmutableGcsObject,
+    };
     use noodles::bgzf;
     use noodles::core::Position;
     use noodles::csi::binning_index::index::reference_sequence::bin::Chunk;
     use noodles::tabix;
+    use std::collections::HashMap;
     use std::io::Write;
+    use std::ops::Range;
     use std::path::PathBuf;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn indexed_fixture(label: &str, records: &[(u32, &str)]) -> (PathBuf, PathBuf) {
@@ -389,6 +432,116 @@ mod tests {
         let mut index_writer = tabix::io::Writer::new(file);
         index_writer.write_index(&indexer.build()).unwrap();
         (path, index_path)
+    }
+
+    #[derive(Clone)]
+    struct FakeObject {
+        bytes: Vec<u8>,
+        generation: String,
+        md5: String,
+    }
+
+    #[derive(Default)]
+    struct FakeGcsBackend {
+        objects: HashMap<String, FakeObject>,
+        requests: Mutex<Vec<(String, String, Range<u64>)>>,
+    }
+
+    impl ImmutableGcsBackend for FakeGcsBackend {
+        fn metadata(&self, request: &GcsObjectRequest) -> anyhow::Result<GcsObjectMetadata> {
+            self.requests.lock().unwrap().push((
+                request.object.clone(),
+                request.generation.clone(),
+                0..0,
+            ));
+            let object = self
+                .objects
+                .get(&request.object)
+                .ok_or_else(|| anyhow::anyhow!("fixture object not found"))?;
+            Ok(GcsObjectMetadata {
+                generation: object.generation.clone(),
+                byte_size: object.bytes.len() as u64,
+                md5_base64: object.md5.clone(),
+            })
+        }
+
+        fn read_range(
+            &self,
+            request: &GcsObjectRequest,
+            range: Range<u64>,
+        ) -> anyhow::Result<GcsRangeResponse> {
+            self.requests.lock().unwrap().push((
+                request.object.clone(),
+                request.generation.clone(),
+                range.clone(),
+            ));
+            let object = self
+                .objects
+                .get(&request.object)
+                .ok_or_else(|| anyhow::anyhow!("fixture object not found"))?;
+            Ok(GcsRangeResponse {
+                generation: object.generation.clone(),
+                total_size: object.bytes.len() as u64,
+                range_start: range.start,
+                data: object.bytes[range.start as usize..range.end as usize].to_vec(),
+            })
+        }
+    }
+
+    const FIXTURE_MD5: &str = "AAAAAAAAAAAAAAAAAAAAAA==";
+
+    fn immutable_object(uri: &str, generation: &str, bytes: &[u8]) -> ImmutableGcsObject {
+        ImmutableGcsObject {
+            uri: uri.into(),
+            generation: generation.into(),
+            byte_size: bytes.len() as u64,
+            checksum_algorithm: "md5_base64".into(),
+            checksum: FIXTURE_MD5.into(),
+            immutable_read_uri: format!("{uri}?generation={generation}"),
+        }
+    }
+
+    fn immutable_fixture() -> (
+        Arc<FakeGcsBackend>,
+        ImmutableGcsObject,
+        ImmutableGcsObject,
+        PathBuf,
+        PathBuf,
+    ) {
+        let (path, index_path) =
+            indexed_fixture("immutable", &[(10_000, "chr1\t10000\t.\tA\tC\t.\tPASS\t.")]);
+        let source_bytes = std::fs::read(&path).unwrap();
+        let index_bytes = std::fs::read(&index_path).unwrap();
+        let source = immutable_object("gs://bucket/source.vcf.gz", "42", &source_bytes);
+        let index = immutable_object("gs://bucket/source.vcf.gz.tbi", "43", &index_bytes);
+        let objects = HashMap::from([
+            (
+                "source.vcf.gz".into(),
+                FakeObject {
+                    bytes: source_bytes,
+                    generation: "42".into(),
+                    md5: FIXTURE_MD5.into(),
+                },
+            ),
+            (
+                "source.vcf.gz.tbi".into(),
+                FakeObject {
+                    bytes: index_bytes,
+                    generation: "43".into(),
+                    md5: FIXTURE_MD5.into(),
+                },
+            ),
+        ]);
+        (
+            Arc::new(FakeGcsBackend {
+                objects,
+                requests: Mutex::new(Vec::new()),
+            }),
+            source,
+            index,
+            path,
+            index_path,
+        )
     }
 
     fn explicit_chunk_fixture(label: &str, records: &[Vec<u8>]) -> (PathBuf, Vec<Chunk>) {
@@ -437,6 +590,74 @@ mod tests {
     fn remove_fixture(path: &PathBuf, index_path: &PathBuf) {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(index_path);
+    }
+
+    #[test]
+    fn immutable_primary_reader_uses_declared_generation_for_index_header_and_data() {
+        let (backend, source, index, path, index_path) = immutable_fixture();
+        let header = read_immutable_header_text(backend.clone(), &source).unwrap();
+        assert!(header.contains("#CHROM"));
+        let rows: anyhow::Result<Vec<_>> = VcfStream::open_immutable_region(
+            backend.clone(),
+            &source,
+            &index,
+            "chr1",
+            10_000,
+            10_000,
+        )
+        .unwrap()
+        .records()
+        .collect();
+        remove_fixture(&path, &index_path);
+        assert_eq!(rows.unwrap().len(), 1);
+        let requests = backend.requests.lock().unwrap();
+        assert!(requests.iter().any(|(name, generation, range)| {
+            name == "source.vcf.gz.tbi" && generation == "43" && !range.is_empty()
+        }));
+        assert!(requests.iter().any(|(name, generation, range)| {
+            name == "source.vcf.gz" && generation == "42" && !range.is_empty()
+        }));
+    }
+
+    #[test]
+    fn stale_or_substituted_primary_index_is_rejected() {
+        let (backend, source, mut index, path, index_path) = immutable_fixture();
+        index.generation = "44".into();
+        index.immutable_read_uri = format!("{}?generation=44", index.uri);
+        assert!(VcfStream::open_immutable_region(
+            backend.clone(),
+            &source,
+            &index,
+            "chr1",
+            1,
+            10_000
+        )
+        .is_err());
+
+        let mut substituted = index;
+        substituted.generation = "43".into();
+        substituted.uri = "gs://bucket/other.vcf.gz.tbi".into();
+        substituted.immutable_read_uri =
+            format!("{}?generation={}", substituted.uri, substituted.generation);
+        assert!(VcfStream::open_immutable_region(
+            backend,
+            &source,
+            &substituted,
+            "chr1",
+            1,
+            10_000
+        )
+        .is_err());
+        remove_fixture(&path, &index_path);
+    }
+
+    #[test]
+    fn changed_primary_vcf_generation_is_rejected_before_header_read() {
+        let (backend, mut source, _, path, index_path) = immutable_fixture();
+        source.generation = "41".into();
+        source.immutable_read_uri = format!("{}?generation=41", source.uri);
+        assert!(read_immutable_header_text(backend, &source).is_err());
+        remove_fixture(&path, &index_path);
     }
 
     #[test]

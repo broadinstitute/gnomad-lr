@@ -82,6 +82,7 @@ def generate(
             "source_index_generation": str(index["mirror_generation"]),
             "source_index_checksum_algorithm": "md5_base64",
             "source_index_checksum": index["md5_base64"],
+            "source_index_size_bytes": int(index["size"]),
         })
     if fail_once_ordinal is not None:
         if fail_once_ordinal < 0 or fail_once_ordinal >= len(tasks):
@@ -99,7 +100,7 @@ def generate(
 def verify(tasks: list[dict[str, Any]]) -> None:
     if not tasks:
         raise ValueError("manifest must contain tasks")
-    invariant = ("run_id", "release", "cohort", "reference_genome", "chrom", "source_uri", "source_generation", "source_checksum", "source_index_uri", "source_index_generation", "source_index_checksum")
+    invariant = ("run_id", "release", "cohort", "reference_genome", "chrom", "source_uri", "source_generation", "source_checksum", "source_size_bytes", "source_index_uri", "source_index_generation", "source_index_checksum", "source_index_size_bytes")
     first = tasks[0]
     previous_stop = 0
     task_ids: set[str] = set()
@@ -143,6 +144,7 @@ def verify_source_identity(tasks: list[dict[str, Any]], source_manifest: dict[st
         "source_index_uri": source_uri + ".tbi",
         "source_index_generation": str(index["mirror_generation"]),
         "source_index_checksum": index["md5_base64"],
+        "source_index_size_bytes": int(index["size"]),
     }
     if any(tasks[0].get(key) != value for key, value in expected.items()):
         raise ValueError("manifest identity differs from the checked source inventory")

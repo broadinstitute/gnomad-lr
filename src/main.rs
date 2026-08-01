@@ -369,6 +369,7 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
         source_index_generation: args.index_generation.clone(),
         source_index_checksum_algorithm: "md5_base64".to_string(),
         source_index_checksum: args.index_checksum.clone(),
+        source_index_size_bytes: args.index_size_bytes,
         retry_attempt_id: None,
         controlled_fail_once: None,
     };
@@ -426,6 +427,7 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
         &source_index_uri,
         &args.index_generation,
         &args.index_checksum,
+        args.index_size_bytes,
     )?;
     write_json_report(&args.report_path, &report)
 }
@@ -438,6 +440,7 @@ fn direct_y1_report(
     source_index_uri: &str,
     source_index_generation: &str,
     source_index_checksum: &str,
+    source_index_size_bytes: u64,
 ) -> anyhow::Result<serde_json::Value> {
     let mut report = serde_json::to_value(attempt)?;
     let object = report
@@ -467,7 +470,8 @@ fn direct_y1_report(
             "index_uri": source_index_uri,
             "index_generation": source_index_generation,
             "index_checksum_algorithm": "md5_base64",
-            "index_checksum": source_index_checksum
+            "index_checksum": source_index_checksum,
+            "index_size_bytes": source_index_size_bytes
         }),
     );
     Ok(report)
@@ -569,6 +573,7 @@ mod direct_y1_tests {
             "gs://source.vcf.gz.tbi",
             "124",
             "index-md5",
+            789,
         )
         .unwrap();
 
@@ -583,6 +588,7 @@ mod direct_y1_tests {
         assert_eq!(report["worker_principal"], "writer_a");
         assert_eq!(report["source"]["size_bytes"], 456);
         assert_eq!(report["source"]["index_generation"], "124");
+        assert_eq!(report["source"]["index_size_bytes"], 789);
         assert_eq!(report["accepted"], true);
     }
 }

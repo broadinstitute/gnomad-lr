@@ -6,9 +6,13 @@ use super::{
     stage_attempt_tracked, AttemptContext, ClickHouseTarget, Cohort, InsertStats, StagedCounts,
     TransformationReport, Y1Header,
 };
-use crate::loader::vcf_reader::{read_header_text, VcfStream};
+use crate::loader::immutable_gcs::{
+    validate_source_index_pair, HttpGcsBackend, ImmutableGcsObject,
+};
+use crate::loader::vcf_reader::{read_immutable_header_text, VcfStream};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +58,7 @@ pub struct PoolY1TaskSpec {
     pub source_index_generation: String,
     pub source_index_checksum_algorithm: String,
     pub source_index_checksum: String,
+    pub source_index_size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,14 +164,12 @@ impl PoolY1TaskSpec {
             || self.source_index_generation.is_empty()
             || self.source_index_checksum.is_empty()
             || self.source_size_bytes == 0
+            || self.source_index_size_bytes == 0
         {
             bail!("task source identity must be complete and immutable");
         }
-        if self.source_checksum_algorithm != "md5_base64"
-            || self.source_index_checksum_algorithm != "md5_base64"
-        {
-            bail!("only checked md5_base64 source identities are accepted");
-        }
+        self.immutable_source_index()
+            .context("invalid immutable primary VCF/TBI task identity")?;
         match (&self.controlled_fail_once, &self.retry_attempt_id) {
             (Some(injection), Some(retry_id)) => {
                 if injection.mode != "after_first_staged_batch"
@@ -182,6 +185,33 @@ impl PoolY1TaskSpec {
             _ => bail!("controlled_fail_once and retry_attempt_id must be supplied together"),
         }
         Ok(())
+    }
+
+    fn immutable_source_index(&self) -> anyhow::Result<(ImmutableGcsObject, ImmutableGcsObject)> {
+        let source = ImmutableGcsObject {
+            uri: self.source_uri.clone(),
+            generation: self.source_generation.clone(),
+            byte_size: self.source_size_bytes,
+            checksum_algorithm: self.source_checksum_algorithm.clone(),
+            checksum: self.source_checksum.clone(),
+            immutable_read_uri: format!(
+                "{}?generation={}",
+                self.source_uri, self.source_generation
+            ),
+        };
+        let index = ImmutableGcsObject {
+            uri: self.source_index_uri.clone(),
+            generation: self.source_index_generation.clone(),
+            byte_size: self.source_index_size_bytes,
+            checksum_algorithm: self.source_index_checksum_algorithm.clone(),
+            checksum: self.source_index_checksum.clone(),
+            immutable_read_uri: format!(
+                "{}?generation={}",
+                self.source_index_uri, self.source_index_generation
+            ),
+        };
+        validate_source_index_pair(&source, &index)?;
+        Ok((source, index))
     }
 }
 
@@ -241,8 +271,10 @@ pub fn run_pool_interval_attempt(
     let mut injected = false;
 
     let execution = (|| -> anyhow::Result<()> {
-        let header_text =
-            read_header_text(&task.source_uri).context("failed to read pinned Y1 header")?;
+        let (source, index) = task.immutable_source_index()?;
+        let backend = Arc::new(HttpGcsBackend::new()?);
+        let header_text = read_immutable_header_text(backend.clone(), &source)
+            .context("failed to read immutable Y1 header")?;
         let header = Y1Header::parse(&header_text, cohort)?;
         if header.reference_genome.as_str() != task.reference_genome {
             bail!("source header reference does not match manifest reference_genome");
@@ -250,8 +282,10 @@ pub fn run_pool_interval_attempt(
 
         let mut record_offset = 0usize;
         let mut record_batch = Vec::with_capacity(batch_records);
-        let records = VcfStream::open_region_required_index(
-            &task.source_uri,
+        let records = VcfStream::open_immutable_region(
+            backend,
+            &source,
+            &index,
             &task.chrom,
             task.start,
             task.stop,
@@ -686,12 +720,13 @@ mod tests {
             source_uri: "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr22.vcf.gz".into(),
             source_generation: "1".into(),
             source_checksum_algorithm: "md5_base64".into(),
-            source_checksum: "abc".into(),
+            source_checksum: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
             source_size_bytes: 1,
             source_index_uri: "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr22.vcf.gz.tbi".into(),
             source_index_generation: "2".into(),
             source_index_checksum_algorithm: "md5_base64".into(),
-            source_index_checksum: "def".into(),
+            source_index_checksum: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            source_index_size_bytes: 1,
             retry_attempt_id: None,
             controlled_fail_once: None,
         }

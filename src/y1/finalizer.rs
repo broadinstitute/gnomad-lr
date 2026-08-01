@@ -705,6 +705,7 @@ fn validate_manifest(tasks: &[PoolY1TaskSpec]) -> anyhow::Result<PoolY1TaskSpec>
             || task.source_index_uri != first.source_index_uri
             || task.source_index_generation != first.source_index_generation
             || task.source_index_checksum != first.source_index_checksum
+            || task.source_index_size_bytes != first.source_index_size_bytes
         {
             bail!("task {index} changes a run or immutable source identity");
         }
@@ -1315,14 +1316,15 @@ mod tests {
             ),
             source_generation: "1".into(),
             source_checksum_algorithm: "md5_base64".into(),
-            source_checksum: "x".into(),
+            source_checksum: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
             source_size_bytes: 1,
             source_index_uri: format!(
                 "gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.{chrom}.vcf.gz.tbi"
             ),
             source_index_generation: "2".into(),
             source_index_checksum_algorithm: "md5_base64".into(),
-            source_index_checksum: "y".into(),
+            source_index_checksum: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            source_index_size_bytes: 1,
             retry_attempt_id: None,
             controlled_fail_once: None,
         }
