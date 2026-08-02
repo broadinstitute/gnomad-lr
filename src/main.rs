@@ -115,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
                     build_identity = pool::WORKER_BUILD_IDENTITY,
                     binary_role = "custom-worker",
                     worker_protocol = "genohype-custom-task",
+                    worker_protocol_version = 1_u8,
                     "starting gnomAD-LR pool worker"
                 );
                 let handler = Arc::new(pool::LrTaskHandler);
