@@ -113,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
                     worker_id = %worker_id,
                     coordinator_url = %url,
                     build_identity = pool::WORKER_BUILD_IDENTITY,
+                    binary_role = "custom-worker",
                     "starting gnomAD-LR pool worker"
                 );
                 let handler = Arc::new(pool::LrTaskHandler);
