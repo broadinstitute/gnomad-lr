@@ -51,11 +51,19 @@ y1_tables = {
     "lr_y1_carriers",
 }
 y1_sql_dir = ROOT / "sql" / "y1"
+presentation_only_tables = {"lr_y1_methylation_source_haplotype_presentation"}
 actual_y1_files = {path.stem for path in y1_sql_dir.glob("lr_*.sql")}
-assert actual_y1_files == y1_tables, (
-    f"Y1 DDL inventory mismatch: missing={sorted(y1_tables - actual_y1_files)}, "
-    f"unexpected={sorted(actual_y1_files - y1_tables)}"
+expected_y1_files = y1_tables | presentation_only_tables
+assert actual_y1_files == expected_y1_files, (
+    f"Y1 DDL inventory mismatch: missing={sorted(expected_y1_files - actual_y1_files)}, "
+    f"unexpected={sorted(actual_y1_files - expected_y1_files)}"
 )
+presentation_ddl = (y1_sql_dir / "lr_y1_methylation_source_haplotype_presentation.sql").read_text()
+assert "presentation-only" in presentation_ddl
+assert "source_haplotype IN (1, 2)" in presentation_ddl
+presentation_schema = "\n".join(line for line in presentation_ddl.splitlines() if not line.lstrip().startswith("--")).lower()
+for forbidden in ["ancillary_run_id", "lr_y1_active_ancillary", "vcf", "orientation"]:
+    assert forbidden not in presentation_schema, forbidden
 access_sql = (y1_sql_dir / "access.sql").read_text()
 assert "CREATE USER IF NOT EXISTS gnomad_lr_y1_pool_writer" in access_sql
 assert "IDENTIFIED WITH no_password" in access_sql

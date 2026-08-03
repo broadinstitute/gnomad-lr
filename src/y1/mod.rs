@@ -1,4 +1,5 @@
 mod contig;
+mod direct_methylation;
 pub mod finalizer;
 mod interval;
 pub mod metadata;
@@ -9,6 +10,10 @@ mod phased_pool;
 mod storage;
 mod target;
 
+pub use direct_methylation::{
+    load_direct_methylation_task, DirectMethylationTaskReceipt, DirectMethylationTaskSpec,
+    DIRECT_METHYLATION_TABLE,
+};
 pub use interval::{
     run_pool_interval_attempt, PoolY1AttemptReport, PoolY1JobSpec, PoolY1TargetSpec, PoolY1TaskSpec,
 };

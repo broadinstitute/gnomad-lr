@@ -211,6 +211,9 @@ impl TaskHandler for LrTaskHandler {
             "load_metadata" => handle_metadata_tasks(payload, tasks).await,
             "load_histograms" => handle_histograms_tasks(payload, tasks).await,
             "load_methylation" => handle_methylation_tasks(payload, tasks).await,
+            "load_methylation_source_haplotype" => {
+                handle_methylation_source_haplotype_tasks(payload, tasks).await
+            }
             "build_cache" => handle_build_cache_tasks(payload, tasks).await,
             "load" => handle_load_tasks(payload, tasks).await,
             unknown => {
@@ -555,6 +558,23 @@ async fn handle_load_tasks(
     Ok(TaskResult::success(total_rows, Some(metrics_json)))
 }
 
+fn validate_clickhouse_url(value: &str, action: &str, scope: &str) -> anyhow::Result<String> {
+    let parsed = reqwest::Url::parse(value).map_err(|error| {
+        anyhow::anyhow!("{action} {scope}-level 'clickhouse_url' is invalid: {error}")
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        anyhow::bail!(
+            "{action} {scope}-level 'clickhouse_url' must use http(s) and include a host"
+        );
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!(
+            "{action} {scope}-level 'clickhouse_url' must not contain credentials or a fragment"
+        );
+    }
+    Ok(parsed.into())
+}
+
 fn task_clickhouse_url(
     job_payload: &Value,
     task_payload: &Value,
@@ -562,15 +582,15 @@ fn task_clickhouse_url(
 ) -> anyhow::Result<String> {
     for (scope, payload) in [("task", task_payload), ("job", job_payload)] {
         if let Some(value) = payload.get("clickhouse_url") {
-            return value
+            let url = value
                 .as_str()
                 .filter(|url| !url.trim().is_empty())
-                .map(str::to_string)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "{action} {scope}-level 'clickhouse_url' must be a nonempty string"
                     )
-                });
+                })?;
+            return validate_clickhouse_url(url, action, scope);
         }
     }
     anyhow::bail!(
@@ -667,6 +687,73 @@ async fn handle_histograms_tasks(
     Ok(TaskResult::success(total_rows, None))
 }
 
+async fn handle_methylation_source_haplotype_tasks(
+    payload: &Value,
+    tasks: Vec<TaskDescriptor>,
+) -> Result<TaskResult, anyhow::Error> {
+    let batch_records = payload
+        .get("batch_records")
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("batch_records must be a positive integer"))
+        })
+        .transpose()?
+        .unwrap_or(50_000);
+    let batch_records = usize::try_from(batch_records)?;
+    if batch_records == 0 || batch_records > 100_000 {
+        anyhow::bail!("batch_records must be in 1..=100000");
+    }
+
+    // Deserialize and validate the complete assignment before opening any source
+    // or constructing an inserter. A malformed later task therefore cannot leave
+    // rows from an earlier task in this fail-from-zero presentation campaign.
+    let prepared = tasks
+        .iter()
+        .map(|descriptor| {
+            if descriptor.task_type != "custom" {
+                anyhow::bail!(
+                    "load_methylation_source_haplotype accepts only custom manifest tasks"
+                );
+            }
+            required_custom_lease(descriptor)?;
+            let task: crate::y1::DirectMethylationTaskSpec =
+                serde_json::from_value(descriptor.payload.clone())?;
+            task.validate(&descriptor.id)?;
+            Ok(task)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let mut total_rows = 0usize;
+    let mut receipts = Vec::with_capacity(prepared.len());
+    for task in prepared {
+        let descriptor_id = task.coordinator_task_id.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            crate::y1::load_direct_methylation_task(&task, batch_records)
+        })
+        .await??;
+        total_rows = total_rows
+            .checked_add(usize::try_from(report.items_processed)?)
+            .ok_or_else(|| anyhow::anyhow!("methylation items_processed overflow"))?;
+        info!(
+            "Task {} complete: {} rows",
+            descriptor_id, report.items_processed
+        );
+        receipts.push(report);
+    }
+
+    Ok(TaskResult::success(
+        total_rows,
+        Some(serde_json::json!({
+            "action": "load_methylation_source_haplotype",
+            "presentation_only": true,
+            "published": false,
+            "items_processed": total_rows,
+            "tasks": receipts
+        })),
+    ))
+}
+
 async fn handle_methylation_tasks(
     payload: &Value,
     tasks: Vec<TaskDescriptor>,
@@ -753,6 +840,27 @@ mod tests {
 
         let malformed_task = serde_json::json!({"clickhouse_url": ""});
         assert!(task_clickhouse_url(&compatible, &malformed_task, "load_coverage").is_err());
+    }
+
+    #[test]
+    fn malformed_later_ancillary_target_is_rejected_before_any_loader_invocation() {
+        let job = serde_json::json!({});
+        let task_payloads = [
+            serde_json::json!({"clickhouse_url": "http://clickhouse:8123/?database=first"}),
+            serde_json::json!({"clickhouse_url": "not a URL"}),
+        ];
+        let resolved = task_payloads
+            .iter()
+            .map(|task| task_clickhouse_url(&job, task, "load_coverage"))
+            .collect::<anyhow::Result<Vec<_>>>();
+        let mut loader_invocations = 0;
+        if let Ok(urls) = resolved {
+            for _ in urls {
+                loader_invocations += 1;
+            }
+        }
+        assert!(task_clickhouse_url(&job, &task_payloads[1], "load_histograms").is_err());
+        assert_eq!(loader_invocations, 0);
     }
 
     #[test]
