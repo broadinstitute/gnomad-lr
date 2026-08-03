@@ -47,6 +47,27 @@ class ManifestTest(unittest.TestCase):
                 self.assertEqual(tasks[0]["source_uri"], expected)
                 generic.verify_source_identity(tasks, source, cohort, contig)
 
+    def test_aggregate_only_mode_is_explicit_and_sex_chromosome_hgsvc_only(self):
+        for contig in ("chrX", "chrY"):
+            source = json.loads((HERE.parent / f"sources/y1/primary-source-{contig}.json").read_text())
+            tasks = generic.generate(
+                source, "hgsvc_hprc", contig, f"fresh-{contig}",
+                f"fresh-attempt-{contig}", 10_000_000,
+                generic.AGGREGATE_ONLY_MODE,
+            )
+            self.assertTrue(all(
+                task["primary_load_mode"] == generic.AGGREGATE_ONLY_MODE for task in tasks
+            ))
+            generic.verify(tasks, contig)
+
+        for cohort, contig in (("aou", "chrX"), ("hgsvc_hprc", "chr22")):
+            source = json.loads((HERE.parent / f"sources/y1/primary-source-{contig}.json").read_text())
+            with self.assertRaisesRegex(ValueError, "restricted"):
+                generic.generate(
+                    source, cohort, contig, "run", "attempt", 1_000_000,
+                    generic.AGGREGATE_ONLY_MODE,
+                )
+
     def test_rejects_gap_and_cross_contig_source(self):
         tasks = generic.generate(SOURCE, "aou", "chr22", "run", "attempt", 10_000_000)
         tasks[1]["start"] += 1

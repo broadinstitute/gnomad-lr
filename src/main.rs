@@ -379,6 +379,7 @@ fn run_y1_interval(args: Y1IntervalArgs) -> anyhow::Result<()> {
         source_index_checksum_algorithm: "md5_base64".to_string(),
         source_index_checksum: args.index_checksum.clone(),
         source_index_size_bytes: args.index_size_bytes,
+        primary_load_mode: None,
         retry_attempt_id: None,
         controlled_fail_once: None,
     };
@@ -565,6 +566,8 @@ mod direct_y1_tests {
             source_index_size_bytes: 789,
             source_index_checksum_algorithm: "md5_base64".into(),
             source_index_checksum: "index-md5".into(),
+            primary_load_mode: None,
+            carrier_loading_status: y1::CarrierLoadingStatus::Loaded,
             counts: y1::StagedCounts::default(),
             transformation: y1::TransformationReport::default(),
             inserted: y1::InsertStats::default(),

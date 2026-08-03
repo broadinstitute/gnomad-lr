@@ -178,6 +178,14 @@ pub fn transform_record(
     header: &Y1Header,
     line: &str,
 ) -> Result<TransformedRecord, TransformReject> {
+    transform_record_with_mode(header, line, None)
+}
+
+pub fn transform_record_with_mode(
+    header: &Y1Header,
+    line: &str,
+    primary_load_mode: Option<PrimaryLoadMode>,
+) -> Result<TransformedRecord, TransformReject> {
     let parts: Vec<&str> = line.split('\t').collect();
     if parts.len() < 8 {
         return Err(TransformReject::new(
@@ -197,7 +205,7 @@ pub fn transform_record(
         ));
     }
 
-    transform_record_with_id(header, &parts, source_id)
+    transform_record_with_id(header, &parts, source_id, primary_load_mode)
         .map_err(|reject| reject.with_source_id(source_id))
 }
 
@@ -205,11 +213,22 @@ pub fn transform_records<'a, I>(header: &Y1Header, records: I) -> Transformation
 where
     I: IntoIterator<Item = &'a str>,
 {
+    transform_records_with_mode(header, records, None)
+}
+
+pub fn transform_records_with_mode<'a, I>(
+    header: &Y1Header,
+    records: I,
+    primary_load_mode: Option<PrimaryLoadMode>,
+) -> TransformationBatch
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let mut batch = TransformationBatch::default();
 
     for (index, line) in records.into_iter().enumerate() {
         batch.report.source_records += 1;
-        match transform_record(header, line) {
+        match transform_record_with_mode(header, line, primary_load_mode) {
             Ok(transformed) => {
                 batch.report.summary_rows += 1;
                 batch.report.carrier_rows += transformed.carriers.len();
@@ -236,6 +255,7 @@ fn transform_record_with_id(
     header: &Y1Header,
     parts: &[&str],
     source_id: &str,
+    primary_load_mode: Option<PrimaryLoadMode>,
 ) -> Result<TransformedRecord, TransformReject> {
     let chrom = required_text(parts[0], "CHROM")?;
     let position = parts[1].parse::<u32>().map_err(|error| {
@@ -347,7 +367,21 @@ fn transform_record_with_id(
         expected_ac: &ac,
         expected_an: an,
     };
-    let (carriers, stats) = parse_carriers(header, parts, &carrier_context)?;
+    let (carriers, stats) = match primary_load_mode {
+        Some(PrimaryLoadMode::AggregateOnlyNoCarriers) => {
+            if header.cohort != Cohort::HgsvcHprc || !matches!(chrom, "chrX" | "chrY") {
+                return Err(TransformReject::new(
+                    RejectCode::InvalidValue,
+                    "aggregate_only_no_carriers is restricted to HGSVC/HPRC chrX/chrY",
+                ));
+            }
+            // Intentionally do not inspect FORMAT or any sample value. The source
+            // aggregate is authoritative and the per-sample inclusion contract is
+            // unavailable, so parsing GT/ALLR here would create misleading carriers.
+            (Vec::new(), RecordStats::default())
+        }
+        None => parse_carriers(header, parts, &carrier_context)?,
+    };
 
     let summary = SummaryRecord {
         identity,

@@ -60,6 +60,8 @@ pub struct PoolY1TaskSpec {
     pub source_index_checksum: String,
     pub source_index_size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_load_mode: Option<super::PrimaryLoadMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controlled_fail_once: Option<ControlledFailOnce>,
@@ -100,6 +102,8 @@ pub struct PoolY1AttemptReport {
     pub source_index_size_bytes: u64,
     pub source_index_checksum_algorithm: String,
     pub source_index_checksum: String,
+    pub primary_load_mode: Option<super::PrimaryLoadMode>,
+    pub carrier_loading_status: super::CarrierLoadingStatus,
     pub counts: StagedCounts,
     pub transformation: TransformationReport,
     pub inserted: InsertStats,
@@ -177,6 +181,11 @@ impl PoolY1TaskSpec {
         }
         self.immutable_source_index()
             .context("invalid immutable primary VCF/TBI task identity")?;
+        if self.primary_load_mode == Some(super::PrimaryLoadMode::AggregateOnlyNoCarriers)
+            && (self.cohort != "hgsvc_hprc" || !matches!(self.chrom.as_str(), "chrX" | "chrY"))
+        {
+            bail!("aggregate_only_no_carriers is restricted to HGSVC/HPRC chrX/chrY");
+        }
         match (&self.controlled_fail_once, &self.retry_attempt_id) {
             (Some(injection), Some(retry_id)) => {
                 if injection.mode != "after_first_staged_batch"
@@ -192,6 +201,16 @@ impl PoolY1TaskSpec {
             _ => bail!("controlled_fail_once and retry_attempt_id must be supplied together"),
         }
         Ok(())
+    }
+
+    pub(crate) fn carrier_loading_status(&self) -> super::CarrierLoadingStatus {
+        match (self.cohort.as_str(), self.primary_load_mode) {
+            (_, Some(super::PrimaryLoadMode::AggregateOnlyNoCarriers)) => {
+                super::CarrierLoadingStatus::UnavailableNotLoaded
+            }
+            ("aou", None) => super::CarrierLoadingStatus::NotApplicableAggregateSource,
+            _ => super::CarrierLoadingStatus::Loaded,
+        }
     }
 
     fn immutable_source_index(&self) -> anyhow::Result<(ImmutableGcsObject, ImmutableGcsObject)> {
@@ -308,6 +327,7 @@ pub fn run_pool_interval_attempt(
                     &context,
                     claim_revision,
                     &header,
+                    task.primary_load_mode,
                     &mut record_batch,
                     &mut record_offset,
                     &mut total_counts,
@@ -327,6 +347,7 @@ pub fn run_pool_interval_attempt(
                 &context,
                 claim_revision,
                 &header,
+                task.primary_load_mode,
                 &mut record_batch,
                 &mut record_offset,
                 &mut total_counts,
@@ -400,6 +421,8 @@ pub fn run_pool_interval_attempt(
         source_index_size_bytes: task.source_index_size_bytes,
         source_index_checksum_algorithm: task.source_index_checksum_algorithm.clone(),
         source_index_checksum: task.source_index_checksum.clone(),
+        primary_load_mode: task.primary_load_mode,
+        carrier_loading_status: task.carrier_loading_status(),
         counts: total_counts,
         transformation: total_report.clone(),
         inserted,
@@ -591,6 +614,8 @@ fn claim_attempt(
         source_index_size_bytes: task.source_index_size_bytes,
         source_index_checksum_algorithm: task.source_index_checksum_algorithm.clone(),
         source_index_checksum: task.source_index_checksum.clone(),
+        primary_load_mode: task.primary_load_mode,
+        carrier_loading_status: task.carrier_loading_status(),
         counts: StagedCounts::default(),
         transformation: TransformationReport::default(),
         inserted: InsertStats::default(),
@@ -661,6 +686,7 @@ fn stage_batch(
     context: &AttemptContext,
     claim_revision: u64,
     header: &Y1Header,
+    primary_load_mode: Option<super::PrimaryLoadMode>,
     records: &mut Vec<String>,
     record_offset: &mut usize,
     total_counts: &mut StagedCounts,
@@ -668,7 +694,11 @@ fn stage_batch(
     inserted: &mut InsertStats,
 ) -> anyhow::Result<()> {
     ensure_attempt_claim(target, context, claim_revision)?;
-    let mut batch = super::transform_records(header, records.iter().map(String::as_str));
+    let mut batch = super::transform_records_with_mode(
+        header,
+        records.iter().map(String::as_str),
+        primary_load_mode,
+    );
     for reject in &mut batch.report.rejects {
         if let Some(record_number) = &mut reject.record_number {
             *record_number += *record_offset;
@@ -748,6 +778,7 @@ mod tests {
             source_index_checksum_algorithm: "md5_base64".into(),
             source_index_checksum: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
             source_index_size_bytes: 1,
+            primary_load_mode: None,
             retry_attempt_id: None,
             controlled_fail_once: None,
         }
@@ -830,6 +861,43 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_only_mode_is_strictly_gated_and_has_explicit_unavailable_status() {
+        let mut task = valid_task();
+        task.primary_load_mode = Some(super::super::PrimaryLoadMode::AggregateOnlyNoCarriers);
+        assert!(task.validate(&task.coordinator_task_id).is_err());
+
+        task.chrom = "chrX".into();
+        task.start = 1;
+        task.stop = 10;
+        task.source_uri =
+            "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chrX.vcf.gz"
+                .into();
+        task.source_index_uri = format!("{}.tbi", task.source_uri);
+        task.validate(&task.coordinator_task_id).unwrap();
+        assert_eq!(
+            task.carrier_loading_status(),
+            super::super::CarrierLoadingStatus::UnavailableNotLoaded
+        );
+
+        let mut aou = task.clone();
+        aou.cohort = "aou".into();
+        aou.source_uri =
+            "gs://gnomad-lr-data/y1/sources/aou/vcfs/gnomAD_LR_Y1.aou.chrX.vcf.gz".into();
+        aou.source_index_uri = format!("{}.tbi", aou.source_uri);
+        assert!(aou.validate(&aou.coordinator_task_id).is_err());
+
+        let mut ordinary = valid_task();
+        ordinary.cohort = "aou".into();
+        ordinary.source_uri = ordinary.source_uri.replace("hgsvc_hprc", "aou");
+        ordinary.source_index_uri = format!("{}.tbi", ordinary.source_uri);
+        ordinary.validate(&ordinary.coordinator_task_id).unwrap();
+        assert_eq!(
+            ordinary.carrier_loading_status(),
+            super::super::CarrierLoadingStatus::NotApplicableAggregateSource
+        );
+    }
+
+    #[test]
     fn controlled_failure_requires_a_distinct_retry_identity() {
         let mut task = valid_task();
         task.controlled_fail_once = Some(ControlledFailOnce {
@@ -874,6 +942,7 @@ mod tests {
             interval_start: task.start,
             interval_end: task.stop,
         };
+        let carrier_loading_status = task.carrier_loading_status();
         let report = PoolY1AttemptReport {
             run_id: task.run_id,
             task_id: task.task_id,
@@ -890,8 +959,10 @@ mod tests {
             source_index_uri: task.source_index_uri,
             source_index_generation: task.source_index_generation,
             source_index_size_bytes: task.source_index_size_bytes,
-            source_index_checksum_algorithm: task.source_index_checksum_algorithm,
-            source_index_checksum: task.source_index_checksum,
+            source_index_checksum_algorithm: task.source_index_checksum_algorithm.clone(),
+            source_index_checksum: task.source_index_checksum.clone(),
+            primary_load_mode: task.primary_load_mode,
+            carrier_loading_status,
             counts: StagedCounts::default(),
             transformation: TransformationReport::default(),
             inserted: InsertStats::default(),

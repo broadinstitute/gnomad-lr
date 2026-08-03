@@ -29,6 +29,7 @@ GRCH38_CONTIG_LENGTHS = {
     "chrY": 57227415,
 }
 COHORTS = ("hgsvc_hprc", "aou")
+AGGREGATE_ONLY_MODE = "aggregate_only_no_carriers"
 MIRROR_PREFIX = "gs://gnomad-lr-data/y1/sources"
 CONTIG_HEADER = re.compile(r"^##contig=<ID=([^,>]+),length=([0-9]+)(?:[,>])")
 ANNOTATION_KEYS = (
@@ -110,9 +111,15 @@ def alt_has_annotation(info: dict[str, str | None], alt_index: int, alt_count: i
     return False
 
 
-def reconcile(stream: TextIO, cohort: str, contig: str) -> dict[str, Any]:
+def reconcile(stream: TextIO, cohort: str, contig: str,
+              primary_load_mode: str | None = None) -> dict[str, Any]:
     if cohort not in COHORTS or contig not in GRCH38_CONTIG_LENGTHS:
         raise ValueError("unsupported Y1 cohort or GRCh38 contig")
+    aggregate_only = primary_load_mode == AGGREGATE_ONLY_MODE
+    if primary_load_mode is not None and (
+        not aggregate_only or cohort != "hgsvc_hprc" or contig not in ("chrX", "chrY")
+    ):
+        raise ValueError("aggregate_only_no_carriers is restricted to HGSVC/HPRC chrX/chrY")
     contig_length = GRCH38_CONTIG_LENGTHS[contig]
     info_ids: set[str] = set()
     samples: list[str] = []
@@ -137,6 +144,8 @@ def reconcile(stream: TextIO, cohort: str, contig: str) -> dict[str, Any]:
         if line.startswith("#CHROM"):
             columns = line.rstrip("\n").split("\t")
             samples = columns[9:]
+            if aggregate_only and (columns[8:9] != ["FORMAT"] or len(samples) != 292):
+                raise ValueError("aggregate-only HGSVC/HPRC header must retain FORMAT and exactly 292 samples")
             if declared_contig_lengths != [contig_length]:
                 raise ValueError(f"VCF must declare exactly GRCh38 {contig} length {contig_length}")
             divisions = {key[3:] for key in info_ids if key.startswith("AC_") and key != "AC_grpmax"
@@ -176,6 +185,11 @@ def reconcile(stream: TextIO, cohort: str, contig: str) -> dict[str, Any]:
         if cohort == "aou":
             if len(parts) != 8 or samples:
                 raise ValueError(f"line {line_number}: AoU unexpectedly contains genotypes")
+            continue
+        if aggregate_only:
+            # Deliberately do not inspect FORMAT or any sample value. INFO is the
+            # authoritative aggregate and no source inclusion contract exists for
+            # reconstructing sex-chromosome counts from the emitted genotypes.
             continue
         if len(parts) != 9 + len(samples):
             raise ValueError(f"line {line_number}: HGSVC/HPRC sample count mismatch")
@@ -218,9 +232,10 @@ def reconcile(stream: TextIO, cohort: str, contig: str) -> dict[str, Any]:
 
 
 def build_output(source_manifest: dict[str, Any], stream: TextIO, cohort: str, contig: str,
-                 run_id: str, evidence_uri: str, producer: str) -> dict[str, Any]:
+                 run_id: str, evidence_uri: str, producer: str,
+                 primary_load_mode: str | None = None) -> dict[str, Any]:
     source = checked_source(source_manifest, cohort, contig)
-    facts = reconcile(stream, cohort, contig)
+    facts = reconcile(stream, cohort, contig, primary_load_mode)
     return {
         "contract_version": 1,
         "run_id": run_id,
@@ -230,6 +245,10 @@ def build_output(source_manifest: dict[str, Any], stream: TextIO, cohort: str, c
         "producer": producer,
         "source_generation": str(source["mirror_generation"]),
         "source_checksum": source["md5_base64"],
+        **({
+            "primary_load_mode": primary_load_mode,
+            "carrier_loading_status": "unavailable_not_loaded",
+        } if primary_load_mode else {}),
         "counts": {
             "source_records": facts["source_records"],
             "summaries": facts["source_records"],
@@ -250,6 +269,7 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--evidence-uri", required=True)
     parser.add_argument("--producer", required=True, help="independent program/version or operator identity")
+    parser.add_argument("--primary-load-mode", choices=(AGGREGATE_ONLY_MODE,))
     parser.add_argument("--vcf", help="checked local mirror override; identity still comes from source manifest")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -258,7 +278,8 @@ def main() -> None:
     source = checked_source(manifest, args.cohort, args.contig)
     with open_vcf(args.vcf or source["uri"]) as stream:
         output = build_output(manifest, stream, args.cohort, args.contig,
-                              args.run_id, args.evidence_uri, args.producer)
+                              args.run_id, args.evidence_uri, args.producer,
+                              args.primary_load_mode)
     facts = output["facts"]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")

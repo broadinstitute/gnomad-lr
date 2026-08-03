@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -29,6 +29,30 @@ impl Cohort {
             Self::Aou => "aou",
         }
     }
+}
+
+/// Explicit exceptional primary-load behavior. Absence always means the strict
+/// genotype-reconciling path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryLoadMode {
+    AggregateOnlyNoCarriers,
+}
+
+impl PrimaryLoadMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AggregateOnlyNoCarriers => "aggregate_only_no_carriers",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CarrierLoadingStatus {
+    Loaded,
+    UnavailableNotLoaded,
+    NotApplicableAggregateSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]

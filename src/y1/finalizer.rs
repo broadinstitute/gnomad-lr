@@ -21,6 +21,10 @@ pub struct IndependentExpectedCounts {
     pub producer: String,
     pub source_generation: String,
     pub source_checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_load_mode: Option<super::PrimaryLoadMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier_loading_status: Option<super::CarrierLoadingStatus>,
     pub counts: StagedCounts,
     pub facts: IndependentReconciliationFacts,
 }
@@ -108,6 +112,8 @@ pub struct LoadAcceptanceReceipt {
     pub source_index_uri: String,
     pub source_index_generation: String,
     pub source_index_checksum: String,
+    pub primary_load_mode: Option<super::PrimaryLoadMode>,
+    pub carrier_loading_status: super::CarrierLoadingStatus,
     pub accepted_attempts: BTreeMap<String, String>,
     pub failed_attempts: BTreeMap<String, Vec<String>>,
     pub expected_counts: StagedCounts,
@@ -582,9 +588,14 @@ fn validate_independent_reconciliation(
         || expected.chrom != run.chrom
         || expected.source_generation != run.source_generation
         || expected.source_checksum != run.source_checksum
+        || expected.primary_load_mode != run.primary_load_mode
+        || expected.carrier_loading_status
+            != run.primary_load_mode.map(|_| run.carrier_loading_status())
     {
-        bail!("independent reconciliation identity does not match the manifest run/source");
+        bail!("independent reconciliation identity does not match the manifest run/source/mode");
     }
+    let aggregate_only =
+        run.primary_load_mode == Some(super::PrimaryLoadMode::AggregateOnlyNoCarriers);
     let facts = &expected.facts;
     if expected.evidence_uri.trim().is_empty()
         || expected.producer.trim().is_empty()
@@ -601,7 +612,16 @@ fn validate_independent_reconciliation(
             .is_none_or(|value| value > facts.genotype_calls)
         || facts.annotated_alt_alleles > facts.alt_alleles
         || facts.carrier_alt_copies > facts.called_alleles
-        || (run.cohort == "hgsvc_hprc" && (facts.genotype_calls == 0 || facts.called_alleles == 0))
+        || (run.cohort == "hgsvc_hprc"
+            && !aggregate_only
+            && (facts.genotype_calls == 0 || facts.called_alleles == 0))
+        || (aggregate_only
+            && (expected.counts.carriers != 0
+                || facts.genotype_calls != 0
+                || facts.called_alleles != 0
+                || facts.carrier_alt_copies != 0
+                || facts.fully_missing_genotypes != 0
+                || facts.partially_called_genotypes != 0))
         || !valid_sha256(&facts.source_content_sha256)
         || !valid_sha256(&facts.genotype_content_sha256)
         || !valid_sha256(&facts.annotation_content_sha256)
@@ -661,7 +681,7 @@ fn build_acceptance_receipt(
     canonical_digests: Vec<CanonicalContentDigest>,
 ) -> LoadAcceptanceReceipt {
     LoadAcceptanceReceipt {
-        contract_version: 3,
+        contract_version: 4,
         schema_version: Y1_SCHEMA_VERSION,
         worker_principal: worker_principal.to_string(),
         run_id: run.run_id.clone(),
@@ -675,6 +695,8 @@ fn build_acceptance_receipt(
         source_index_uri: run.source_index_uri.clone(),
         source_index_generation: run.source_index_generation.clone(),
         source_index_checksum: run.source_index_checksum.clone(),
+        primary_load_mode: run.primary_load_mode,
+        carrier_loading_status: run.carrier_loading_status(),
         accepted_attempts: ledger.accepted.clone(),
         failed_attempts: ledger.failed.clone(),
         expected_counts: expected.counts,
@@ -706,6 +728,7 @@ fn validate_manifest(tasks: &[PoolY1TaskSpec]) -> anyhow::Result<PoolY1TaskSpec>
             || task.source_index_generation != first.source_index_generation
             || task.source_index_checksum != first.source_index_checksum
             || task.source_index_size_bytes != first.source_index_size_bytes
+            || task.primary_load_mode != first.primary_load_mode
         {
             bail!("task {index} changes a run or immutable source identity");
         }
@@ -763,6 +786,44 @@ fn validate_worker_provenance(
         || !build_identity.contains(backend_revision)
     {
         bail!("attempt {attempt_id} worker build is not bound to a full backend revision");
+    }
+    Ok(())
+}
+
+fn validate_attempt_carrier_loading(
+    report: &serde_json::Value,
+    manifest_task: &PoolY1TaskSpec,
+    attempt_id: &str,
+) -> anyhow::Result<()> {
+    let expected_status = match manifest_task.carrier_loading_status() {
+        super::CarrierLoadingStatus::Loaded => "loaded",
+        super::CarrierLoadingStatus::UnavailableNotLoaded => "unavailable_not_loaded",
+        super::CarrierLoadingStatus::NotApplicableAggregateSource => {
+            "not_applicable_aggregate_source"
+        }
+    };
+    let mode_matches = match manifest_task.primary_load_mode {
+        Some(mode) => {
+            report.get("primary_load_mode") == Some(&serde_json::to_value(Some(mode))?)
+                && report
+                    .get("carrier_loading_status")
+                    .and_then(|value| value.as_str())
+                    == Some(expected_status)
+        }
+        None => {
+            // Reports committed before this field existed are accepted only for
+            // ordinary manifests. The exceptional aggregate-only path always
+            // requires explicit mode and unavailability provenance.
+            report
+                .get("primary_load_mode")
+                .is_none_or(serde_json::Value::is_null)
+                && report
+                    .get("carrier_loading_status")
+                    .is_none_or(|value| value.as_str() == Some(expected_status))
+        }
+    };
+    if !mode_matches {
+        bail!("attempt {attempt_id} report has inconsistent primary carrier-loading mode/status");
     }
     Ok(())
 }
@@ -892,6 +953,7 @@ FORMAT JSONEachRow
             }
         }
         validate_attempt_source_identity(&report, manifest_task, &row.attempt_id)?;
+        validate_attempt_carrier_loading(&report, manifest_task, &row.attempt_id)?;
         let counts = StagedCounts {
             source_records: row.source_records,
             summaries: row.summary_rows,
@@ -1368,6 +1430,7 @@ mod tests {
             source_index_checksum_algorithm: "md5_base64".into(),
             source_index_checksum: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
             source_index_size_bytes: 1,
+            primary_load_mode: None,
             retry_attempt_id: None,
             controlled_fail_once: None,
         }
@@ -1383,6 +1446,10 @@ mod tests {
             producer: "independent-test".into(),
             source_generation: task.source_generation.clone(),
             source_checksum: task.source_checksum.clone(),
+            primary_load_mode: task.primary_load_mode,
+            carrier_loading_status: task
+                .primary_load_mode
+                .map(|_| task.carrier_loading_status()),
             counts: StagedCounts {
                 source_records: 1,
                 summaries: 1,
@@ -1490,6 +1557,81 @@ mod tests {
         let mut cross = independent_for(&task);
         cross.source_generation = "other".into();
         assert!(validate_independent_reconciliation(&cross, &task).is_err());
+    }
+
+    #[test]
+    fn aggregate_only_reconciliation_requires_explicit_unavailable_carrier_receipt() {
+        let mut task = task_for("chrX", 0, 1, grch38_contig_length("chrX").unwrap());
+        task.cohort = "hgsvc_hprc".into();
+        task.source_uri =
+            "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chrX.vcf.gz"
+                .into();
+        task.source_index_uri = format!("{}.tbi", task.source_uri);
+        task.primary_load_mode = Some(super::super::PrimaryLoadMode::AggregateOnlyNoCarriers);
+        task.validate(&task.coordinator_task_id).unwrap();
+
+        let expected = independent_for(&task);
+        assert_eq!(expected.counts.carriers, 0);
+        assert_eq!(expected.facts.genotype_calls, 0);
+        assert_eq!(
+            expected.carrier_loading_status,
+            Some(super::super::CarrierLoadingStatus::UnavailableNotLoaded)
+        );
+        validate_independent_reconciliation(&expected, &task).unwrap();
+
+        let mut missing_status = independent_for(&task);
+        missing_status.carrier_loading_status = None;
+        assert!(validate_independent_reconciliation(&missing_status, &task).is_err());
+
+        let mut fabricated_carrier = independent_for(&task);
+        fabricated_carrier.counts.carriers = 1;
+        fabricated_carrier.facts.carrier_alt_copies = 1;
+        fabricated_carrier.facts.called_alleles = 1;
+        assert!(validate_independent_reconciliation(&fabricated_carrier, &task).is_err());
+    }
+
+    #[test]
+    fn ordinary_legacy_attempt_reports_may_omit_mode_but_aggregate_only_may_not() {
+        let ordinary = task_for("chr22", 0, 1, grch38_contig_length("chr22").unwrap());
+        validate_attempt_carrier_loading(&serde_json::json!({}), &ordinary, "legacy").unwrap();
+        validate_attempt_carrier_loading(
+            &serde_json::json!({
+                "primary_load_mode": null,
+                "carrier_loading_status": "not_applicable_aggregate_source"
+            }),
+            &ordinary,
+            "current",
+        )
+        .unwrap();
+        assert!(validate_attempt_carrier_loading(
+            &serde_json::json!({"carrier_loading_status": "loaded"}),
+            &ordinary,
+            "wrong",
+        )
+        .is_err());
+
+        let mut aggregate = task_for("chrX", 0, 1, grch38_contig_length("chrX").unwrap());
+        aggregate.cohort = "hgsvc_hprc".into();
+        aggregate.source_uri =
+            "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chrX.vcf.gz"
+                .into();
+        aggregate.source_index_uri = format!("{}.tbi", aggregate.source_uri);
+        aggregate.primary_load_mode = Some(super::super::PrimaryLoadMode::AggregateOnlyNoCarriers);
+        assert!(validate_attempt_carrier_loading(
+            &serde_json::json!({}),
+            &aggregate,
+            "missing-mode",
+        )
+        .is_err());
+        validate_attempt_carrier_loading(
+            &serde_json::json!({
+                "primary_load_mode": "aggregate_only_no_carriers",
+                "carrier_loading_status": "unavailable_not_loaded"
+            }),
+            &aggregate,
+            "explicit-mode",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1764,6 +1906,8 @@ mod tests {
             source_index_size_bytes: task.source_index_size_bytes,
             source_index_checksum_algorithm: task.source_index_checksum_algorithm.clone(),
             source_index_checksum: task.source_index_checksum.clone(),
+            primary_load_mode: task.primary_load_mode,
+            carrier_loading_status: task.carrier_loading_status(),
             counts,
             transformation: transformation.clone(),
             inserted: super::super::InsertStats {

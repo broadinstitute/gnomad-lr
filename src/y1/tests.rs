@@ -1,10 +1,13 @@
 use super::*;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 const HGSVC_FIXTURE: &str = include_str!("../../tests/fixtures/y1/hgsvc_hprc_trv_13_alt.vcf");
 const HGSVC_COLLISION_FIXTURE: &str =
     include_str!("../../tests/fixtures/y1/hgsvc_hprc_collision_suffix.vcf");
 const AOU_FIXTURE: &str = include_str!("../../tests/fixtures/y1/aou_summary_only_ins.vcf");
+const SEX_CHROMOSOME_RECORDS: &str =
+    include_str!("../../tests/fixtures/y1/hgsvc_hprc_sex_chromosome_bounded_records.vcf.records");
 
 fn record_lines(fixture: &str) -> Vec<&str> {
     fixture
@@ -157,6 +160,131 @@ fn transforms_aou_as_summary_only_without_fabricated_populations() {
     for unavailable in ["amr", "asj", "eas", "nfe", "sas"] {
         assert!(!divisions.contains(unavailable));
     }
+}
+
+#[test]
+fn aggregate_only_replays_exact_sex_chromosome_failures_from_info_without_carriers() {
+    let header = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let expected = [
+        (
+            "chrX-2781454-DEL-4",
+            "6274c4b98d50b4c31af08eae219e119db4a8437fa24cff06c9742c9b4b205ed7",
+            438,
+            vec![1],
+        ),
+        (
+            "chrX-2781514-C-A",
+            "caffcfbf60dfbc79a16bdc0931b0cfdce6387cee2f1e2345d3774564ea6e56d3",
+            365,
+            vec![178],
+        ),
+        (
+            "chrX-9999320-TRV-17",
+            "2b419f8ccddb7378e0541993b85274efe815ec623096c37009e259f1f7cda9b7",
+            438,
+            vec![66, 9, 1, 9, 266, 9, 33, 1],
+        ),
+        (
+            "chrY-25000057-A-G",
+            "4e21084785d16e2fc1169a49a646b61cfa528cd8d99c82cc605f90d97b077d6b",
+            73,
+            vec![0],
+        ),
+        (
+            "chrY-4999309-TRV-40",
+            "d8a4d40a47996ce6879201ad1be60213c5acf7e9bafba3ec205bbe3bcc643d18",
+            72,
+            vec![0],
+        ),
+    ];
+    let records = record_lines(SEX_CHROMOSOME_RECORDS);
+    assert_eq!(records.len(), expected.len());
+    for (record, (_, expected_sha256, _, _)) in records.iter().zip(&expected) {
+        assert_eq!(
+            format!("{:x}", Sha256::digest(record.as_bytes())),
+            *expected_sha256
+        );
+    }
+
+    let batch = transform_records_with_mode(
+        &header,
+        records.iter().copied(),
+        Some(PrimaryLoadMode::AggregateOnlyNoCarriers),
+    );
+    assert_eq!(batch.report.source_records, 5);
+    assert_eq!(batch.report.summary_rows, 5);
+    assert_eq!(batch.report.rejected_records, 0);
+    assert_eq!(batch.report.genotype_calls, 0);
+    assert_eq!(batch.report.carrier_rows, 0);
+    assert!(batch.carriers.is_empty());
+    for (summary, (source_id, _, an, ac)) in batch.summaries.iter().zip(expected) {
+        assert_eq!(summary.identity.source_variant_id, source_id);
+        assert_eq!(summary.an, an);
+        assert_eq!(summary.ac, ac);
+        assert_eq!(
+            summary
+                .source_info
+                .get("AN")
+                .and_then(Option::as_deref)
+                .unwrap()
+                .parse::<u32>()
+                .unwrap(),
+            an
+        );
+    }
+}
+
+#[test]
+fn aggregate_only_never_touches_format_or_genotype_columns() {
+    let header = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let exact_failure = record_lines(SEX_CHROMOSOME_RECORDS)[1];
+    let mut fixed_only: Vec<&str> = exact_failure.split('\t').take(8).collect();
+    fixed_only.push("THIS_IS_NOT_FORMAT_OR_GT");
+    let transformed = transform_record_with_mode(
+        &header,
+        &fixed_only.join("\t"),
+        Some(PrimaryLoadMode::AggregateOnlyNoCarriers),
+    )
+    .unwrap();
+    assert_eq!(transformed.summary.an, 365);
+    assert_eq!(transformed.summary.ac, vec![178]);
+    assert!(transformed.carriers.is_empty());
+    assert_eq!(transformed.stats.genotype_calls, 0);
+}
+
+#[test]
+fn aggregate_only_parser_mode_is_sex_chromosome_hgsvc_only_and_ordinary_remains_strict() {
+    let header = Y1Header::parse(HGSVC_FIXTURE, Cohort::HgsvcHprc).unwrap();
+    let exact_non_par_failure = record_lines(SEX_CHROMOSOME_RECORDS)[1];
+    assert_eq!(
+        transform_record(&header, exact_non_par_failure)
+            .unwrap_err()
+            .code,
+        RejectCode::AlleleCountMismatch
+    );
+    assert_eq!(
+        transform_record_with_mode(
+            &header,
+            one_record(HGSVC_FIXTURE),
+            Some(PrimaryLoadMode::AggregateOnlyNoCarriers),
+        )
+        .unwrap_err()
+        .code,
+        RejectCode::InvalidValue
+    );
+
+    let aou = Y1Header::parse(AOU_FIXTURE, Cohort::Aou).unwrap();
+    let aou_sex = one_record(AOU_FIXTURE).replacen("chr22", "chrX", 2);
+    assert_eq!(
+        transform_record_with_mode(
+            &aou,
+            &aou_sex,
+            Some(PrimaryLoadMode::AggregateOnlyNoCarriers),
+        )
+        .unwrap_err()
+        .code,
+        RejectCode::InvalidValue
+    );
 }
 
 #[test]

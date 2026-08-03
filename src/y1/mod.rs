@@ -28,7 +28,10 @@ pub use methylation::{
     Y1MethylationFinalizationSpec, Y1MethylationTaskSpec, PHASED_METHYLATION_EVALUATION_DATABASE,
 };
 pub use model::*;
-pub use parser::{transform_record, transform_records, FieldDefinition, Y1Header};
+pub use parser::{
+    transform_record, transform_record_with_mode, transform_records, transform_records_with_mode,
+    FieldDefinition, Y1Header,
+};
 pub use phased_pool::{
     run_phased_mirror_task, validate_task_against_ledger, PhasedMirrorJobSpec,
     PhasedMirrorTaskReceipt, PhasedMirrorTaskSpec, MIRROR_CONTRACT_ID,

@@ -25,6 +25,7 @@ GRCH38_CONTIG_LENGTHS = {
 }
 MT_CONTIG_LENGTH = 16569
 COHORTS = ("hgsvc_hprc", "aou")
+AGGREGATE_ONLY_MODE = "aggregate_only_no_carriers"
 MIRROR_PREFIX = "gs://gnomad-lr-data/y1/sources"
 
 
@@ -59,9 +60,16 @@ def checked_source(source: dict[str, Any], cohort: str, contig: str):
 
 
 def generate(source: dict[str, Any], cohort: str, contig: str, run_id: str,
-             attempt: str, interval_size: int) -> list[dict[str, Any]]:
+             attempt: str, interval_size: int,
+             primary_load_mode: str | None = None) -> list[dict[str, Any]]:
     if cohort not in COHORTS:
         raise ValueError("unsupported cohort")
+    if primary_load_mode is not None and (
+        primary_load_mode != AGGREGATE_ONLY_MODE
+        or cohort != "hgsvc_hprc"
+        or contig not in ("chrX", "chrY")
+    ):
+        raise ValueError("aggregate_only_no_carriers is restricted to HGSVC/HPRC chrX/chrY")
     length = checked_contig_length(source, contig)
     if not run_id or not attempt or interval_size <= 0:
         raise ValueError("run ID, attempt prefix, and positive interval size are required")
@@ -91,6 +99,7 @@ def generate(source: dict[str, Any], cohort: str, contig: str, run_id: str,
             "source_index_checksum_algorithm": "md5_base64",
             "source_index_checksum": index["md5_base64"],
             "source_index_size_bytes": int(index["size"]),
+            **({"primary_load_mode": primary_load_mode} if primary_load_mode else {}),
         })
     verify(tasks, contig)
     return tasks
@@ -108,7 +117,8 @@ def verify(tasks: list[dict[str, Any]], contig: str) -> None:
         raise ValueError("manifest uses an unsupported GRCh38 contig")
     invariant = ("run_id", "release", "cohort", "reference_genome", "chrom",
                  "source_uri", "source_generation", "source_checksum", "source_size_bytes",
-                 "source_index_uri", "source_index_generation", "source_index_checksum", "source_index_size_bytes")
+                 "source_index_uri", "source_index_generation", "source_index_checksum", "source_index_size_bytes",
+                 "primary_load_mode")
     for ordinal, task in enumerate(tasks):
         if task.get("coordinator_task_id") != f"custom_{ordinal}":
             raise ValueError(f"task {ordinal} has a non-deterministic coordinator ID")
@@ -129,6 +139,13 @@ def verify(tasks: list[dict[str, Any]], contig: str) -> None:
             if retry_id == task["attempt_id"] or retry_id in attempt_ids:
                 raise ValueError(f"task {ordinal} duplicates a retry attempt ID")
             attempt_ids.add(retry_id)
+    mode = first.get("primary_load_mode")
+    if mode is not None and (
+        mode != AGGREGATE_ONLY_MODE
+        or first.get("cohort") != "hgsvc_hprc"
+        or contig not in ("chrX", "chrY")
+    ):
+        raise ValueError("aggregate_only_no_carriers is restricted to HGSVC/HPRC chrX/chrY")
     if (first.get("release"), first.get("reference_genome"), first.get("chrom")) != ("y1", "GRCh38", contig) or previous_stop != length:
         raise ValueError(f"manifest does not exactly cover GRCh38 {contig}")
 
@@ -160,10 +177,16 @@ def main() -> None:
     p.add_argument("--contig", required=True, help="chr1-22,X,Y; chrM only with an explicit immutable MT contract")
     p.add_argument("--run-id", required=True); p.add_argument("--attempt", required=True)
     p.add_argument("--interval-size", type=int, default=1_000_000)
+    p.add_argument("--primary-load-mode", choices=(AGGREGATE_ONLY_MODE,))
     p.add_argument("--output", required=True, type=Path); p.add_argument("--check", action="store_true")
     a = p.parse_args(); source = json.loads(a.source_manifest.read_text())
-    tasks = json.loads(a.output.read_text()) if a.check else generate(source, a.cohort, a.contig, a.run_id, a.attempt, a.interval_size)
+    tasks = json.loads(a.output.read_text()) if a.check else generate(
+        source, a.cohort, a.contig, a.run_id, a.attempt, a.interval_size,
+        a.primary_load_mode,
+    )
     verify(tasks, a.contig)
+    if a.primary_load_mode != tasks[0].get("primary_load_mode"):
+        raise ValueError("requested primary load mode differs from manifest")
     verify_source_identity(tasks, source, a.cohort, a.contig)
     if not a.check:
         a.output.parent.mkdir(parents=True, exist_ok=True); a.output.write_text(json.dumps(tasks, indent=2) + "\n")

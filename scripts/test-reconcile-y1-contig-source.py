@@ -27,6 +27,19 @@ class PerContigReconciliationTests(unittest.TestCase):
     def manifest(self, contig):
         return json.loads((ROOT / "sources" / "y1" / f"primary-source-{contig}.json").read_text())
 
+    def sex_chromosome_text(self, contig):
+        base = self.fixture_text("hgsvc_hprc_trv_13_alt.vcf")
+        header = "\n".join(line for line in base.splitlines() if line.startswith("#"))
+        header = header.replace(
+            "ID=chr22,length=50818468",
+            f"ID={contig},length={generic.GRCH38_CONTIG_LENGTHS[contig]}",
+            1,
+        )
+        records = (ROOT / "tests" / "fixtures" / "y1" /
+                   "hgsvc_hprc_sex_chromosome_bounded_records.vcf.records").read_text()
+        selected = [line for line in records.splitlines() if line.startswith(contig + "\t")]
+        return header + "\n" + "\n".join(selected) + "\n"
+
     def test_chr22_reconciliation_is_backward_compatible(self):
         text = self.fixture_text("hgsvc_hprc_trv_13_alt.vcf")
         generic_facts = generic.reconcile(io.StringIO(text), "hgsvc_hprc", "chr22")
@@ -42,6 +55,56 @@ class PerContigReconciliationTests(unittest.TestCase):
             "source_records": 1, "summaries": 1, "alleles": 13,
             "frequencies": 273, "carriers": 214, "rejects": 0,
         })
+
+    def test_aggregate_only_replays_exact_sex_records_without_reading_genotypes(self):
+        expected = {
+            "chrX": (3, 10),
+            "chrY": (2, 2),
+        }
+        for contig, (source_records, alt_alleles) in expected.items():
+            text = self.sex_chromosome_text(contig)
+            facts = generic.reconcile(
+                io.StringIO(text), "hgsvc_hprc", contig,
+                generic.AGGREGATE_ONLY_MODE,
+            )
+            self.assertEqual(facts["source_records"], source_records)
+            self.assertEqual(facts["alt_alleles"], alt_alleles)
+            self.assertEqual(facts["genotype_calls"], 0)
+            self.assertEqual(facts["called_alleles"], 0)
+            self.assertEqual(facts["carrier_alt_copies"], 0)
+
+            # Corrupt every post-INFO byte. Aggregate-only reconciliation must not
+            # parse FORMAT, GT, or ALLR, while the ordinary path remains strict.
+            lines = []
+            for line in text.splitlines():
+                if line.startswith("#"):
+                    lines.append(line)
+                else:
+                    lines.append("\t".join(line.split("\t")[:8] + ["NOT_FORMAT_OR_GT"]))
+            malformed_gt = "\n".join(lines) + "\n"
+            bypassed = generic.reconcile(
+                io.StringIO(malformed_gt), "hgsvc_hprc", contig,
+                generic.AGGREGATE_ONLY_MODE,
+            )
+            self.assertEqual(bypassed["source_records"], source_records)
+            with self.assertRaises(ValueError):
+                generic.reconcile(io.StringIO(malformed_gt), "hgsvc_hprc", contig)
+
+            output = generic.build_output(
+                self.manifest(contig), io.StringIO(text), "hgsvc_hprc", contig,
+                f"fresh-{contig}", "file://bounded", "test",
+                generic.AGGREGATE_ONLY_MODE,
+            )
+            self.assertEqual(output["primary_load_mode"], generic.AGGREGATE_ONLY_MODE)
+            self.assertEqual(output["carrier_loading_status"], "unavailable_not_loaded")
+            self.assertEqual(output["counts"]["carriers"], 0)
+
+    def test_aggregate_only_reconciliation_rejects_every_other_scope(self):
+        for cohort, contig in (("aou", "chrX"), ("hgsvc_hprc", "chr22")):
+            with self.assertRaisesRegex(ValueError, "restricted"):
+                generic.reconcile(
+                    io.StringIO(""), cohort, contig, generic.AGGREGATE_ONLY_MODE
+                )
 
     def test_other_grch38_contig_uses_exact_declared_length(self):
         text = self.fixture_text("aou_summary_only_ins.vcf")
