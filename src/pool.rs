@@ -555,18 +555,40 @@ async fn handle_load_tasks(
     Ok(TaskResult::success(total_rows, Some(metrics_json)))
 }
 
+fn task_clickhouse_url(
+    job_payload: &Value,
+    task_payload: &Value,
+    action: &str,
+) -> anyhow::Result<String> {
+    for (scope, payload) in [("task", task_payload), ("job", job_payload)] {
+        if let Some(value) = payload.get("clickhouse_url") {
+            return value
+                .as_str()
+                .filter(|url| !url.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{action} {scope}-level 'clickhouse_url' must be a nonempty string"
+                    )
+                });
+        }
+    }
+    anyhow::bail!(
+        "{action} requires a task-level 'clickhouse_url' or compatible job-level fallback"
+    )
+}
+
 async fn handle_coverage_tasks(
     payload: &Value,
     tasks: Vec<TaskDescriptor>,
 ) -> Result<TaskResult, anyhow::Error> {
-    let ch_url = payload["clickhouse_url"]
-        .as_str()
-        .unwrap_or("http://localhost:8123")
-        .to_string();
-
+    let task_urls = tasks
+        .iter()
+        .map(|task| task_clickhouse_url(payload, &task.payload, "load_coverage"))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let mut total_rows = 0usize;
 
-    for task in &tasks {
+    for (task, ch_url) in tasks.iter().zip(task_urls) {
         let gcs_path = task.payload["gcs_path"]
             .as_str()
             .unwrap_or("gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.coverage.tsv.gz")
@@ -574,7 +596,6 @@ async fn handle_coverage_tasks(
         let downsample = task.payload["downsample"].as_u64().unwrap_or(1) as u32;
         let region = task_region(&task.payload)?;
         let limit = task.payload["limit"].as_u64().map(|value| value as usize);
-        let ch_url = ch_url.clone();
 
         info!("Task {}: loading coverage from {}", task.id, gcs_path);
         let rows = tokio::task::spawn_blocking(move || {
@@ -621,21 +642,19 @@ async fn handle_histograms_tasks(
     payload: &Value,
     tasks: Vec<TaskDescriptor>,
 ) -> Result<TaskResult, anyhow::Error> {
-    let ch_url = payload["clickhouse_url"]
-        .as_str()
-        .unwrap_or("http://localhost:8123")
-        .to_string();
-
+    let task_urls = tasks
+        .iter()
+        .map(|task| task_clickhouse_url(payload, &task.payload, "load_histograms"))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let mut total_rows = 0usize;
 
-    for task in &tasks {
+    for (task, ch_url) in tasks.iter().zip(task_urls) {
         let gcs_path = task.payload["gcs_path"]
             .as_str()
             .unwrap_or("gs://gnomad-v4-data-pipeline/inputs/secondary-analyses/gnomAD-LR/v2/hgsvc_hprc.af_histograms.tsv")
             .to_string();
         let region = task_region(&task.payload)?;
         let limit = task.payload["limit"].as_u64().map(|value| value as usize);
-        let ch_url = ch_url.clone();
 
         info!("Task {}: loading STR histograms from {}", task.id, gcs_path);
         let rows = tokio::task::spawn_blocking(move || {
@@ -696,6 +715,45 @@ async fn handle_methylation_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ancillary_tasks_can_target_separate_cohort_databases() {
+        let job = serde_json::json!({
+            "clickhouse_url": "http://localhost:8123/?database=compat"
+        });
+        let hgsvc = serde_json::json!({
+            "cohort": "hgsvc_hprc",
+            "clickhouse_url": "http://clickhouse:8123/?database=coverage_hgsvc"
+        });
+        let aou = serde_json::json!({
+            "cohort": "aou",
+            "clickhouse_url": "http://clickhouse:8123/?database=coverage_aou"
+        });
+
+        let hgsvc_url = task_clickhouse_url(&job, &hgsvc, "load_coverage").unwrap();
+        let aou_url = task_clickhouse_url(&job, &aou, "load_coverage").unwrap();
+        assert_eq!(hgsvc_url, "http://clickhouse:8123/?database=coverage_hgsvc");
+        assert_eq!(aou_url, "http://clickhouse:8123/?database=coverage_aou");
+        assert_ne!(hgsvc_url, aou_url);
+    }
+
+    #[test]
+    fn ancillary_task_target_keeps_job_level_compatibility_and_fails_closed() {
+        let compatible = serde_json::json!({
+            "clickhouse_url": "http://clickhouse:8123/?database=legacy_job_target"
+        });
+        let ordinary_task = serde_json::json!({"gcs_path": "gs://bucket/source.tsv"});
+        for action in ["load_coverage", "load_histograms"] {
+            assert_eq!(
+                task_clickhouse_url(&compatible, &ordinary_task, action).unwrap(),
+                "http://clickhouse:8123/?database=legacy_job_target"
+            );
+            assert!(task_clickhouse_url(&serde_json::json!({}), &ordinary_task, action).is_err());
+        }
+
+        let malformed_task = serde_json::json!({"clickhouse_url": ""});
+        assert!(task_clickhouse_url(&compatible, &malformed_task, "load_coverage").is_err());
+    }
 
     #[test]
     fn worker_identity_prefers_explicit_then_hostname() {
