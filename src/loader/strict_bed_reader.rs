@@ -506,7 +506,7 @@ mod tests {
     use crate::loader::immutable_gcs::{
         GcsObjectMetadata, GcsObjectRequest, GcsRangeResponse, ImmutableGcsObject,
     };
-    use crate::y1::methylation::{parse_methylation_source_record, MethylationSourceType};
+    use crate::y1::methylation::{methylation_source_coordinates, MethylationSourceType};
     use noodles::core::Position;
     use noodles::csi::binning_index::index::reference_sequence::bin::Chunk;
     use std::collections::BTreeMap;
@@ -527,18 +527,14 @@ mod tests {
         ))
     }
 
+    fn methylation_validator(
+        expected_type: MethylationSourceType,
+    ) -> impl StrictBedRecordValidator {
+        move |line: &str| methylation_source_coordinates(line, expected_type)
+    }
+
     fn total_validator() -> impl StrictBedRecordValidator {
-        |line: &str| {
-            let record = parse_methylation_source_record(line)?;
-            if record.source_type != MethylationSourceType::Total {
-                bail!("fixture source type is not Total");
-            }
-            Ok(ValidatedBedRecord {
-                chrom: record.chrom,
-                start0: record.source_start0,
-                end0: record.source_end0,
-            })
-        }
+        methylation_validator(MethylationSourceType::Total)
     }
 
     fn collect_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
@@ -779,6 +775,61 @@ mod tests {
                 receiver.recv().is_err(),
                 "completed off-contig spill was emitted"
             );
+        }
+    }
+
+    #[test]
+    fn shared_production_validators_filter_valid_off_contig_tails_for_all_methylation_types() {
+        for (expected_type, label, wrong_label) in [
+            (MethylationSourceType::Total, "Total", "hap1"),
+            (MethylationSourceType::Hap1, "hap1", "hap2"),
+            (MethylationSourceType::Hap2, "hap2", "Total"),
+        ] {
+            let continuation =
+                format!("\t248956422\t248956423\t50\t{label}\t93956\t46978\t46978\t50\n");
+            let (sender, receiver) = mpsc::sync_channel(1);
+            finish_indexed_tail(
+                &mut Cursor::new(continuation.as_bytes()),
+                b"chr2".to_vec(),
+                &sender,
+                "chr1",
+                0,
+                248_956_422,
+                b'#',
+                &methylation_validator(expected_type),
+            )
+            .unwrap();
+            drop(sender);
+            assert!(receiver.recv().is_err(), "valid {label} spill was emitted");
+
+            let wrong_type = format!("\t10\t11\t50\t{wrong_label}\t2\t1\t1\t50\n");
+            let (sender, _) = mpsc::sync_channel(1);
+            let type_error = finish_indexed_tail(
+                &mut Cursor::new(wrong_type.as_bytes()),
+                b"chr1".to_vec(),
+                &sender,
+                "chr1",
+                0,
+                100,
+                b'#',
+                &methylation_validator(expected_type),
+            )
+            .unwrap_err();
+            assert!(format!("{type_error:#}").contains("source type mismatch"));
+
+            let (sender, _) = mpsc::sync_channel(1);
+            let shape_error = finish_indexed_tail(
+                &mut Cursor::new(b"\n"),
+                b"chr2".to_vec(),
+                &sender,
+                "chr1",
+                0,
+                100,
+                b'#',
+                &methylation_validator(expected_type),
+            )
+            .unwrap_err();
+            assert!(format!("{shape_error:#}").contains("exactly nine"));
         }
     }
 

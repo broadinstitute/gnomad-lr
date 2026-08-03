@@ -184,23 +184,48 @@ pub(crate) fn parse_methylation_source_record(line: &str) -> anyhow::Result<Meth
     })
 }
 
-pub fn parse_methylation_record(
+/// Validate source shape and source-object type without applying query membership.
+///
+/// Strict indexed readers must use this before their chromosome/range spill filter.
+/// Only retained rows may then call [`parse_methylation_record`] to enforce query
+/// membership. Keeping this callback shared prevents loader-specific validation order.
+pub(crate) fn validate_methylation_source_record(
     line: &str,
-    expected_chrom: &str,
     expected_type: MethylationSourceType,
 ) -> anyhow::Result<MethylationRecord> {
     let record = parse_methylation_source_record(line)?;
-    if record.chrom != expected_chrom {
-        bail!(
-            "methylation chromosome mismatch: expected {expected_chrom}, got {}",
-            record.chrom
-        );
-    }
     if record.source_type != expected_type {
         bail!(
             "methylation source type mismatch: expected {:?}, got {:?}",
             expected_type,
             record.source_type
+        );
+    }
+    Ok(record)
+}
+
+pub(crate) fn methylation_source_coordinates(
+    line: &str,
+    expected_type: MethylationSourceType,
+) -> anyhow::Result<ValidatedBedRecord> {
+    let record = validate_methylation_source_record(line, expected_type)?;
+    Ok(ValidatedBedRecord {
+        chrom: record.chrom,
+        start0: record.source_start0,
+        end0: record.source_end0,
+    })
+}
+
+pub fn parse_methylation_record(
+    line: &str,
+    expected_chrom: &str,
+    expected_type: MethylationSourceType,
+) -> anyhow::Result<MethylationRecord> {
+    let record = validate_methylation_source_record(line, expected_type)?;
+    if record.chrom != expected_chrom {
+        bail!(
+            "methylation chromosome mismatch: expected {expected_chrom}, got {}",
+            record.chrom
         );
     }
     Ok(record)
@@ -1230,21 +1255,7 @@ fn open_methylation_record_stream(
         chrom,
         start,
         stop,
-        move |line: &str| {
-            let record = parse_methylation_source_record(line)?;
-            if record.source_type != expected_type {
-                bail!(
-                    "methylation source type mismatch: expected {:?}, got {:?}",
-                    expected_type,
-                    record.source_type
-                );
-            }
-            Ok(ValidatedBedRecord {
-                chrom: record.chrom,
-                start0: record.source_start0,
-                end0: record.source_end0,
-            })
-        },
+        move |line: &str| methylation_source_coordinates(line, expected_type),
     )?
     .records();
     Ok(MethylationRecordStream {

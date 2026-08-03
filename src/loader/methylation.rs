@@ -4,6 +4,7 @@ use crate::clickhouse::ClickHouseInserter;
 use crate::loader::immutable_gcs::{HttpGcsBackend, ImmutableGcsObject};
 use crate::loader::strict_bed_reader::{StrictBedLines, StrictBedStream, ValidatedBedRecord};
 use crate::models::MethylationRow;
+use crate::y1::methylation::methylation_source_coordinates;
 use crate::y1::{parse_methylation_record, MethylationSourceType};
 use anyhow::Context;
 use std::sync::Arc;
@@ -48,7 +49,6 @@ pub fn load_immutable_methylation(
     limit: Option<usize>,
 ) -> anyhow::Result<usize> {
     let (query_start, query_stop) = strict_query_interval(start, stop)?;
-    let validator_chrom = chrom.to_string();
     let stream = StrictBedStream::open_immutable_region(
         Arc::new(HttpGcsBackend::new().context("failed to initialize immutable GCS backend")?),
         bed,
@@ -56,7 +56,7 @@ pub fn load_immutable_methylation(
         chrom,
         query_start,
         query_stop,
-        move |line: &str| total_record_coordinates(line, &validator_chrom),
+        total_record_coordinates,
     )?;
     load_strict_records(ch_url, sample_id, chrom, stream.records(), limit)
 }
@@ -69,14 +69,13 @@ fn open_strict_records(
     stop: u32,
 ) -> anyhow::Result<StrictBedLines> {
     let (query_start, query_stop) = strict_query_interval(start, stop)?;
-    let validator_chrom = chrom.to_string();
     Ok(StrictBedStream::open_region(
         bed_path,
         index_path,
         chrom,
         query_start,
         query_stop,
-        move |line: &str| total_record_coordinates(line, &validator_chrom),
+        total_record_coordinates,
     )?
     .records())
 }
@@ -91,13 +90,8 @@ fn strict_query_interval(start0: u32, end0: u32) -> anyhow::Result<(u32, u32)> {
     Ok((start1, end0))
 }
 
-fn total_record_coordinates(line: &str, chrom: &str) -> anyhow::Result<ValidatedBedRecord> {
-    let record = parse_methylation_record(line, chrom, MethylationSourceType::Total)?;
-    Ok(ValidatedBedRecord {
-        chrom: record.chrom,
-        start0: record.source_start0,
-        end0: record.source_end0,
-    })
+fn total_record_coordinates(line: &str) -> anyhow::Result<ValidatedBedRecord> {
+    methylation_source_coordinates(line, MethylationSourceType::Total)
 }
 
 fn parse_total_row(line: &str, sample_id: &str, chrom: &str) -> anyhow::Result<MethylationRow> {
@@ -162,6 +156,49 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("coverage is not a UInt32"));
+    }
+
+    #[test]
+    fn production_validator_filters_membership_only_after_source_validation() {
+        let spill = "chr2\t10\t11\t50\tTotal\t93956\t46978\t46978\t50";
+        let coordinates = total_record_coordinates(spill).unwrap();
+        assert_eq!(
+            (
+                coordinates.chrom.as_str(),
+                coordinates.start0,
+                coordinates.end0
+            ),
+            ("chr2", 10, 11)
+        );
+
+        let membership_error = parse_total_row(spill, "HG002", "chr1").unwrap_err();
+        assert!(format!("{membership_error:#}").contains("chromosome mismatch"));
+
+        for malformed in [
+            "chr2",
+            "chr2\t10\t11\t50\thap1\t2\t1\t1\t50",
+            "chr2\tnot-a-position\t11\t50\tTotal\t2\t1\t1\t50",
+        ] {
+            assert!(total_record_coordinates(malformed).is_err(), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn strict_open_errors_are_not_converted_to_empty_input() {
+        let missing = std::env::temp_dir().join(format!(
+            "gnomad-lr-missing-methylation-{}",
+            std::process::id()
+        ));
+        let error = open_strict_records(
+            missing.to_str().unwrap(),
+            missing.with_extension("tbi").to_str().unwrap(),
+            "chr1",
+            0,
+            1,
+        )
+        .err()
+        .expect("missing strict source/index unexpectedly opened");
+        assert!(format!("{error:#}").contains("failed to load required tabix index"));
     }
 
     #[test]

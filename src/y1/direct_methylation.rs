@@ -6,6 +6,7 @@
 //! freshness and runs with coordinator retries disabled.
 
 use super::contig::grch38_contig_length;
+use super::methylation::methylation_source_coordinates;
 use super::{parse_methylation_record, MethylationSourceType};
 use crate::clickhouse::ClickHouseInserter;
 use crate::loader::immutable_gcs::{
@@ -180,6 +181,13 @@ fn parse_direct_row(
     Ok(row)
 }
 
+fn direct_record_coordinates(
+    line: &str,
+    expected_type: MethylationSourceType,
+) -> anyhow::Result<ValidatedBedRecord> {
+    methylation_source_coordinates(line, expected_type)
+}
+
 fn direct_row_from_strict_item(
     line: anyhow::Result<String>,
     chrom: &str,
@@ -200,7 +208,6 @@ pub fn load_direct_methylation_task(
         bail!("batch_records must be in 1..=100000");
     }
     let expected_type = task.source_type()?;
-    let validator_chrom = task.chrom.clone();
     let stream = StrictBedStream::open_immutable_region(
         Arc::new(HttpGcsBackend::new().context("failed to initialize immutable GCS backend")?),
         &task.source_object(),
@@ -208,14 +215,7 @@ pub fn load_direct_methylation_task(
         &task.chrom,
         task.start,
         task.stop,
-        move |line: &str| {
-            let record = parse_methylation_record(line, &validator_chrom, expected_type)?;
-            Ok(ValidatedBedRecord {
-                chrom: record.chrom,
-                start0: record.source_start0,
-                end0: record.source_end0,
-            })
-        },
+        move |line: &str| direct_record_coordinates(line, expected_type),
     )?;
 
     let mut inserter = ClickHouseInserter::new(
@@ -332,6 +332,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{parse_error:#}").contains("source type mismatch"));
+    }
+
+    #[test]
+    fn production_haplotype_validators_filter_membership_after_shape_and_type() {
+        for (haplotype, expected_type, label, wrong_label) in [
+            (1, MethylationSourceType::Hap1, "hap1", "hap2"),
+            (2, MethylationSourceType::Hap2, "hap2", "hap1"),
+        ] {
+            let spill = format!("chr2\t10\t11\t50\t{label}\t93956\t46978\t46978\t50");
+            let coordinates = direct_record_coordinates(&spill, expected_type).unwrap();
+            assert_eq!(
+                (
+                    coordinates.chrom.as_str(),
+                    coordinates.start0,
+                    coordinates.end0
+                ),
+                ("chr2", 10, 11)
+            );
+
+            let membership_error =
+                parse_direct_row(&spill, "chr1", "HG00097", haplotype, expected_type).unwrap_err();
+            assert!(format!("{membership_error:#}").contains("chromosome mismatch"));
+
+            let wrong_type = format!("chr1\t10\t11\t50\t{wrong_label}\t2\t1\t1\t50");
+            assert!(direct_record_coordinates(&wrong_type, expected_type).is_err());
+            assert!(direct_record_coordinates("chr2", expected_type).is_err());
+        }
     }
 
     #[test]

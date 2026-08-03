@@ -10,7 +10,7 @@ use super::{
     SourceHaplotype, TargetKind, Y1_SCHEMA_VERSION,
 };
 use crate::loader::immutable_gcs::{HttpGcsBackend, ImmutableGcsObject};
-use crate::loader::strict_bed_reader::{StrictBedStream, ValidatedBedRecord};
+use crate::loader::strict_bed_reader::StrictBedStream;
 use anyhow::{bail, Context};
 use base64::Engine;
 use once_cell::sync::OnceCell;
@@ -545,17 +545,7 @@ fn open_records(
         &task.chrom,
         task.start,
         task.stop,
-        move |line: &str| {
-            let record = super::methylation::parse_methylation_source_record(line)?;
-            if record.source_type != expected {
-                bail!("phased mirror source type substituted its haplotype");
-            }
-            Ok(ValidatedBedRecord {
-                chrom: record.chrom,
-                start0: record.source_start0,
-                end0: record.source_end0,
-            })
-        },
+        move |line: &str| super::methylation::methylation_source_coordinates(line, expected),
     )?;
     let chrom = task.chrom.clone();
     Ok(stream.records().map(move |line| {
