@@ -69,6 +69,20 @@ struct TerminalAttemptPrincipalView {
     report_json: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttemptTransformationReport {
+    source_records: u64,
+    summary_rows: u64,
+    carrier_rows: u64,
+    genotype_calls: u64,
+    missing_genotypes: u64,
+    partially_called_genotypes: u64,
+    reference_genotypes: u64,
+    rejected_records: u64,
+    rejects: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct PhysicalAttemptView {
     table: String,
@@ -828,6 +842,52 @@ fn validate_attempt_carrier_loading(
     Ok(())
 }
 
+fn validate_aggregate_only_attempt_transformation(
+    report: &serde_json::Value,
+    report_counts: &StagedCounts,
+    manifest_task: &PoolY1TaskSpec,
+    attempt_id: &str,
+) -> anyhow::Result<()> {
+    if manifest_task.primary_load_mode != Some(super::PrimaryLoadMode::AggregateOnlyNoCarriers) {
+        return Ok(());
+    }
+    if report_counts.carriers != 0 {
+        bail!("attempt {attempt_id} aggregate-only report declares carrier rows");
+    }
+    let transformation: AttemptTransformationReport = serde_json::from_value(
+        report
+            .get("transformation")
+            .cloned()
+            .with_context(|| format!("attempt {attempt_id} has no transformation report"))?,
+    )
+    .with_context(|| format!("attempt {attempt_id} has an invalid transformation report"))?;
+    for (field, value) in [
+        ("carrier_rows", transformation.carrier_rows),
+        ("genotype_calls", transformation.genotype_calls),
+        ("missing_genotypes", transformation.missing_genotypes),
+        (
+            "partially_called_genotypes",
+            transformation.partially_called_genotypes,
+        ),
+        ("reference_genotypes", transformation.reference_genotypes),
+    ] {
+        if value != 0 {
+            bail!(
+                "attempt {attempt_id} aggregate-only transformation field {field} must be zero, found {value}"
+            );
+        }
+    }
+    if transformation.source_records != report_counts.source_records
+        || transformation.summary_rows != report_counts.summaries
+        || transformation.carrier_rows != report_counts.carriers
+        || transformation.rejected_records != report_counts.rejects
+        || u64::try_from(transformation.rejects.len())? != transformation.rejected_records
+    {
+        bail!("attempt {attempt_id} transformation report disagrees with its staged counts");
+    }
+    Ok(())
+}
+
 fn validate_attempt_source_identity(
     report: &serde_json::Value,
     manifest_task: &PoolY1TaskSpec,
@@ -1009,6 +1069,12 @@ FORMAT JSONEachRow
         }
         match row.state.as_str() {
             "accepted" => {
+                validate_aggregate_only_attempt_transformation(
+                    &report,
+                    &report_counts,
+                    manifest_task,
+                    &row.attempt_id,
+                )?;
                 let expected_inserted = [
                     counts.summaries,
                     counts.alleles,
@@ -1630,6 +1696,98 @@ mod tests {
             }),
             &aggregate,
             "explicit-mode",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn aggregate_only_attempt_transformation_must_have_no_genotype_or_carrier_evidence() {
+        let mut task = task_for("chrX", 0, 1, grch38_contig_length("chrX").unwrap());
+        task.cohort = "hgsvc_hprc".into();
+        task.source_uri =
+            "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chrX.vcf.gz"
+                .into();
+        task.source_index_uri = format!("{}.tbi", task.source_uri);
+        task.primary_load_mode = Some(super::super::PrimaryLoadMode::AggregateOnlyNoCarriers);
+        let counts = StagedCounts {
+            source_records: 1,
+            summaries: 1,
+            alleles: 2,
+            frequencies: 3,
+            carriers: 0,
+            rejects: 0,
+        };
+        let report = serde_json::json!({
+            "transformation": {
+                "source_records": 1,
+                "summary_rows": 1,
+                "carrier_rows": 0,
+                "genotype_calls": 0,
+                "missing_genotypes": 0,
+                "partially_called_genotypes": 0,
+                "reference_genotypes": 0,
+                "rejected_records": 0,
+                "rejects": []
+            }
+        });
+
+        validate_aggregate_only_attempt_transformation(&report, &counts, &task, "happy").unwrap();
+
+        for field in [
+            "carrier_rows",
+            "genotype_calls",
+            "missing_genotypes",
+            "partially_called_genotypes",
+            "reference_genotypes",
+        ] {
+            let mut tampered = report.clone();
+            tampered["transformation"][field] = serde_json::json!(1);
+            let error =
+                validate_aggregate_only_attempt_transformation(&tampered, &counts, &task, field)
+                    .unwrap_err();
+            assert!(error.to_string().contains(field), "{error:#}");
+        }
+
+        for field in [
+            "gt_fields_parsed",
+            "format_fields_parsed",
+            "carrier_evidence",
+            "haplotype_rows",
+        ] {
+            let mut unexpected_evidence = report.clone();
+            unexpected_evidence["transformation"][field] = serde_json::json!(1);
+            assert!(validate_aggregate_only_attempt_transformation(
+                &unexpected_evidence,
+                &counts,
+                &task,
+                field,
+            )
+            .is_err());
+        }
+
+        let mut top_level_carriers = counts;
+        top_level_carriers.carriers = 1;
+        assert!(validate_aggregate_only_attempt_transformation(
+            &report,
+            &top_level_carriers,
+            &task,
+            "top-level-carriers",
+        )
+        .is_err());
+        assert!(validate_aggregate_only_attempt_transformation(
+            &serde_json::json!({}),
+            &counts,
+            &task,
+            "missing-transformation",
+        )
+        .is_err());
+
+        let ordinary = task_for("chr22", 0, 1, grch38_contig_length("chr22").unwrap());
+        validate_aggregate_only_attempt_transformation(
+            &serde_json::json!({}),
+            &counts,
+            &ordinary,
+            "ordinary-legacy",
         )
         .unwrap();
     }
