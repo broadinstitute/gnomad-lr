@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS lr_methylation (
     pos2 UInt32,
     sample_id LowCardinality(String),
     methylation Float32,
-    coverage UInt16
+    coverage UInt32
 ) ENGINE = MergeTree()
 PARTITION BY chrom
 ORDER BY (chrom, pos1, sample_id);

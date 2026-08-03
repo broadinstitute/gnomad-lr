@@ -754,6 +754,35 @@ async fn handle_methylation_source_haplotype_tasks(
     ))
 }
 
+fn immutable_methylation_object(
+    payload: &Value,
+    uri_field: &str,
+    generation_field: &str,
+    byte_size_field: &str,
+    md5_field: &str,
+) -> anyhow::Result<crate::loader::immutable_gcs::ImmutableGcsObject> {
+    let uri = payload[uri_field]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing '{uri_field}' in methylation task"))?;
+    let generation = payload[generation_field]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing '{generation_field}' in methylation task"))?;
+    let byte_size = payload[byte_size_field]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("missing '{byte_size_field}' in methylation task"))?;
+    let checksum = payload[md5_field]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing '{md5_field}' in methylation task"))?;
+    Ok(crate::loader::immutable_gcs::ImmutableGcsObject {
+        uri: uri.to_string(),
+        generation: generation.to_string(),
+        byte_size,
+        checksum_algorithm: "md5_base64".into(),
+        checksum: checksum.to_string(),
+        immutable_read_uri: format!("{uri}?generation={generation}"),
+    })
+}
+
 async fn handle_methylation_tasks(
     payload: &Value,
     tasks: Vec<TaskDescriptor>,
@@ -766,10 +795,20 @@ async fn handle_methylation_tasks(
     let mut total_rows = 0usize;
 
     for task in &tasks {
-        let bed_path = task.payload["bed_path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing 'bed_path' in methylation task"))?
-            .to_string();
+        let bed = immutable_methylation_object(
+            &task.payload,
+            "bed_path",
+            "bed_generation",
+            "bed_byte_size",
+            "bed_md5_base64",
+        )?;
+        let index = immutable_methylation_object(
+            &task.payload,
+            "index_uri",
+            "index_generation",
+            "index_byte_size",
+            "index_md5_base64",
+        )?;
         let sample_id = task.payload["sample_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'sample_id' in methylation task"))?
@@ -778,9 +817,12 @@ async fn handle_methylation_tasks(
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'chrom' in methylation task"))?
             .to_string();
-        let start = task.payload["start"].as_u64().unwrap_or(0) as u32;
-        let stop = task.payload["stop"].as_u64().unwrap_or(400_000_000) as u32;
-        let limit = task.payload["limit"].as_u64().map(|value| value as usize);
+        let start = u32::try_from(task.payload["start"].as_u64().unwrap_or(0))?;
+        let stop = u32::try_from(task.payload["stop"].as_u64().unwrap_or(400_000_000))?;
+        let limit = task.payload["limit"]
+            .as_u64()
+            .map(usize::try_from)
+            .transpose()?;
         let ch_url = ch_url.clone();
 
         info!(
@@ -788,12 +830,14 @@ async fn handle_methylation_tasks(
             task.id, sample_id, chrom, start, stop
         );
         let rows = tokio::task::spawn_blocking(move || {
-            loader::methylation::load_methylation(
-                &ch_url, &bed_path, &sample_id, &chrom, start, stop, limit,
+            loader::methylation::load_immutable_methylation(
+                &ch_url, &bed, &index, &sample_id, &chrom, start, stop, limit,
             )
         })
         .await??;
-        total_rows += rows;
+        total_rows = total_rows
+            .checked_add(rows)
+            .ok_or_else(|| anyhow::anyhow!("methylation items_processed overflow"))?;
     }
 
     Ok(TaskResult::success(total_rows, None))

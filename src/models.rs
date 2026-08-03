@@ -155,5 +155,5 @@ pub struct MethylationRow {
     pub pos2: u32,
     pub sample_id: String,
     pub methylation: f32,
-    pub coverage: u16,
+    pub coverage: u32,
 }

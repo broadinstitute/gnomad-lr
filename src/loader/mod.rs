@@ -1,4 +1,3 @@
-pub mod bed_reader;
 pub mod coverage;
 pub mod haplotypes;
 pub mod histograms;

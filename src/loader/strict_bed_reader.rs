@@ -7,9 +7,7 @@ use crate::loader::immutable_gcs::{
     validate_source_index_pair, ImmutableGcsBackend, ImmutableGcsObject, ImmutableGcsReader,
 };
 use anyhow::{bail, Context};
-#[cfg(test)]
-use genohype_core::io::get_reader;
-use genohype_core::io::BoxedReader;
+use genohype_core::io::{get_reader, BoxedReader};
 use noodles::bgzf;
 use noodles::csi::BinningIndex;
 use noodles::tabix;
@@ -61,7 +59,6 @@ pub struct StrictBedStream {
 impl StrictBedStream {
     /// Open an explicitly indexed BED source for a one-based inclusive browser
     /// interval. The equivalent BED interval is `[start - 1, stop)`.
-    #[cfg(test)]
     pub fn open_region<V>(
         bed_path: &str,
         index_path: &str,
@@ -485,12 +482,10 @@ where
         .map_err(|_| anyhow::anyhow!("strict BED receiver dropped before completion"))
 }
 
-#[cfg(test)]
 fn open_bed_source(bed_path: &str) -> anyhow::Result<genohype_core::io::BoxedReader> {
     get_reader(bed_path).with_context(|| format!("failed to open strict BED source {bed_path}"))
 }
 
-#[cfg(test)]
 fn load_tabix_index(index_path: &str) -> anyhow::Result<tabix::Index> {
     let reader = get_reader(index_path)
         .with_context(|| format!("failed to open tabix index {index_path}"))?;
@@ -745,6 +740,46 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("truncated nonempty BED line"));
+    }
+
+    #[test]
+    fn observed_chr_fragments_are_completed_as_indexed_spill_rows() {
+        for (fragment, continuation) in [
+            (
+                b"c".as_slice(),
+                b"hr2\t248956422\t248956423\t50\tTotal\t2\t1\t1\t50\n".as_slice(),
+            ),
+            (
+                b"ch".as_slice(),
+                b"r2\t248956422\t248956423\t50\tTotal\t2\t1\t1\t50\n".as_slice(),
+            ),
+            (
+                b"chr".as_slice(),
+                b"2\t248956422\t248956423\t50\tTotal\t2\t1\t1\t50\n".as_slice(),
+            ),
+            (
+                b"chr2".as_slice(),
+                b"\t248956422\t248956423\t50\tTotal\t2\t1\t1\t50\n".as_slice(),
+            ),
+        ] {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            finish_indexed_tail(
+                &mut Cursor::new(continuation),
+                fragment.to_vec(),
+                &sender,
+                "chr1",
+                0,
+                248_956_422,
+                b'#',
+                &total_validator(),
+            )
+            .unwrap();
+            drop(sender);
+            assert!(
+                receiver.recv().is_err(),
+                "completed off-contig spill was emitted"
+            );
+        }
     }
 
     #[test]

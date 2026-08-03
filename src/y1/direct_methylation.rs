@@ -335,6 +335,29 @@ mod tests {
     }
 
     #[test]
+    fn direct_haplotype_rows_preserve_uint32_coverage() {
+        let row = parse_direct_row(
+            "chr22\t10\t11\t50\thap1\t65690\t32845\t32845\t50",
+            "chr22",
+            "HG00097",
+            1,
+            MethylationSourceType::Hap1,
+        )
+        .unwrap();
+        assert_eq!(row.coverage, 65_690);
+
+        let error = parse_direct_row(
+            "chr22\t10\t11\t50\thap2\t4294967296\t1\t1\t50",
+            "chr22",
+            "HG00097",
+            2,
+            MethylationSourceType::Hap2,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("coverage is not a UInt32"));
+    }
+
+    #[test]
     fn stable_key_is_repeatable_and_haplotype_specific() {
         let line = "chr22\t10\t11\t50\thap1\t2\t1\t1\t50";
         let first =
