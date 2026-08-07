@@ -12,8 +12,8 @@ CH_VM="gnomad-lr-y1-clickhouse"
 CH_ZONE="us-east1-c"
 CH_LOCAL="http://127.0.0.1:8126"
 CH_PRIVATE="http://192.168.0.15:8123"
-GH="${GENOHYPE_BIN:-$(command -v genohype || true)}"
-COORD_BIN="${GENOHYPE_WORKER_BIN:-$(command -v genohype-worker || true)}"
+GENOHYPE_BIN="${GENOHYPE_BIN:-}"
+GENOHYPE_WORKER_BIN="${GENOHYPE_WORKER_BIN:-}"
 MAX_WORKERS=8
 MAX_SCALE_ATTEMPTS=5
 TIMEOUT_SECONDS=7200
@@ -38,7 +38,13 @@ Options:
   --operator ID                     identity persisted by finalization
   -h, --help                        show this help
 
-The command refuses an existing database, principal, pool, pool firewall, or ops
+Environment:
+  GENOHYPE_BIN                       genohype executable override
+  GENOHYPE_WORKER_BIN                genohype-worker executable override
+
+Executable overrides must resolve to regular executable files. When unset, the
+commands are discovered on PATH. The command refuses an existing database,
+principal, pool, pool firewall, or ops
 prefix. It scales one worker first for each cohort, validates an accepted exact-job
 receipt, then scales to N. On success it preserves manifests, job receipts,
 finalization reports, metadata report, checkpoints, and a summary in DIR.
@@ -87,11 +93,35 @@ fi
   exit 2
 }
 
+resolve_executable() {
+  local env_name="$1" command_name="$2" configured="$3" candidate
+  if [[ -n "$configured" ]]; then
+    candidate="$configured"
+  else
+    candidate="$(command -v "$command_name" 2>/dev/null || true)"
+    [[ -n "$candidate" ]] || {
+      echo "missing executable: set $env_name or put $command_name on PATH" >&2
+      return 1
+    }
+  fi
+  if [[ "$candidate" != */* ]]; then
+    candidate="$(command -v "$candidate" 2>/dev/null || true)"
+  fi
+  [[ -n "$candidate" && -f "$candidate" && -x "$candidate" ]] || {
+    echo "$env_name does not resolve to a regular executable file" >&2
+    return 1
+  }
+  if [[ "$candidate" != /* ]]; then
+    candidate="$(cd -P "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+  fi
+  printf '%s\n' "$candidate"
+}
+
 for command in curl gcloud git make python3 shasum; do
   command -v "$command" >/dev/null || { echo "missing command: $command" >&2; exit 1; }
 done
-[[ -x "$GH" ]] || { echo "missing executable: $GH" >&2; exit 1; }
-[[ -x "$COORD_BIN" ]] || { echo "missing executable: $COORD_BIN" >&2; exit 1; }
+GH="$(resolve_executable GENOHYPE_BIN genohype "$GENOHYPE_BIN")"
+COORD_BIN="$(resolve_executable GENOHYPE_WORKER_BIN genohype-worker "$GENOHYPE_WORKER_BIN")"
 
 cd "$ROOT"
 [[ -z "$(git status --porcelain)" ]] || { echo "repository must be clean" >&2; exit 1; }
