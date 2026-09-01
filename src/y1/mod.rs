@@ -7,6 +7,7 @@ pub mod methylation;
 mod model;
 mod parser;
 mod phased_pool;
+pub mod primary_motif;
 mod storage;
 mod target;
 

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "contract": "Y1_PRIMARY_REPEAT_REGISTRY_V1",
+  "release": "Y1",
+  "reference_genome": "GRCh38",
+  "source_inventory_sha256": "5ce4c4b443ee21985b73246914c3f8ef8a0de4b5c84ff9052635e81f13f82160",
+  "approval_state": "CANDIDATE_PENDING_SCIENCE",
+  "design_authorization_receipt": "notespaces/gnomad-lr/plans/rolling/.artifacts/lr-changes-coord-6b8d7db5/briefing-1788277596.xml#phase-7",
+  "entries": [
+    {
+      "registry_entry_id": "y1-grch38-htt-cag-v1",
+      "catalog_id": "HTT",
+      "canonical_locus_id": "chr4-3074876-TRV-164",
+      "source_variant_id": "chr4-3074876-TRV-164",
+      "chrom": "chr4",
+      "source_position": 3074876,
+      "ordered_components": [
+        { "start0": 3074876, "end0": 3074933, "motif": "CAG" },
+        { "start0": 3074927, "end0": 3074936, "motif": "CAA" },
+        { "start0": 3074939, "end0": 3074966, "motif": "CCG" },
+        { "start0": 3074966, "end0": 3074972, "motif": "CCT" },
+        { "start0": 3074983, "end0": 3074994, "motif": "GCC" },
+        { "start0": 3075029, "end0": 3075040, "motif": "CCG" }
+      ],
+      "component_index": 0,
+      "motif": "CAG",
+      "selection_basis": "EXACT_MAIN_CATALOG_COMPONENT",
+      "biological_role": "coding polyglutamine repeat",
+      "approval_state": "CANDIDATE_PENDING_SCIENCE",
+      "reviewer": null,
+      "approval_receipt": null,
+      "catalog_digest": null
+    },
+    {
+      "registry_entry_id": "y1-grch38-atxn1-tgc-v1",
+      "catalog_id": "ATXN1",
+      "canonical_locus_id": "chr6-16327633-TRV-90",
+      "source_variant_id": "chr6-16327633-TRV-90",
+      "chrom": "chr6",
+      "source_position": 16327633,
+      "ordered_components": [
+        { "start0": 16327633, "end0": 16327723, "motif": "TGC" }
+      ],
+      "component_index": 0,
+      "motif": "TGC",
+      "selection_basis": "EXACT_MAIN_CATALOG_COMPONENT",
+      "biological_role": "stored-orientation disease-associated repeat",
+      "approval_state": "CANDIDATE_PENDING_SCIENCE",
+      "reviewer": null,
+      "approval_receipt": null,
+      "catalog_digest": null
+    },
+    {
+      "registry_entry_id": "y1-grch38-rfc1-aaaag-v1",
+      "catalog_id": "RFC1",
+      "canonical_locus_id": "chr4-39348424-TRV-55",
+      "source_variant_id": "chr4-39348424-TRV-55",
+      "chrom": "chr4",
+      "source_position": 39348424,
+      "ordered_components": [
+        { "start0": 39348424, "end0": 39348479, "motif": "AAAAG" }
+      ],
+      "component_index": 0,
+      "motif": "AAAAG",
+      "selection_basis": "EXACT_MAIN_CATALOG_COMPONENT",
+      "biological_role": "benign reference motif",
+      "approval_state": "CANDIDATE_PENDING_SCIENCE",
+      "reviewer": null,
+      "approval_receipt": null,
+      "catalog_digest": null
+    }
+  ],
+  "content_sha256": "b86f9bb579eb85ba89a23473fd32300d3abdf9b916f62f477d4b307bbf610a31"
+}
