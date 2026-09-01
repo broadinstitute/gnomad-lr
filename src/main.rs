@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod cli;
 mod clickhouse;
 mod domain;
@@ -10,12 +12,14 @@ pub mod y1;
 #[cfg(not(feature = "clickhouse"))]
 compile_error!("gnomad-lr requires the default `clickhouse` feature");
 
+use anyhow::Context;
 use clap::Parser;
 use cli::{
     parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
     Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1PhasedMethylationEvaluationArgs,
-    Y1PhasedMethylationSmokeArgs, Y1PrimaryMotifFinalizeArgs, Y1PrimaryMotifResolveArgs,
-    Y1PrimaryMotifRunStateArg, Y1PrimaryMotifTransitionArgs, Y1TargetKindArg,
+    Y1PhasedMethylationSmokeArgs, Y1PrimaryMotifFinalizeArgs, Y1PrimaryMotifProduceArgs,
+    Y1PrimaryMotifReconcileArgs, Y1PrimaryMotifResolveArgs, Y1PrimaryMotifRunStateArg,
+    Y1PrimaryMotifTransitionArgs, Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
@@ -62,6 +66,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::ResolveY1PrimaryMotif(args) => {
             tokio::task::spawn_blocking(move || run_y1_primary_motif_resolve(args)).await??;
+        }
+        Commands::ProduceY1PrimaryMotif(args) => {
+            tokio::task::spawn_blocking(move || run_y1_primary_motif_produce(args)).await??;
+        }
+        Commands::ReconcileY1PrimaryMotif(args) => {
+            tokio::task::spawn_blocking(move || run_y1_primary_motif_reconcile(args)).await??;
         }
         Commands::TransitionY1PrimaryMotif(args) => {
             tokio::task::spawn_blocking(move || run_y1_primary_motif_transition(args)).await??;
@@ -261,7 +271,66 @@ fn run_y1_primary_motif_resolve(args: Y1PrimaryMotifResolveArgs) -> anyhow::Resu
     write_json_report(&args.report, &resolved)
 }
 
+fn run_y1_primary_motif_produce(args: Y1PrimaryMotifProduceArgs) -> anyhow::Result<()> {
+    let reader = y1_target(&args.target)?;
+    let writer = worker_target(
+        &args.target,
+        args.worker_auth_source,
+        &args.worker_principal,
+        &args.worker_username_env,
+        &args.worker_password_env,
+    )?;
+    writer.attest_current_user(&args.worker_principal)?;
+    writer.attest_synchronous_inserts()?;
+    let registry = read_primary_motif_registry(&args.registry)?;
+    let cohort = primary_motif_cohort(args.cohort);
+    let resolved = y1::primary_motif_product::resolve_accepted_primary_input(
+        &reader,
+        &registry,
+        &args.source_manifest,
+        cohort,
+        &args.chrom,
+    )?;
+    let report = y1::primary_motif_producer::produce_product(
+        &reader,
+        &writer,
+        &registry,
+        &resolved,
+        cohort,
+        &args.product_run_id,
+        args.metadata_run_id.as_deref(),
+        &args.operator_identity,
+        &args.message,
+    )?;
+    write_json_report_create_new(&args.report, &report)
+}
+
+fn run_y1_primary_motif_reconcile(args: Y1PrimaryMotifReconcileArgs) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let registry = read_primary_motif_registry(&args.registry)?;
+    let cohort = primary_motif_cohort(args.cohort);
+    let resolved = y1::primary_motif_product::resolve_accepted_primary_input(
+        &target,
+        &registry,
+        &args.source_manifest,
+        cohort,
+        &args.chrom,
+    )?;
+    let receipt = y1::primary_motif_producer::reconcile_product(
+        &target,
+        &registry,
+        &resolved,
+        cohort,
+        &args.product_run_id,
+        args.metadata_run_id.as_deref(),
+    )?;
+    write_json_report_create_new(&args.report, &receipt)
+}
+
 fn run_y1_primary_motif_transition(args: Y1PrimaryMotifTransitionArgs) -> anyhow::Result<()> {
+    if args.to != Y1PrimaryMotifRunStateArg::Failed {
+        anyhow::bail!("planned/producing/produced transitions are owned by produce-y1-primary-motif; the manual command supports only --to failed");
+    }
     let target = y1_target(&args.target)?;
     let registry = read_primary_motif_registry(&args.registry)?;
     y1::primary_motif_product::append_product_run_transition(
@@ -395,6 +464,27 @@ fn write_json_report<T: serde::Serialize>(
     }
     std::fs::write(path, serde_json::to_vec_pretty(report)?)?;
     println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
+}
+
+fn write_json_report_create_new<T: serde::Serialize>(
+    path: &std::path::Path,
+    report: &T,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("refusing to overwrite audit report {}", path.display()))?;
+    let body = serde_json::to_vec_pretty(report)?;
+    file.write_all(&body)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    println!("{}", String::from_utf8(body)?);
     Ok(())
 }
 

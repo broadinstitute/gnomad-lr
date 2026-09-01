@@ -19,13 +19,15 @@ genotype_expectations = json.loads(module.GENOTYPE_EXPECTATIONS.read_text())
 module.validate_genotype_expectations(genotype_expectations)
 module.validate_storage()
 product = module.PRODUCT_LIFECYCLE.read_text()
+producer = module.PRODUCT_PRODUCER.read_text()
 cli = (ROOT / "src/cli.rs").read_text()
 main_rs = (ROOT / "src/main.rs").read_text()
 frozen_storage = (ROOT / "src/y1/storage.rs").read_text()
-module.validate_product_lifecycle(product, cli, main_rs, frozen_storage)
+module.validate_product_lifecycle(product, producer, cli, main_rs, frozen_storage)
 try:
     module.validate_product_lifecycle(
         product.replace("FORMAT RowBinary", "FORMAT JSONEachRow"),
+        producer,
         cli,
         main_rs,
         frozen_storage,

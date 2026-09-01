@@ -9,7 +9,7 @@ use super::primary_motif::{
     validate_run_state_transition, PrimaryMotifRunState, PrimaryRepeatRegistry,
 };
 use super::{ClickHouseTarget, Cohort};
-use crate::loader::immutable_gcs::ImmutableGcsObject;
+use crate::loader::immutable_gcs::{validate_source_index_pair, ImmutableGcsObject};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,12 +88,20 @@ pub fn attest_primary_motif_schema(target: &ClickHouseTarget) -> anyhow::Result<
         )?;
         let shape: TableShape = exactly_one_json(&shape_body, "product table shape")?;
         let expected_shape = ddl_shape(ddl)?;
-        if normalize_shape(&shape.engine_full) != normalize_shape(&expected_shape.engine_full)
+        if normalize_engine(&shape.engine_full) != normalize_engine(&expected_shape.engine_full)
             || normalize_shape(&shape.partition_key)
                 != normalize_shape(&expected_shape.partition_key)
             || normalize_shape(&shape.sorting_key) != normalize_shape(&expected_shape.sorting_key)
         {
-            bail!("primary-motif product engine/partition/order contract differs for {table}");
+            bail!(
+                "primary-motif product engine/partition/order contract differs for {table}: observed engine={:?} partition={:?} order={:?}; expected engine={:?} partition={:?} order={:?}",
+                shape.engine_full,
+                shape.partition_key,
+                shape.sorting_key,
+                expected_shape.engine_full,
+                expected_shape.partition_key,
+                expected_shape.sorting_key,
+            );
         }
     }
     Ok(())
@@ -153,15 +161,26 @@ fn ddl_shape(ddl: &str) -> anyhow::Result<ExpectedTableShape> {
         let (partition, order) = keys
             .split_once("\nORDER BY ")
             .context("partitioned product DDL lacks ORDER BY")?;
-        (partition.trim(), order.trim_end_matches(';').trim())
+        (partition.trim(), order.trim().trim_end_matches(';').trim())
     } else {
-        ("", keys.trim_end_matches(';').trim())
+        ("", keys.trim().trim_end_matches(';').trim())
     };
     Ok(ExpectedTableShape {
         engine_full: engine_full.to_string(),
         partition_key: partition_key.to_string(),
         sorting_key: sorting_key.to_string(),
     })
+}
+
+fn normalize_engine(value: &str) -> String {
+    let before_partition = value.split(" PARTITION BY ").next().unwrap_or(value);
+    let before_order = before_partition
+        .split(" ORDER BY ")
+        .next()
+        .unwrap_or(before_partition);
+    normalize_shape(before_order)
+        .trim_end_matches("()")
+        .to_string()
 }
 
 fn normalize_shape(value: &str) -> String {
@@ -514,6 +533,15 @@ pub struct IndependentProductReceipt {
     pub reference_genome: String,
     pub chrom: String,
     pub source_inventory_sha256: String,
+    pub source_manifest_sha256: String,
+    pub source_uri: String,
+    pub source_generation: String,
+    pub source_size_bytes: u64,
+    pub source_md5_base64: String,
+    pub source_index_uri: String,
+    pub source_index_generation: String,
+    pub source_index_size_bytes: u64,
+    pub source_index_md5_base64: String,
     pub registry_digest: String,
     pub registry_approval_state: String,
     pub registered_locus_ids: Vec<String>,
@@ -545,6 +573,24 @@ impl IndependentProductReceipt {
             &self.source_inventory_sha256,
             "independent source inventory",
         )?;
+        require_sha256(&self.source_manifest_sha256, "independent source manifest")?;
+        let immutable_source = ImmutableProductSource {
+            manifest_sha256: self.source_manifest_sha256.clone(),
+            inventory_sha256: self.source_inventory_sha256.clone(),
+            source_uri: self.source_uri.clone(),
+            source_generation: self.source_generation.clone(),
+            source_size_bytes: self.source_size_bytes,
+            source_md5_base64: self.source_md5_base64.clone(),
+            source_index_uri: self.source_index_uri.clone(),
+            source_index_generation: self.source_index_generation.clone(),
+            source_index_size_bytes: self.source_index_size_bytes,
+            source_index_md5_base64: self.source_index_md5_base64.clone(),
+        };
+        validate_source_index_pair(
+            &immutable_source.vcf_object(),
+            &immutable_source.index_object(),
+        )
+        .context("independent receipt has invalid immutable VCF/TBI identity")?;
         require_sha256(&self.registry_digest, "independent registry")?;
         for digest in [
             &self.physical.locus_content_sha256,
@@ -827,7 +873,7 @@ pub fn append_product_run_transition(
         .max(now_ns);
     object.insert("revision".into(), Value::from(revision));
     object.insert("state".into(), serde_json::to_value(to)?);
-    object.insert("updated_at".into(), Value::from(now_ms as f64 / 1000.0));
+    object.insert("updated_at".into(), Value::from(now_ms / 1000));
     object.insert("operator_identity".into(), Value::from(operator_identity));
     object.insert("message".into(), Value::from(message));
     target.insert_json_each_row("lr_y1_primary_motif_runs", &[row])?;
@@ -947,6 +993,15 @@ mod tests {
             reference_genome: "GRCh38".into(),
             chrom: "chr4".into(),
             source_inventory_sha256: registry.source_inventory_sha256.clone(),
+            source_manifest_sha256: "7".repeat(64),
+            source_uri: "gs://fixture/source.vcf.gz".into(),
+            source_generation: "1".into(),
+            source_size_bytes: 1,
+            source_md5_base64: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            source_index_uri: "gs://fixture/source.vcf.gz.tbi".into(),
+            source_index_generation: "2".into(),
+            source_index_size_bytes: 1,
+            source_index_md5_base64: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
             registry_digest: registry.content_sha256.clone(),
             registry_approval_state: "REVIEWED".into(),
             registered_locus_ids: registry
@@ -1018,6 +1073,15 @@ mod tests {
             reference_genome: "GRCh38".into(),
             chrom: "chr4".into(),
             source_inventory_sha256: candidate.source_inventory_sha256.clone(),
+            source_manifest_sha256: "7".repeat(64),
+            source_uri: "gs://fixture/source.vcf.gz".into(),
+            source_generation: "1".into(),
+            source_size_bytes: 1,
+            source_md5_base64: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            source_index_uri: "gs://fixture/source.vcf.gz.tbi".into(),
+            source_index_generation: "2".into(),
+            source_index_size_bytes: 1,
+            source_index_md5_base64: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
             registry_digest: candidate.content_sha256.clone(),
             registry_approval_state: "REVIEWED".into(),
             registered_locus_ids: candidate

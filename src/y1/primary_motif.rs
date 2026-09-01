@@ -9,7 +9,8 @@ use crate::loader::immutable_gcs::{ImmutableGcsBackend, ImmutableGcsObject};
 use crate::loader::vcf_reader::VcfStream;
 use crate::y1::model::Cohort;
 use crate::y1::parser::{
-    parse_complete_source_genotypes, CompleteGenotypeCall, CompleteSourceGenotypes, Y1Header,
+    parse_complete_source_genotypes, CompleteGenotypeCall, CompleteGenotypeTotals,
+    CompleteSourceGenotypes, Y1Header,
 };
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -415,6 +416,14 @@ pub struct PrimaryMotifStratumDistribution {
     pub ancestry: Option<String>,
     pub sex: Option<String>,
     pub distribution: PrimaryMotifAlleleDistribution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrimaryMotifGenotypeStratumAggregation {
+    pub division: String,
+    pub ancestry: Option<String>,
+    pub sex: Option<String>,
+    pub aggregate: PrimaryMotifGenotypeAggregation,
 }
 
 /// Build one complete aggregate-only stratum. ALT identities are consumed only
@@ -952,6 +961,156 @@ pub fn bind_complete_genotypes_to_metadata(
                 .context("mapped sample count exceeds UInt32")?,
         },
     })
+}
+
+/// Build every metadata-qualified HGSVC/HPRC genotype stratum named by the
+/// checked source frequency grid. Source AC/AN values are authoritative and
+/// each in-memory metadata subset must reproduce them exactly. No sample ID is
+/// copied into the returned aggregate-only values.
+pub fn aggregate_bound_primary_motif_genotype_strata(
+    represented: &RepresentedAlleles,
+    motif: &str,
+    source_strata: &[PrimaryMotifStratumInput],
+    bound: &MetadataBoundCompleteGenotypes,
+) -> anyhow::Result<Vec<PrimaryMotifGenotypeStratumAggregation>> {
+    let mut output = Vec::with_capacity(source_strata.len());
+    for stratum in source_strata {
+        let calls = bound
+            .calls
+            .iter()
+            .filter(|call| metadata_matches_division(&call.metadata, &stratum.division))
+            .map(|call| call.genotype.clone())
+            .collect::<Vec<_>>();
+        let complete = subset_complete_genotypes(&calls, represented.alternates.len() + 1)?;
+        let aggregate = aggregate_primary_motif_genotypes(
+            Cohort::HgsvcHprc,
+            represented,
+            motif,
+            &stratum.alt_ac,
+            stratum.an,
+            Some(&complete),
+        )?;
+        output.push(PrimaryMotifGenotypeStratumAggregation {
+            division: stratum.division.clone(),
+            ancestry: stratum.ancestry.clone(),
+            sex: stratum.sex.clone(),
+            aggregate,
+        });
+    }
+    Ok(output)
+}
+
+fn metadata_matches_division(metadata: &PrimaryMotifSampleMetadata, division: &str) -> bool {
+    if division == "all" {
+        return true;
+    }
+    if matches!(division, "XX" | "XY") {
+        return metadata.sex == division;
+    }
+    if let Some((ancestry, sex)) = division.rsplit_once('_') {
+        return metadata.ancestry == ancestry && metadata.sex == sex;
+    }
+    metadata.ancestry == division
+}
+
+fn subset_complete_genotypes(
+    calls: &[CompleteGenotypeCall],
+    allele_count: usize,
+) -> anyhow::Result<CompleteSourceGenotypes> {
+    if allele_count == 0 || allele_count > MAX_ALT_IDENTITIES + 1 {
+        bail!("subset genotype allele cardinality is outside producer bounds");
+    }
+    let mut totals = CompleteGenotypeTotals::default();
+    for call in calls {
+        totals.total_people = totals
+            .total_people
+            .checked_add(1)
+            .context("subset people overflow")?;
+        let called = call.alleles.iter().flatten().count();
+        match (call.alleles.len(), called) {
+            (2, 2) => {
+                totals.called_diploid_people = totals
+                    .called_diploid_people
+                    .checked_add(1)
+                    .context("subset called people overflow")?
+            }
+            (2, 0) => {
+                totals.no_call_people = totals
+                    .no_call_people
+                    .checked_add(1)
+                    .context("subset no-call people overflow")?
+            }
+            (2, _) => {
+                totals.partial_diploid_people = totals
+                    .partial_diploid_people
+                    .checked_add(1)
+                    .context("subset partial people overflow")?
+            }
+            (_, 0) => {
+                totals.no_call_people = totals
+                    .no_call_people
+                    .checked_add(1)
+                    .context("subset no-call people overflow")?
+            }
+            _ => {
+                totals.non_diploid_people = totals
+                    .non_diploid_people
+                    .checked_add(1)
+                    .context("subset non-diploid people overflow")?
+            }
+        }
+        if call
+            .alleles
+            .iter()
+            .flatten()
+            .any(|allele| *allele as usize >= allele_count)
+        {
+            bail!("subset genotype allele index exceeds source allele cardinality");
+        }
+    }
+    let mut observed_allele_margins = vec![0u32; allele_count];
+    let mut observed_an = 0u32;
+    let mut content = Sha256::new();
+    content.update(b"Y1_PRIMARY_MOTIF_METADATA_SUBSET_GENOTYPES_V1\0");
+    for call in calls {
+        content.update([u8::from(call.phased)]);
+        content.update((call.alleles.len() as u64).to_be_bytes());
+        for allele in &call.alleles {
+            match allele {
+                Some(allele) => {
+                    content.update([1]);
+                    content.update(allele.to_be_bytes());
+                    observed_allele_margins[*allele as usize] = observed_allele_margins
+                        [*allele as usize]
+                        .checked_add(1)
+                        .context("subset allele margin overflow")?;
+                    observed_an = observed_an.checked_add(1).context("subset AN overflow")?;
+                }
+                None => content.update([0, 0, 0]),
+            }
+        }
+    }
+    Ok(CompleteSourceGenotypes {
+        calls: calls.to_vec(),
+        totals,
+        observed_allele_margins,
+        observed_an,
+        header_roster_sha256: bound_digest(&bound_roster_material(calls)),
+        genotype_content_sha256: format!("{:x}", content.finalize()),
+    })
+}
+
+fn bound_roster_material(calls: &[CompleteGenotypeCall]) -> Vec<u8> {
+    // Subset aggregates have no sample roster. This deterministic typed digest
+    // binds only the cardinality and is never used as a metadata mapping receipt.
+    (calls.len() as u64).to_be_bytes().to_vec()
+}
+
+fn bound_digest(material: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"Y1_PRIMARY_MOTIF_ANONYMOUS_SUBSET_ROSTER_V1\0");
+    hasher.update(material);
+    format!("{:x}", hasher.finalize())
 }
 
 /// Bind the anonymous aggregate to its product run, frozen primary run,
@@ -1725,6 +1884,40 @@ mod tests {
         let represented =
             apply_trid_envelope_left_padding(&entry("CAG", 100, 106), "ACAGCAG", &["ACAG".into()])
                 .unwrap();
+        let source_strata = vec![
+            PrimaryMotifStratumInput {
+                division: "all".into(),
+                ancestry: None,
+                sex: None,
+                alt_ac: vec![2],
+                an: 4,
+            },
+            PrimaryMotifStratumInput {
+                division: "afr_XX".into(),
+                ancestry: Some("afr".into()),
+                sex: Some("XX".into()),
+                alt_ac: vec![2],
+                an: 4,
+            },
+        ];
+        let genotype_strata = aggregate_bound_primary_motif_genotype_strata(
+            &represented,
+            "CAG",
+            &source_strata,
+            &bound,
+        )
+        .unwrap();
+        assert_eq!(genotype_strata.len(), 2);
+        assert_eq!(genotype_strata[1].aggregate.called_diploid_people, 2);
+        let mut corrupted_strata = source_strata;
+        corrupted_strata[1].alt_ac[0] = 1;
+        assert!(aggregate_bound_primary_motif_genotype_strata(
+            &represented,
+            "CAG",
+            &corrupted_strata,
+            &bound,
+        )
+        .is_err());
         let available = aggregate_primary_motif_genotypes(
             Cohort::HgsvcHprc,
             &represented,

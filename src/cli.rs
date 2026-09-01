@@ -31,7 +31,11 @@ pub enum Commands {
     InitY1PrimaryMotif(Y1InitArgs),
     /// Resolve the frozen primary run, registered canonical rows, and immutable VCF/TBI identity
     ResolveY1PrimaryMotif(Y1PrimaryMotifResolveArgs),
-    /// Append one legal product-run lifecycle transition (never updates an old revision)
+    /// Plan and produce one complete generation-qualified aggregate-only product run
+    ProduceY1PrimaryMotif(Y1PrimaryMotifProduceArgs),
+    /// Independently reread immutable sources and reconcile every persisted aggregate row
+    ReconcileY1PrimaryMotif(Y1PrimaryMotifReconcileArgs),
+    /// Append one legal recovery/failure transition (ordinary production owns its states)
     TransitionY1PrimaryMotif(Y1PrimaryMotifTransitionArgs),
     /// Verify independent reconciliation and physical RowBinary evidence
     VerifyY1PrimaryMotif(Y1PrimaryMotifFinalizeArgs),
@@ -144,6 +148,80 @@ pub struct Y1PrimaryMotifResolveArgs {
     /// Checked schema-v2 per-contig immutable primary source manifest
     #[arg(long)]
     pub source_manifest: std::path::PathBuf,
+
+    #[arg(long)]
+    pub report: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1PrimaryMotifProduceArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    /// Dedicated synchronous product writer principal
+    #[arg(long)]
+    pub worker_principal: String,
+
+    #[arg(long, value_enum)]
+    pub worker_auth_source: Option<Y1AuthSourceArg>,
+
+    #[arg(long, default_value = "Y1_PRIMARY_MOTIF_WORKER_USER")]
+    pub worker_username_env: String,
+
+    #[arg(long, default_value = "Y1_PRIMARY_MOTIF_WORKER_PASSWORD")]
+    pub worker_password_env: String,
+
+    #[arg(long, value_enum)]
+    pub cohort: Y1CohortArg,
+
+    #[arg(long)]
+    pub chrom: String,
+
+    #[arg(long)]
+    pub product_run_id: String,
+
+    #[arg(long)]
+    pub registry: std::path::PathBuf,
+
+    #[arg(long)]
+    pub source_manifest: std::path::PathBuf,
+
+    /// Required for HGSVC/HPRC and forbidden for AoU
+    #[arg(long)]
+    pub metadata_run_id: Option<String>,
+
+    #[arg(long)]
+    pub operator_identity: String,
+
+    #[arg(long)]
+    pub message: String,
+
+    #[arg(long)]
+    pub report: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1PrimaryMotifReconcileArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    #[arg(long, value_enum)]
+    pub cohort: Y1CohortArg,
+
+    #[arg(long)]
+    pub chrom: String,
+
+    #[arg(long)]
+    pub product_run_id: String,
+
+    #[arg(long)]
+    pub registry: std::path::PathBuf,
+
+    #[arg(long)]
+    pub source_manifest: std::path::PathBuf,
+
+    #[arg(long)]
+    pub metadata_run_id: Option<String>,
 
     #[arg(long)]
     pub report: std::path::PathBuf,

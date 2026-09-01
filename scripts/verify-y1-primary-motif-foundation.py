@@ -15,6 +15,7 @@ SCHEMA = ROOT / "sources/y1/primary-repeat-registry.schema.json"
 DDL_DIR = ROOT / "sql/y1/primary_motif"
 GENOTYPE_EXPECTATIONS = ROOT / "tests/fixtures/y1/primary_motif_genotype_source_expectations.json"
 PRODUCT_LIFECYCLE = ROOT / "src/y1/primary_motif_product.rs"
+PRODUCT_PRODUCER = ROOT / "src/y1/primary_motif_producer.rs"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MOTIF = re.compile(r"^[ACGT]+$")
 
@@ -263,7 +264,9 @@ def validate_storage() -> None:
     validate_storage_contract(paths, (ROOT / "src/y1/primary_motif.rs").read_text())
 
 
-def validate_product_lifecycle(product: str, cli: str, main_rs: str, frozen_storage: str) -> None:
+def validate_product_lifecycle(
+    product: str, producer: str, cli: str, main_rs: str, frozen_storage: str
+) -> None:
     for required in (
         "init_primary_motif_schema", "resolve_accepted_primary_input",
         "snapshot_product_rows", "FORMAT RowBinary", "IndependentProductReceipt",
@@ -273,8 +276,18 @@ def validate_product_lifecycle(product: str, cli: str, main_rs: str, frozen_stor
     ):
         if required not in product:
             raise ValueError(f"primary-motif lifecycle lacks {required}")
+    for required in (
+        "produce_product", "reconcile_product", "ensure_planned_run",
+        "append_produced_revision", "read_immutable_header_text",
+        "read_generation_bound_registered_record", "aggregate_primary_motif_strata",
+        "aggregate_bound_primary_motif_genotype_strata", "ensure_exact_rows",
+        "source_manifest_sha256", "complete_no_truncation",
+    ):
+        if required not in producer:
+            raise ValueError(f"primary-motif producer/reconciler lacks {required}")
     for command in (
         "InitY1PrimaryMotif", "ResolveY1PrimaryMotif",
+        "ProduceY1PrimaryMotif", "ReconcileY1PrimaryMotif",
         "TransitionY1PrimaryMotif", "VerifyY1PrimaryMotif",
         "FinalizeY1PrimaryMotif",
     ):
@@ -296,6 +309,7 @@ def main() -> None:
     validate_storage()
     validate_product_lifecycle(
         PRODUCT_LIFECYCLE.read_text(),
+        PRODUCT_PRODUCER.read_text(),
         (ROOT / "src/cli.rs").read_text(),
         (ROOT / "src/main.rs").read_text(),
         (ROOT / "src/y1/storage.rs").read_text(),
