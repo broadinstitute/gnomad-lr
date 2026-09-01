@@ -8,6 +8,7 @@ mod model;
 mod parser;
 mod phased_pool;
 pub mod primary_motif;
+pub mod primary_motif_product;
 mod storage;
 mod target;
 

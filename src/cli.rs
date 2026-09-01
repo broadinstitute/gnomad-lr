@@ -27,6 +27,16 @@ pub enum Commands {
     Init(InitArgs),
     /// Strictly create fresh isolated Y1 v5 tables or verify an exact attested schema
     InitY1(Y1InitArgs),
+    /// Initialize or exactly attest only the optional primary-motif product schema
+    InitY1PrimaryMotif(Y1InitArgs),
+    /// Resolve the frozen primary run, registered canonical rows, and immutable VCF/TBI identity
+    ResolveY1PrimaryMotif(Y1PrimaryMotifResolveArgs),
+    /// Append one legal product-run lifecycle transition (never updates an old revision)
+    TransitionY1PrimaryMotif(Y1PrimaryMotifTransitionArgs),
+    /// Verify independent reconciliation and physical RowBinary evidence
+    VerifyY1PrimaryMotif(Y1PrimaryMotifFinalizeArgs),
+    /// Re-attest verified evidence and accept-freeze a reviewed product run
+    FinalizeY1PrimaryMotif(Y1PrimaryMotifFinalizeArgs),
     /// Strict bounded Y1 source load into an isolated scratch database
     LoadY1Interval(Y1IntervalArgs),
     /// Single-owner, repository-pinned phased-methylation scratch smoke
@@ -107,6 +117,101 @@ pub struct Y1InitArgs {
 pub enum Y1CohortArg {
     HgsvcHprc,
     Aou,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Y1PrimaryMotifRunStateArg {
+    Producing,
+    Produced,
+    Failed,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1PrimaryMotifResolveArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    #[arg(long, value_enum)]
+    pub cohort: Y1CohortArg,
+
+    #[arg(long)]
+    pub chrom: String,
+
+    /// Strict candidate/reviewed primary-repeat registry
+    #[arg(long)]
+    pub registry: std::path::PathBuf,
+
+    /// Checked schema-v2 per-contig immutable primary source manifest
+    #[arg(long)]
+    pub source_manifest: std::path::PathBuf,
+
+    #[arg(long)]
+    pub report: std::path::PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1PrimaryMotifTransitionArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    #[arg(long)]
+    pub product_run_id: String,
+
+    #[arg(long, value_enum)]
+    pub to: Y1PrimaryMotifRunStateArg,
+
+    #[arg(long)]
+    pub registry: std::path::PathBuf,
+
+    #[arg(long)]
+    pub operator_identity: String,
+
+    #[arg(long)]
+    pub message: String,
+}
+
+#[derive(Args, Clone)]
+pub struct Y1PrimaryMotifFinalizeArgs {
+    #[command(flatten)]
+    pub target: Y1InitArgs,
+
+    /// Dedicated product writer principal to fence and drain before verification
+    #[arg(long)]
+    pub worker_principal: String,
+
+    #[arg(long, value_enum)]
+    pub worker_auth_source: Option<Y1AuthSourceArg>,
+
+    #[arg(long, default_value = "Y1_PRIMARY_MOTIF_WORKER_USER")]
+    pub worker_username_env: String,
+
+    #[arg(long, default_value = "Y1_PRIMARY_MOTIF_WORKER_PASSWORD")]
+    pub worker_password_env: String,
+
+    #[arg(long, value_enum)]
+    pub cohort: Y1CohortArg,
+
+    #[arg(long)]
+    pub product_run_id: String,
+
+    #[arg(long)]
+    pub primary_run_id: String,
+
+    #[arg(long)]
+    pub registry: std::path::PathBuf,
+
+    /// Independently generated, generation-qualified reconciliation receipt
+    #[arg(long)]
+    pub independent_receipt: std::path::PathBuf,
+
+    #[arg(long)]
+    pub operator_identity: String,
+
+    #[arg(long)]
+    pub message: String,
+
+    #[arg(long)]
+    pub report: std::path::PathBuf,
 }
 
 #[derive(Args, Clone)]

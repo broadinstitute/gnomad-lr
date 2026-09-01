@@ -14,7 +14,8 @@ use clap::Parser;
 use cli::{
     parse_region, Cli, Commands, LoadTarget, ServiceAction, Y1AuthSourceArg, Y1CohortArg,
     Y1FinalizeArgs, Y1InitArgs, Y1IntervalArgs, Y1PhasedMethylationEvaluationArgs,
-    Y1PhasedMethylationSmokeArgs, Y1TargetKindArg,
+    Y1PhasedMethylationSmokeArgs, Y1PrimaryMotifFinalizeArgs, Y1PrimaryMotifResolveArgs,
+    Y1PrimaryMotifRunStateArg, Y1PrimaryMotifTransitionArgs, Y1TargetKindArg,
 };
 use genohype_pool::distributed::worker::{run_worker, WorkerConfig};
 use std::sync::Arc;
@@ -47,6 +48,29 @@ async fn main() -> anyhow::Result<()> {
                 y1::init_schema(&target)
             })
             .await??;
+        }
+        Commands::InitY1PrimaryMotif(args) => {
+            tokio::task::spawn_blocking(move || {
+                let target = y1_target(&args)?;
+                info!(
+                    "Initializing optional primary-motif schema in {}",
+                    target.display_name()
+                );
+                y1::primary_motif_product::init_primary_motif_schema(&target)
+            })
+            .await??;
+        }
+        Commands::ResolveY1PrimaryMotif(args) => {
+            tokio::task::spawn_blocking(move || run_y1_primary_motif_resolve(args)).await??;
+        }
+        Commands::TransitionY1PrimaryMotif(args) => {
+            tokio::task::spawn_blocking(move || run_y1_primary_motif_transition(args)).await??;
+        }
+        Commands::VerifyY1PrimaryMotif(args) => {
+            tokio::task::spawn_blocking(move || run_y1_primary_motif_verify(args)).await??;
+        }
+        Commands::FinalizeY1PrimaryMotif(args) => {
+            tokio::task::spawn_blocking(move || run_y1_primary_motif_finalize(args)).await??;
         }
         Commands::LoadY1Interval(args) => {
             tokio::task::spawn_blocking(move || run_y1_interval(args)).await??;
@@ -198,6 +222,138 @@ fn worker_target(
         args.allow_remote,
         args.allow_serving,
     )
+}
+
+fn read_primary_motif_registry(
+    path: &std::path::Path,
+) -> anyhow::Result<y1::primary_motif::PrimaryRepeatRegistry> {
+    y1::primary_motif::PrimaryRepeatRegistry::from_slice(&std::fs::read(path)?)
+}
+
+fn primary_motif_cohort(value: Y1CohortArg) -> y1::Cohort {
+    match value {
+        Y1CohortArg::HgsvcHprc => y1::Cohort::HgsvcHprc,
+        Y1CohortArg::Aou => y1::Cohort::Aou,
+    }
+}
+
+fn primary_motif_state(
+    value: Y1PrimaryMotifRunStateArg,
+) -> y1::primary_motif::PrimaryMotifRunState {
+    use y1::primary_motif::PrimaryMotifRunState;
+    match value {
+        Y1PrimaryMotifRunStateArg::Producing => PrimaryMotifRunState::Producing,
+        Y1PrimaryMotifRunStateArg::Produced => PrimaryMotifRunState::Produced,
+        Y1PrimaryMotifRunStateArg::Failed => PrimaryMotifRunState::Failed,
+    }
+}
+
+fn run_y1_primary_motif_resolve(args: Y1PrimaryMotifResolveArgs) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let registry = read_primary_motif_registry(&args.registry)?;
+    let resolved = y1::primary_motif_product::resolve_accepted_primary_input(
+        &target,
+        &registry,
+        &args.source_manifest,
+        primary_motif_cohort(args.cohort),
+        &args.chrom,
+    )?;
+    write_json_report(&args.report, &resolved)
+}
+
+fn run_y1_primary_motif_transition(args: Y1PrimaryMotifTransitionArgs) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let registry = read_primary_motif_registry(&args.registry)?;
+    y1::primary_motif_product::append_product_run_transition(
+        &target,
+        &args.product_run_id,
+        primary_motif_state(args.to),
+        &registry,
+        &args.operator_identity,
+        &args.message,
+    )
+}
+
+fn primary_motif_writer_fence(
+    args: &Y1PrimaryMotifFinalizeArgs,
+    target: &y1::ClickHouseTarget,
+) -> anyhow::Result<y1::WorkerWriteFence> {
+    let worker = worker_target(
+        &args.target,
+        args.worker_auth_source,
+        &args.worker_principal,
+        &args.worker_username_env,
+        &args.worker_password_env,
+    )?;
+    y1::WorkerWriteFence::new(target, worker, &args.worker_principal)
+}
+
+fn run_y1_primary_motif_verify(args: Y1PrimaryMotifFinalizeArgs) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let fence = primary_motif_writer_fence(&args, &target)?;
+    fence.apply_and_drain(&target)?;
+    let registry = read_primary_motif_registry(&args.registry)?;
+    let independent: y1::primary_motif_product::IndependentProductReceipt =
+        serde_json::from_slice(&std::fs::read(&args.independent_receipt)?)?;
+    let physical = y1::primary_motif_product::snapshot_product_rows(&target, &args.product_run_id)?;
+    y1::primary_motif_product::attest_produced_run(
+        &target,
+        &args.product_run_id,
+        &args.primary_run_id,
+        &registry,
+        &independent,
+        &physical,
+    )?;
+    y1::primary_motif_product::validate_finalizer_gates(
+        &registry,
+        primary_motif_cohort(args.cohort),
+        &args.primary_run_id,
+        &physical,
+        &independent,
+    )?;
+    y1::primary_motif_product::append_product_run_transition(
+        &target,
+        &args.product_run_id,
+        y1::primary_motif::PrimaryMotifRunState::IndependentlyVerified,
+        &registry,
+        &args.operator_identity,
+        &args.message,
+    )?;
+    write_json_report(&args.report, &physical)
+}
+
+fn run_y1_primary_motif_finalize(args: Y1PrimaryMotifFinalizeArgs) -> anyhow::Result<()> {
+    let target = y1_target(&args.target)?;
+    let fence = primary_motif_writer_fence(&args, &target)?;
+    fence.attest_fenced_and_drained(&target)?;
+    let registry = read_primary_motif_registry(&args.registry)?;
+    let independent: y1::primary_motif_product::IndependentProductReceipt =
+        serde_json::from_slice(&std::fs::read(&args.independent_receipt)?)?;
+    let physical = y1::primary_motif_product::snapshot_product_rows(&target, &args.product_run_id)?;
+    y1::primary_motif_product::attest_finalizable_run(
+        &target,
+        &args.product_run_id,
+        &args.primary_run_id,
+        &registry,
+        &independent,
+        &physical,
+    )?;
+    y1::primary_motif_product::validate_finalizer_gates(
+        &registry,
+        primary_motif_cohort(args.cohort),
+        &args.primary_run_id,
+        &physical,
+        &independent,
+    )?;
+    y1::primary_motif_product::append_product_run_transition(
+        &target,
+        &args.product_run_id,
+        y1::primary_motif::PrimaryMotifRunState::AcceptedFrozen,
+        &registry,
+        &args.operator_identity,
+        &args.message,
+    )?;
+    write_json_report(&args.report, &physical)
 }
 
 fn run_y1_finalization(args: Y1FinalizeArgs, chr22_compatibility: bool) -> anyhow::Result<()> {

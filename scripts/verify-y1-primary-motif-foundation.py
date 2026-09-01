@@ -14,6 +14,7 @@ REGISTRY = ROOT / "sources/y1/primary-repeat-registry.json"
 SCHEMA = ROOT / "sources/y1/primary-repeat-registry.schema.json"
 DDL_DIR = ROOT / "sql/y1/primary_motif"
 GENOTYPE_EXPECTATIONS = ROOT / "tests/fixtures/y1/primary_motif_genotype_source_expectations.json"
+PRODUCT_LIFECYCLE = ROOT / "src/y1/primary_motif_product.rs"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MOTIF = re.compile(r"^[ACGT]+$")
 
@@ -262,12 +263,43 @@ def validate_storage() -> None:
     validate_storage_contract(paths, (ROOT / "src/y1/primary_motif.rs").read_text())
 
 
+def validate_product_lifecycle(product: str, cli: str, main_rs: str, frozen_storage: str) -> None:
+    for required in (
+        "init_primary_motif_schema", "resolve_accepted_primary_input",
+        "snapshot_product_rows", "FORMAT RowBinary", "IndependentProductReceipt",
+        "attest_finalizable_run", "validate_finalizer_gates",
+        "append_product_run_transition", "complete_no_truncation",
+        "lr_y1_metadata_runs FINAL", "accepted_frozen",
+    ):
+        if required not in product:
+            raise ValueError(f"primary-motif lifecycle lacks {required}")
+    for command in (
+        "InitY1PrimaryMotif", "ResolveY1PrimaryMotif",
+        "TransitionY1PrimaryMotif", "VerifyY1PrimaryMotif",
+        "FinalizeY1PrimaryMotif",
+    ):
+        if command not in cli or command not in main_rs:
+            raise ValueError(f"primary-motif CLI lifecycle lacks {command}")
+    if "primary_motif" in frozen_storage:
+        raise ValueError("optional primary-motif product leaked into frozen Y1 v5 initializer")
+    lowered = product.split("#[cfg(test)]", 1)[0].lower()
+    for forbidden in ("truncate table", "drop table", "alter table", "sample_id", "raw_gt"):
+        if forbidden in lowered:
+            raise ValueError(f"primary-motif lifecycle contains forbidden persistence token {forbidden}")
+
+
 def main() -> None:
     registry = json.loads(REGISTRY.read_text())
     json.loads(SCHEMA.read_text())
     validate_registry(registry)
     validate_genotype_expectations(json.loads(GENOTYPE_EXPECTATIONS.read_text()))
     validate_storage()
+    validate_product_lifecycle(
+        PRODUCT_LIFECYCLE.read_text(),
+        (ROOT / "src/cli.rs").read_text(),
+        (ROOT / "src/main.rs").read_text(),
+        (ROOT / "src/y1/storage.rs").read_text(),
+    )
     print(
         "Primary-motif foundation verified: 3 candidate_pending_science fixtures, "
         "generation and metadata receipts, anonymous exact genotype margins, "

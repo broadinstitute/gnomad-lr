@@ -18,6 +18,22 @@ module.validate_registry(registry)
 genotype_expectations = json.loads(module.GENOTYPE_EXPECTATIONS.read_text())
 module.validate_genotype_expectations(genotype_expectations)
 module.validate_storage()
+product = module.PRODUCT_LIFECYCLE.read_text()
+cli = (ROOT / "src/cli.rs").read_text()
+main_rs = (ROOT / "src/main.rs").read_text()
+frozen_storage = (ROOT / "src/y1/storage.rs").read_text()
+module.validate_product_lifecycle(product, cli, main_rs, frozen_storage)
+try:
+    module.validate_product_lifecycle(
+        product.replace("FORMAT RowBinary", "FORMAT JSONEachRow"),
+        cli,
+        main_rs,
+        frozen_storage,
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("product lifecycle without RowBinary hashing accepted")
 
 ddls = {path.name: path.read_text() for path in module.DDL_DIR.glob("*.sql")}
 missing_run_mapping = copy.deepcopy(ddls)
