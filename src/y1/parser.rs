@@ -1,4 +1,5 @@
 use super::model::*;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 const FREQUENCY_TOLERANCE: f64 = 5e-6;
@@ -410,6 +411,213 @@ fn transform_record_with_id(
     })
 }
 
+/// One complete source GT, retained only in memory and deliberately detached
+/// from its source sample ID. Its position still aligns with `Y1Header::sample_names`
+/// for an explicit metadata binding step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompleteGenotypeCall {
+    pub(crate) alleles: Vec<Option<u16>>,
+    pub(crate) phased: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompleteGenotypeTotals {
+    pub(crate) total_people: u32,
+    pub(crate) called_diploid_people: u32,
+    pub(crate) partial_diploid_people: u32,
+    pub(crate) no_call_people: u32,
+    pub(crate) non_diploid_people: u32,
+}
+
+/// Complete pre-carrier-loss source GTs and their exact INFO margin receipt.
+/// No source sample identifier is copied into this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompleteSourceGenotypes {
+    pub(crate) calls: Vec<CompleteGenotypeCall>,
+    pub(crate) totals: CompleteGenotypeTotals,
+    /// Includes REF at index zero followed by every ALT in source order.
+    pub(crate) observed_allele_margins: Vec<u32>,
+    pub(crate) observed_an: u32,
+    pub(crate) header_roster_sha256: String,
+    pub(crate) genotype_content_sha256: String,
+}
+
+/// Parse every original HGSVC/HPRC GT before homo-reference and missing calls
+/// are discarded by the carrier projection. Exact REF/ALT margins are required;
+/// this function never reconstructs missing people from sparse carrier rows.
+pub fn parse_complete_source_genotypes(
+    header: &Y1Header,
+    line: &str,
+    expected_alt_ac: &[u32],
+    expected_an: u32,
+) -> Result<CompleteSourceGenotypes, TransformReject> {
+    if header.cohort != Cohort::HgsvcHprc {
+        return Err(TransformReject::new(
+            RejectCode::InvalidGenotype,
+            "complete source GT pairing is unavailable for aggregate-only AoU",
+        ));
+    }
+    if expected_alt_ac.is_empty() || expected_alt_ac.len() > u16::MAX as usize {
+        return Err(TransformReject::new(
+            RejectCode::CardinalityMismatch,
+            "expected ALT margins are outside the complete GT parser bounds",
+        ));
+    }
+    let parts = line.split('\t').collect::<Vec<_>>();
+    let expected_columns = 9 + header.sample_names.len();
+    if parts.len() != expected_columns {
+        return Err(TransformReject::new(
+            RejectCode::SampleCountMismatch,
+            format!(
+                "record has {} columns; expected {expected_columns} for the complete source roster",
+                parts.len()
+            ),
+        ));
+    }
+    let format_keys = parts[8].split(':').collect::<Vec<_>>();
+    let mut unique_keys = HashSet::new();
+    for key in &format_keys {
+        if !unique_keys.insert(*key) {
+            return Err(TransformReject::new(
+                RejectCode::InvalidGenotype,
+                format!("duplicate FORMAT key {key}"),
+            ));
+        }
+    }
+    let gt_index = format_keys
+        .iter()
+        .position(|key| *key == "GT")
+        .ok_or_else(|| {
+            TransformReject::new(RejectCode::InvalidGenotype, "record FORMAT has no GT")
+        })?;
+
+    let mut calls = Vec::with_capacity(header.sample_names.len());
+    let mut totals = CompleteGenotypeTotals {
+        total_people: u32::try_from(header.sample_names.len()).map_err(|_| {
+            TransformReject::new(
+                RejectCode::SampleCountMismatch,
+                "source roster exceeds UInt32",
+            )
+        })?,
+        ..Default::default()
+    };
+    let mut observed_margins = vec![0u32; expected_alt_ac.len() + 1];
+    let mut observed_an = 0u32;
+    let mut roster_digest = Sha256::new();
+    roster_digest.update(b"Y1_PRIMARY_MOTIF_HEADER_ROSTER_V1\0");
+    for sample_id in &header.sample_names {
+        roster_digest.update((sample_id.len() as u64).to_be_bytes());
+        roster_digest.update(sample_id.as_bytes());
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"Y1_COMPLETE_SOURCE_GT_CONTENT_V1\0");
+    digest.update((header.sample_names.len() as u64).to_be_bytes());
+    digest.update((parts[8].len() as u64).to_be_bytes());
+    digest.update(parts[8].as_bytes());
+
+    for (sample_id, sample_value) in header.sample_names.iter().zip(&parts[9..]) {
+        let values = sample_value.split(':').collect::<Vec<_>>();
+        if values.len() > format_keys.len() {
+            return Err(TransformReject::new(
+                RejectCode::InvalidGenotype,
+                format!(
+                    "sample {sample_id} has {} FORMAT values for {} keys",
+                    values.len(),
+                    format_keys.len()
+                ),
+            ));
+        }
+        let raw_gt = values.get(gt_index).copied().unwrap_or(".");
+        let parsed = parse_genotype(raw_gt, sample_id)?;
+        let (alleles, phased) = parsed.unwrap_or_else(|| {
+            let has_separator = raw_gt.contains('|') || raw_gt.contains('/');
+            let alleles = if has_separator {
+                raw_gt.split(['|', '/']).map(|_| None).collect()
+            } else {
+                vec![None]
+            };
+            (alleles, raw_gt.contains('|'))
+        });
+
+        if alleles.iter().all(Option::is_none) {
+            totals.no_call_people += 1;
+        } else if alleles.len() != 2 {
+            totals.non_diploid_people += 1;
+        } else if alleles.iter().any(Option::is_none) {
+            totals.partial_diploid_people += 1;
+        } else {
+            totals.called_diploid_people += 1;
+        }
+        for allele in alleles.iter().flatten() {
+            let margin = observed_margins.get_mut(*allele as usize).ok_or_else(|| {
+                TransformReject::new(
+                    RejectCode::AltIndexOutOfRange,
+                    format!(
+                        "sample {sample_id} GT allele {allele} exceeds {} ALT alleles",
+                        expected_alt_ac.len()
+                    ),
+                )
+            })?;
+            *margin = margin.checked_add(1).ok_or_else(|| {
+                TransformReject::new(RejectCode::InvalidGenotype, "allele margin overflow")
+            })?;
+            observed_an = observed_an
+                .checked_add(1)
+                .ok_or_else(|| TransformReject::new(RejectCode::InvalidGenotype, "AN overflow"))?;
+        }
+
+        // Bind the digest to source order and identity, while returning only the digest.
+        for value in [sample_id.as_bytes(), raw_gt.as_bytes()] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value);
+        }
+        calls.push(CompleteGenotypeCall { alleles, phased });
+    }
+
+    let classified = totals.called_diploid_people
+        + totals.partial_diploid_people
+        + totals.no_call_people
+        + totals.non_diploid_people;
+    if classified != totals.total_people {
+        return Err(TransformReject::new(
+            RejectCode::InvalidGenotype,
+            "complete GT categories do not partition the source roster",
+        ));
+    }
+    let expected_ref = expected_an
+        .checked_sub(
+            expected_alt_ac
+                .iter()
+                .try_fold(0u32, |sum, value| sum.checked_add(*value).ok_or(()))
+                .map_err(|()| {
+                    TransformReject::new(RejectCode::AlleleCountMismatch, "INFO/AC sum overflow")
+                })?,
+        )
+        .ok_or_else(|| {
+            TransformReject::new(RejectCode::AlleleCountMismatch, "INFO ALT AC exceeds AN")
+        })?;
+    let mut expected_margins = Vec::with_capacity(expected_alt_ac.len() + 1);
+    expected_margins.push(expected_ref);
+    expected_margins.extend_from_slice(expected_alt_ac);
+    if observed_an != expected_an || observed_margins != expected_margins {
+        return Err(TransformReject::new(
+            RejectCode::AlleleCountMismatch,
+            format!(
+                "complete GT margins reconstruct AN={observed_an}, alleles={observed_margins:?}, but INFO requires AN={expected_an}, alleles={expected_margins:?}"
+            ),
+        ));
+    }
+
+    Ok(CompleteSourceGenotypes {
+        calls,
+        totals,
+        observed_allele_margins: observed_margins,
+        observed_an,
+        header_roster_sha256: format!("{:x}", roster_digest.finalize()),
+        genotype_content_sha256: format!("{:x}", digest.finalize()),
+    })
+}
+
 fn parse_carriers(
     header: &Y1Header,
     parts: &[&str],
@@ -634,6 +842,12 @@ fn parse_genotype(
     } else {
         vec![raw]
     };
+    if fields.iter().any(|field| field.is_empty()) {
+        return Err(TransformReject::new(
+            RejectCode::InvalidGenotype,
+            format!("sample {sample_id} GT {raw:?} contains an empty allele token"),
+        ));
+    }
     if fields.iter().all(|field| *field == "." || field.is_empty()) {
         return Ok(None);
     }

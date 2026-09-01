@@ -15,7 +15,23 @@ spec.loader.exec_module(module)
 
 registry = json.loads((ROOT / "sources/y1/primary-repeat-registry.json").read_text())
 module.validate_registry(registry)
+genotype_expectations = json.loads(module.GENOTYPE_EXPECTATIONS.read_text())
+module.validate_genotype_expectations(genotype_expectations)
 module.validate_storage()
+
+ddls = {path.name: path.read_text() for path in module.DDL_DIR.glob("*.sql")}
+missing_run_mapping = copy.deepcopy(ddls)
+missing_run_mapping["lr_y1_primary_motif_runs.sql"] = missing_run_mapping[
+    "lr_y1_primary_motif_runs.sql"
+].replace("    header_mapping_sha256 Nullable(FixedString(64)),\n", "")
+try:
+    module.validate_storage_contract(
+        missing_run_mapping, (ROOT / "src/y1/primary_motif.rs").read_text()
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("run DDL missing header mapping receipt accepted")
 
 
 def rejected(change, message: str, *, refresh_digest: bool = True) -> None:
@@ -52,5 +68,14 @@ def whitespace_reviewed(value: dict) -> None:
 
 
 rejected(whitespace_reviewed, "whitespace-only reviewed identity accepted")
+
+corrupt_genotypes = copy.deepcopy(genotype_expectations)
+corrupt_genotypes["loci"][2]["no_call_people"] = 0
+try:
+    module.validate_genotype_expectations(corrupt_genotypes)
+except ValueError:
+    pass
+else:
+    raise AssertionError("RFC1 no-call fixture corruption accepted")
 
 print("Primary-motif verifier corruption tests passed")
