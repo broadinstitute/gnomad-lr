@@ -8,6 +8,8 @@ The contract_version=1 output is accepted by the Y1 finalizer.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
 import gzip
 import hashlib
@@ -15,8 +17,11 @@ import io
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
-from typing import Any, Iterator, TextIO
+from typing import Any, BinaryIO, Iterator, TextIO
+
+from y1_mirror_contract import checked_mirror_prefix
 
 GRCH38_CONTIG_LENGTHS = {
     **{f"chr{i}": length for i, length in enumerate((
@@ -38,6 +43,23 @@ ANNOTATION_KEYS = (
 )
 
 
+def check_identity(obj: dict[str, Any]) -> None:
+    """Validate the compressed-object identity, not the decoded VCF identity."""
+    generation, size, checksum = (obj.get(key) for key in
+                                  ("mirror_generation", "size", "md5_base64"))
+    if (type(generation) not in (str, int)
+            or not re.fullmatch(r"[1-9][0-9]{0,19}", str(generation))
+            or int(generation) > 2**64 - 1
+            or type(size) is not int or not 0 < size <= 2**64 - 1):
+        raise ValueError(f"invalid immutable generation/size for {obj.get('name')}")
+    try:
+        digest = base64.b64decode(checksum, validate=True) if isinstance(checksum, str) else b""
+    except (ValueError, binascii.Error):
+        digest = b""
+    if len(digest) != 16 or base64.b64encode(digest).decode("ascii") != checksum:
+        raise ValueError(f"invalid immutable MD5 checksum for {obj.get('name')}")
+
+
 def checked_source(source_manifest: dict[str, Any], cohort: str, contig: str) -> dict[str, Any]:
     if cohort not in COHORTS or contig not in GRCH38_CONTIG_LENGTHS:
         raise ValueError("unsupported Y1 cohort or GRCh38 contig")
@@ -50,8 +72,7 @@ def checked_source(source_manifest: dict[str, Any], cohort: str, contig: str) ->
             raise ValueError("invalid per-contig immutable source contract")
     elif not (schema is None and contig == "chr22"):
         raise ValueError("source manifest is not a committed per-contig source contract")
-    if source_manifest.get("mirror_prefix") != MIRROR_PREFIX:
-        raise ValueError("source manifest has an unexpected mirror prefix")
+    mirror_prefix = checked_mirror_prefix(source_manifest.get("mirror_prefix"))
     objects = [obj for obj in source_manifest.get("objects", []) if obj.get("cohort") == cohort]
     expected_name = f"gnomAD_LR_Y1.{cohort}.{contig}.vcf.gz"
     vcfs = [obj for obj in objects if obj.get("name") == expected_name]
@@ -59,31 +80,110 @@ def checked_source(source_manifest: dict[str, Any], cohort: str, contig: str) ->
     if len(objects) != 2 or len(vcfs) != 1 or len(indexes) != 1:
         raise ValueError(f"cohort {cohort} must have exactly the canonical {contig} VCF/TBI pair")
     for obj in (vcfs[0], indexes[0]):
-        if (not obj.get("mirror_generation") or not obj.get("md5_base64")
-                or not isinstance(obj.get("size"), int) or obj["size"] <= 0):
-            raise ValueError(f"incomplete immutable identity for {obj.get('name')}")
-    return {**vcfs[0], "uri": f"{MIRROR_PREFIX}/{cohort}/vcfs/{expected_name}"}
+        check_identity(obj)
+    return {**vcfs[0], "uri": f"{mirror_prefix}/{cohort}/vcfs/{expected_name}"}
+
+
+class _CheckedCompressedReader(io.RawIOBase):
+    """Hash/count bounded reads *before* gzip/BGZF decoding, including all members."""
+
+    def __init__(self, raw: BinaryIO, source: dict[str, Any]):
+        self.raw, self.source = raw, source
+        self.size = 0
+        self.digest = hashlib.md5()
+        self.eof = False
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: bytearray) -> int:
+        data = self.raw.read(min(len(buffer), 64 * 1024))
+        if not data:
+            self.eof = True
+            return 0
+        self.size += len(data)
+        if self.size > self.source["size"]:
+            raise ValueError("compressed VCF byte size exceeds source contract")
+        self.digest.update(data)
+        buffer[:len(data)] = data
+        return len(data)
+
+    def verify(self) -> None:
+        if not self.eof:
+            raise ValueError("compressed VCF was not read to EOF")
+        if self.size != self.source["size"]:
+            raise ValueError("compressed VCF byte size does not match source contract")
+        if base64.b64encode(self.digest.digest()).decode("ascii") != self.source["md5_base64"]:
+            raise ValueError("compressed VCF MD5 checksum does not match source contract")
 
 
 @contextlib.contextmanager
-def open_vcf(uri: str) -> Iterator[TextIO]:
-    if uri.startswith("gs://"):
+def _open_compressed(uri: str) -> Iterator[BinaryIO]:
+    if not uri.startswith("gs://"):
+        with open(uri, "rb") as raw:
+            yield raw
+        return
+    # A pipe for stderr can fill while we consume stdout, deadlocking large reads.
+    # Keep diagnostics on disk and only include a bounded tail in errors.
+    with tempfile.TemporaryFile() as diagnostics:
         process = subprocess.Popen(
-            ["gcloud", "storage", "cat", uri], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            ["gcloud", "storage", "cat", uri], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=diagnostics,
         )
-        assert process.stdout and process.stderr
-        stream = io.TextIOWrapper(gzip.GzipFile(fileobj=process.stdout), encoding="utf-8")
+        assert process.stdout is not None
         try:
-            yield stream
-        finally:
-            stream.close()
-            stderr = process.stderr.read().decode(errors="replace")
+            yield process.stdout
             status = process.wait()
             if status:
-                raise RuntimeError(f"gcloud storage cat failed ({status}): {stderr}")
-    else:
-        with gzip.open(uri, "rt", encoding="utf-8") as stream:
-            yield stream
+                diagnostics.seek(0, io.SEEK_END)
+                diagnostics.seek(max(0, diagnostics.tell() - 16384))
+                error = diagnostics.read(16384).decode(errors="replace")
+                raise RuntimeError(f"gcloud storage cat failed ({status}): {error}")
+        finally:
+            # Gzip/VCF/read errors can leave a producer blocked on a full stdout
+            # pipe. Do not drain a huge object or wait forever on that producer.
+            process.stdout.close()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
+class _VcfInput:
+    def __init__(self, uri: str):
+        self.uri = uri
+
+    @contextlib.contextmanager
+    def verified_stream(self, source: dict[str, Any]) -> Iterator[TextIO]:
+        check_identity(source)
+        uri = self.uri
+        if uri.startswith("gs://"):
+            frozen_uri = f"{source['uri']}#{source['mirror_generation']}"
+            if uri not in (source["uri"], frozen_uri):
+                raise ValueError("cloud VCF override must name the exact contract object/generation")
+            uri = frozen_uri
+        with _open_compressed(uri) as raw:
+            checked = _CheckedCompressedReader(raw, source)
+            with io.BufferedReader(checked) as buffered:
+                with gzip.GzipFile(fileobj=buffered, mode="rb") as decoded:
+                    with io.TextIOWrapper(decoded, encoding="utf-8") as stream:
+                        yield stream
+                        if stream.read(1):
+                            raise ValueError("VCF reconciliation did not consume the complete input")
+                        checked.verify()
+
+
+@contextlib.contextmanager
+def open_vcf(uri: str) -> Iterator[_VcfInput]:
+    """Defer opening until build_output supplies the checked immutable identity.
+
+    This keeps both generic and legacy chr22 CLI call shapes, without allowing
+    either entry point to label an unchecked text stream with frozen provenance.
+    """
+    yield _VcfInput(uri)
 
 
 def parse_info(raw: str) -> dict[str, str | None]:
@@ -231,11 +331,16 @@ def reconcile(stream: TextIO, cohort: str, contig: str,
     return facts
 
 
-def build_output(source_manifest: dict[str, Any], stream: TextIO, cohort: str, contig: str,
+def build_output(source_manifest: dict[str, Any], stream: _VcfInput, cohort: str, contig: str,
                  run_id: str, evidence_uri: str, producer: str,
                  primary_load_mode: str | None = None) -> dict[str, Any]:
     source = checked_source(source_manifest, cohort, contig)
-    facts = reconcile(stream, cohort, contig, primary_load_mode)
+    if not isinstance(stream, _VcfInput):
+        raise ValueError("receipt requires open_vcf input with verified compressed source identity")
+    with stream.verified_stream(source) as text:
+        facts = reconcile(text, cohort, contig, primary_load_mode)
+    # Construct provenance only after complete-byte verification AND successful
+    # subprocess exit. Decoded record hashes below are separate semantic facts.
     return {
         "contract_version": 1,
         "run_id": run_id,
@@ -270,7 +375,7 @@ def main() -> None:
     parser.add_argument("--evidence-uri", required=True)
     parser.add_argument("--producer", required=True, help="independent program/version or operator identity")
     parser.add_argument("--primary-load-mode", choices=(AGGREGATE_ONLY_MODE,))
-    parser.add_argument("--vcf", help="checked local mirror override; identity still comes from source manifest")
+    parser.add_argument("--vcf", help="local compressed mirror; bytes must match source manifest size and MD5")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 

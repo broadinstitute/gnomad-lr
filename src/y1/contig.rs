@@ -1,9 +1,6 @@
 use anyhow::bail;
 
-/// Return the canonical GRCh38 primary-assembly length for a supported Y1 contig.
-///
-/// Y1 full-genome primary loading currently covers chr1-22, chrX, and chrY. MT is
-/// deliberately unavailable until an immutable source contract explicitly enables it.
+/// Return the legacy mirror identity for a supported Y1 cohort and contig.
 pub(crate) fn canonical_y1_mirror_uri(cohort: &str, chrom: &str) -> anyhow::Result<String> {
     if !matches!(cohort, "hgsvc_hprc" | "aou") {
         bail!("unsupported Y1 cohort {cohort:?}");
@@ -14,6 +11,36 @@ pub(crate) fn canonical_y1_mirror_uri(cohort: &str, chrom: &str) -> anyhow::Resu
     ))
 }
 
+/// Accept only the legacy mirror or one release-scoped refresh namespace.
+/// The exact cohort/contig filename is unchanged; URI queries, fragments,
+/// traversal, extra path segments, and alternate buckets cannot match.
+/// Object generations are validated separately by the immutable reader.
+pub(crate) fn validate_y1_mirror_uri(uri: &str, cohort: &str, chrom: &str) -> anyhow::Result<()> {
+    let canonical = canonical_y1_mirror_uri(cohort, chrom)?;
+    if uri == canonical {
+        return Ok(());
+    }
+    if let Some(rest) = uri.strip_prefix("gs://gnomad-lr-data/y1/refreshes/") {
+        if let Some((release_id, suffix)) = rest.split_once("/sources/") {
+            let bytes = release_id.as_bytes();
+            let valid_id = bytes.len() == 21
+                && bytes[..8].iter().all(u8::is_ascii_digit)
+                && bytes[8] == b'-'
+                && bytes[9..]
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b));
+            let expected_suffix = canonical
+                .strip_prefix("gs://gnomad-lr-data/y1/sources/")
+                .unwrap();
+            if valid_id && suffix == expected_suffix {
+                return Ok(());
+            }
+        }
+    }
+    bail!("source must exactly match a legacy or release-scoped immutable Y1 cohort/contig mirror identity")
+}
+
+/// Return the canonical GRCh38 primary-assembly length; MT remains unavailable.
 pub(crate) fn grch38_contig_length(chrom: &str) -> anyhow::Result<u32> {
     let length = match chrom {
         "chr1" => 248_956_422,
@@ -89,6 +116,46 @@ mod tests {
     fn rejects_mt_aliases_and_noncanonical_names() {
         for chrom in ["chrM", "chrMT", "MT", "22", "X", "chr23", ""] {
             assert!(grch38_contig_length(chrom).is_err(), "{chrom}");
+        }
+    }
+
+    #[test]
+    fn refresh_mirror_has_a_closed_namespace_and_exact_identity() {
+        for cohort in ["aou", "hgsvc_hprc"] {
+            for chrom in (1..=22)
+                .map(|n| format!("chr{n}"))
+                .chain(["chrX".into(), "chrY".into()])
+            {
+                let canonical = canonical_y1_mirror_uri(cohort, &chrom).unwrap();
+                let refresh = canonical.replace(
+                    "/y1/sources/",
+                    "/y1/refreshes/20260923-012345abcdef/sources/",
+                );
+                validate_y1_mirror_uri(&canonical, cohort, &chrom).unwrap();
+                validate_y1_mirror_uri(&refresh, cohort, &chrom).unwrap();
+                assert!(validate_y1_mirror_uri(&refresh, cohort, "chrM").is_err());
+                assert!(validate_y1_mirror_uri(&refresh, "aou-shadow", &chrom).is_err());
+                for bad in [
+                    refresh.replace("012345abcdef", "../sources"),
+                    refresh.replace("012345abcdef", "012345ABCDEf"),
+                    refresh.replace("012345abcdef", "012345abcde"),
+                    refresh.replace("20260923-", "2026092-"),
+                    refresh.replace("20260923-", "２０２６０９２３-"),
+                    refresh.replace("/sources/", "/sources/../sources/"),
+                    refresh.replace("/vcfs/", "/vcfs/%2e%2e/"),
+                    refresh.replace("gnomad-lr-data/", "other-bucket/"),
+                    format!("{refresh}?generation=1"),
+                    format!("{refresh}#1"),
+                    format!("{refresh}\n"),
+                    format!("{refresh}/"),
+                    refresh.replace(&format!(".{chrom}."), ".chrM."),
+                ] {
+                    assert!(
+                        validate_y1_mirror_uri(&bad, cohort, &chrom).is_err(),
+                        "{bad:?}"
+                    );
+                }
+            }
         }
     }
 

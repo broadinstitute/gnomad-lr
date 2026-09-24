@@ -1,4 +1,4 @@
-use super::contig::{canonical_y1_mirror_uri, grch38_contig_length};
+use super::contig::{grch38_contig_length, validate_y1_mirror_uri};
 use super::storage::{
     ensure_run_accepts_primary_writes, record_task_attempt, AttemptState, TaskAttemptLedgerRow,
 };
@@ -165,9 +165,9 @@ impl PoolY1TaskSpec {
                 self.chrom
             );
         }
-        let expected_source_uri = canonical_y1_mirror_uri(&self.cohort, &self.chrom)?;
-        let expected_index_uri = format!("{expected_source_uri}.tbi");
-        if self.source_uri != expected_source_uri || self.source_index_uri != expected_index_uri {
+        validate_y1_mirror_uri(&self.source_uri, &self.cohort, &self.chrom)?;
+        let expected_index_uri = format!("{}.tbi", self.source_uri);
+        if self.source_index_uri != expected_index_uri {
             bail!("task source and index must exactly equal the declared immutable Y1 cohort/contig mirror identities");
         }
         if self.source_generation.is_empty()
@@ -833,6 +833,40 @@ mod tests {
 
         let mut task = valid_task();
         task.source_index_uri = "gs://gnomad-lr-data/y1/sources/hgsvc_hprc/vcfs/gnomAD_LR_Y1.hgsvc_hprc.chr1.vcf.gz.tbi".into();
+        assert!(task.validate(&task.coordinator_task_id).is_err());
+    }
+
+    #[test]
+    fn refresh_task_requires_exact_pair_and_immutable_generations() {
+        let mut task = valid_task();
+        task.source_uri = task.source_uri.replace(
+            "/y1/sources/",
+            "/y1/refreshes/20260923-012345abcdef/sources/",
+        );
+        // A legacy index or an index from another refresh cannot be paired.
+        assert!(task.validate(&task.coordinator_task_id).is_err());
+        task.source_index_uri = format!("{}.tbi", task.source_uri);
+        task.validate(&task.coordinator_task_id).unwrap();
+        let (vcf, index) = task.immutable_source_index().unwrap();
+        assert_eq!(
+            vcf.immutable_read_uri,
+            format!("{}?generation=1", task.source_uri)
+        );
+        assert_eq!(
+            index.immutable_read_uri,
+            format!("{}?generation=2", task.source_index_uri)
+        );
+        for generation in ["", "latest", "0", "1?foo=bar", "18446744073709551616"] {
+            let mut bad = task.clone();
+            bad.source_generation = generation.into();
+            assert!(bad.validate(&bad.coordinator_task_id).is_err());
+            let mut bad = task.clone();
+            bad.source_index_generation = generation.into();
+            assert!(bad.validate(&bad.coordinator_task_id).is_err());
+        }
+        task.source_index_uri = task
+            .source_index_uri
+            .replace("012345abcdef", "abcdef012345");
         assert!(task.validate(&task.coordinator_task_id).is_err());
     }
 

@@ -80,6 +80,45 @@ class ManifestTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Rust canonical"):
             generic.generate(source, "aou", "chr22", "run", "attempt", 1_000_000)
 
+    def test_refresh_all_primary_manifests_keep_exact_pair_and_modes(self):
+        total = 0
+        prefix = "gs://gnomad-lr-data/y1/refreshes/20260923-012345abcdef/sources"
+        for contig in generic.GRCH38_CONTIG_LENGTHS:
+            source = json.loads((HERE.parent / f"sources/y1/primary-source-{contig}.json").read_text())
+            source["mirror_prefix"] = prefix
+            for cohort in generic.COHORTS:
+                mode = generic.AGGREGATE_ONLY_MODE if cohort == "hgsvc_hprc" and contig in ("chrX", "chrY") else None
+                tasks = generic.generate(source, cohort, contig, f"refresh-{cohort}-{contig}", "attempt", 1_000_000, mode)
+                total += len(tasks)
+                generic.verify_source_identity(tasks, source, cohort, contig)
+                self.assertTrue(all(t["source_uri"].startswith(prefix + "/") for t in tasks))
+                self.assertTrue(all(t["source_index_uri"] == t["source_uri"] + ".tbi" for t in tasks))
+                self.assertTrue(all(t.get("primary_load_mode") == mode for t in tasks))
+                tasks[0]["source_index_generation"] = "different"
+                with self.assertRaises(ValueError):
+                    generic.verify_source_identity(tasks, source, cohort, contig)
+        self.assertEqual(total, 6204)
+
+    def test_refresh_prefix_rejects_deceptive_or_mutable_paths(self):
+        from y1_mirror_contract import checked_mirror_prefix
+        prefix = "gs://gnomad-lr-data/y1/refreshes/20260923-012345abcdef/sources"
+        for bad in (prefix + "/", prefix + "?generation=1", prefix + "#1", prefix + "\n",
+                    prefix.replace("012345abcdef", "../old"),
+                    prefix.replace("012345abcdef", "012345ABCDEf"),
+                    prefix.replace("012345abcdef", "012345abcde"),
+                    prefix.replace("20260923", "２０２６０９２３"),
+                    prefix.replace("/sources", "/%2e%2e/sources"),
+                    prefix.replace("gnomad-lr-data", "other"), None):
+            with self.subTest(prefix=bad), self.assertRaises(ValueError):
+                checked_mirror_prefix(bad)
+
+    def test_noncanonical_generations_are_not_manifest_identities(self):
+        from y1_mirror_contract import checked_generation
+        for generation in (None, "", "latest", "0", "01", "1.0", "+1", "1?x=y", "１", True, 2**64):
+            with self.subTest(generation=generation), self.assertRaises(ValueError):
+                checked_generation(generation)
+        self.assertEqual(checked_generation("1789913396114330"), "1789913396114330")
+
     def test_mt_requires_explicit_immutable_per_contig_contract(self):
         ordinary = json.loads(json.dumps(SOURCE).replace("chr22", "chrM"))
         with self.assertRaisesRegex(ValueError, "unavailable"):

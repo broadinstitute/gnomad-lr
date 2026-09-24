@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from y1_mirror_contract import checked_generation, checked_mirror_prefix
+
 GRCH38_CONTIG_LENGTHS = {
     **{f"chr{i}": n for i, n in enumerate([
         248956422, 242193529, 198295559, 190214555, 181538259, 170805979,
@@ -43,6 +45,7 @@ def checked_contig_length(source: dict[str, Any], contig: str) -> int:
 
 
 def checked_source(source: dict[str, Any], cohort: str, contig: str):
+    checked_mirror_prefix(source.get("mirror_prefix"))
     if source.get("release") != "Y1" or source.get("chromosome") != contig:
         raise ValueError(f"source manifest must describe Y1 {contig}")
     if source.get("schema_version") == 2 and (source.get("contract_type") != "y1_per_contig_immutable_source" or source.get("reference_genome") != "GRCh38"):
@@ -54,7 +57,8 @@ def checked_source(source: dict[str, Any], cohort: str, contig: str):
     if len(objects) != 2 or len(vcfs) != 1 or len(indexes) != 1:
         raise ValueError(f"cohort {cohort} must have exactly the canonical adjacent {contig} VCF/TBI pair")
     for obj in (vcfs[0], indexes[0]):
-        if not obj.get("mirror_generation") or not obj.get("md5_base64") or int(obj.get("size", 0)) <= 0:
+        checked_generation(obj.get("mirror_generation"))
+        if not obj.get("md5_base64") or int(obj.get("size", 0)) <= 0:
             raise ValueError(f"incomplete immutable identity for {obj.get('name')}")
     return vcfs[0], indexes[0]
 
@@ -74,9 +78,7 @@ def generate(source: dict[str, Any], cohort: str, contig: str, run_id: str,
     if not run_id or not attempt or interval_size <= 0:
         raise ValueError("run ID, attempt prefix, and positive interval size are required")
     vcf, index = checked_source(source, cohort, contig)
-    prefix = source.get("mirror_prefix")
-    if prefix != MIRROR_PREFIX:
-        raise ValueError("source manifest mirror_prefix differs from the Rust canonical Y1 mirror contract")
+    prefix = checked_mirror_prefix(source.get("mirror_prefix"))
     source_uri = f"{prefix}/{cohort}/vcfs/{vcf['name']}"
     tasks = []
     for ordinal, start in enumerate(range(1, length + 1, interval_size)):

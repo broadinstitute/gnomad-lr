@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from y1_mirror_contract import checked_generation, checked_mirror_prefix
+
 COHORTS = ("hgsvc_hprc", "aou")
 NON_MT_CONTIGS = tuple([*(f"chr{i}" for i in range(1, 23)), "chrX", "chrY"])
 MIRROR_ROOT = "gs://gnomad-lr-data/y1/sources"
@@ -27,8 +29,7 @@ def validate_inventory(inventory: dict[str, Any]) -> None:
         raise ValueError("unsupported full-genome source inventory contract")
     if inventory.get("chromosome_order") != list(NON_MT_CONTIGS):
         raise ValueError("inventory must enumerate exactly chr1-22,X,Y in canonical order")
-    if inventory.get("mirror_root") != MIRROR_ROOT:
-        raise ValueError("inventory mirror_root differs from the Rust canonical Y1 mirror contract")
+    checked_mirror_prefix(inventory.get("mirror_root"))
     objects = inventory.get("objects")
     if not isinstance(objects, list) or len(objects) != len(NON_MT_CONTIGS) * len(COHORTS):
         raise ValueError("inventory must contain exactly two cohorts for every non-MT contig")
@@ -37,7 +38,7 @@ def validate_inventory(inventory: dict[str, Any]) -> None:
     if sorted(keys) != sorted(expected) or len(set(keys)) != len(keys):
         raise ValueError("inventory cohort/contig coverage is incomplete or duplicated")
     mt = inventory.get("mt")
-    if not isinstance(mt, dict) or mt.get("classification") not in {"absent", "available"}:
+    if not isinstance(mt, dict) or mt.get("classification") not in {"absent", "available", "not_inventoried"}:
         raise ValueError("inventory must carry an explicit MT availability classification")
     claimed = inventory.get("canonical_payload_sha256_before_digest_field")
     if claimed is not None:
@@ -53,12 +54,13 @@ def _checked_source_object(obj: dict[str, Any], kind: str, contig: str) -> dict[
     name = f"gnomAD_LR_Y1.{cohort}.{contig}.vcf.gz" + (".tbi" if kind == "tbi" else "")
     if not isinstance(value, dict) or Path(str(value.get("uri", ""))).name != name:
         raise ValueError(f"{cohort} {contig} has an invalid source {kind} identity")
-    if not str(value.get("generation", "")).isdigit() or int(value.get("size_bytes", 0)) <= 0 or not value.get("md5_base64"):
+    checked_generation(value.get("generation"))
+    if int(value.get("size_bytes", 0)) <= 0 or not value.get("md5_base64"):
         raise ValueError(f"{obj.get('cohort')} {contig} source {kind} is not immutable")
     return value
 
 
-def _checked_destination(obj: dict[str, Any], kind: str, source: dict[str, Any], contig: str) -> dict[str, Any]:
+def _checked_destination(obj: dict[str, Any], kind: str, source: dict[str, Any], contig: str, mirror_root: str) -> dict[str, Any]:
     if obj.get("mirror_pair_present") is not True or obj.get(f"mirror_{kind}_present") is not True:
         raise ValueError(f"{obj.get('cohort')} {contig} destination pair is not recorded as present")
     identities = obj.get("mirror_identity")
@@ -66,9 +68,9 @@ def _checked_destination(obj: dict[str, Any], kind: str, source: dict[str, Any],
     if len(matches) != 1:
         raise ValueError(f"{obj.get('cohort')} {contig} has no unique destination {kind} identity")
     dest = matches[0]
-    expected_uri = f"{MIRROR_ROOT}/{obj.get('cohort')}/vcfs/{Path(source['uri']).name}"
+    checked_generation(dest.get("generation"))
+    expected_uri = f"{mirror_root}/{obj.get('cohort')}/vcfs/{Path(source['uri']).name}"
     if (dest.get("uri") != expected_uri
-            or not str(dest.get("generation", "")).isdigit()
             or dest.get("matches_source_size_md5") is not True
             or int(dest.get("size_bytes", 0)) != int(source["size_bytes"])
             or dest.get("md5_base64") != source["md5_base64"]):
@@ -91,7 +93,7 @@ def convert(inventory: dict[str, Any], contig: str) -> dict[str, Any]:
     selected = [o for o in source_entries if o.get("chrom") == contig]
     if len(selected) != len(COHORTS) or {o.get("cohort") for o in selected} != set(COHORTS):
         raise ValueError(f"inventory does not contain both cohorts for {contig}")
-    mirror_root = inventory["mirror_root"].rstrip("/")
+    mirror_root = inventory["mirror_root"]
     output_objects = []
     for obj in sorted(selected, key=lambda o: COHORTS.index(o["cohort"])):
         cohort = obj["cohort"]
@@ -99,8 +101,8 @@ def convert(inventory: dict[str, Any], contig: str) -> dict[str, Any]:
             raise ValueError(f"{cohort} {contig} failed source adjacency/contig checks")
         vcf = _checked_source_object(obj, "vcf", contig)
         tbi = _checked_source_object(obj, "tbi", contig)
-        vcf_dest = _checked_destination(obj, "vcf", vcf, contig)
-        tbi_dest = _checked_destination(obj, "tbi", tbi, contig)
+        vcf_dest = _checked_destination(obj, "vcf", vcf, contig, mirror_root)
+        tbi_dest = _checked_destination(obj, "tbi", tbi, contig, mirror_root)
         name = Path(vcf["uri"]).name
         expected_uri = f"{mirror_root}/{cohort}/vcfs/{name}"
         if obj.get("proposed_mirror_uri") != expected_uri or obj.get("proposed_mirror_index_uri") != expected_uri + ".tbi":

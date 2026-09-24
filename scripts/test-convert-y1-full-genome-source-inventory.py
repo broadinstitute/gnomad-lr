@@ -79,9 +79,34 @@ class InventoryConversionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, message):
                 converter.convert(inventory, "chr1")
 
+    def test_refresh_inventory_retains_exact_pair_and_destination_proof(self):
+        root = "gs://gnomad-lr-data/y1/refreshes/20260923-012345abcdef/sources"
+        import json
+        inventory = json.loads(json.dumps(self.inventory).replace(converter.MIRROR_ROOT, root))
+        inventory.pop("canonical_payload_sha256_before_digest_field")
+        for contig in converter.NON_MT_CONTIGS:
+            manifest = converter.convert(inventory, contig)
+            self.assertEqual(manifest["mirror_prefix"], root)
+            self.assertEqual(len(manifest["objects"]), 4)
+        for key, value in (("uri", inventory["objects"][0]["mirror_identity"][0]["uri"].replace(root, converter.MIRROR_ROOT)),
+                           ("generation", ""), ("generation", "latest"),
+                           ("size_bytes", 1), ("matches_source_size_md5", False)):
+            bad = copy.deepcopy(inventory)
+            bad["objects"][0]["mirror_identity"][0][key] = value
+            with self.assertRaises(ValueError):
+                converter.convert(bad, "chr1")
+        bad = copy.deepcopy(inventory)
+        bad["objects"][0]["mirror_identity"][1]["uri"] = bad["objects"][0]["mirror_identity"][1]["uri"].replace("012345abcdef", "abcdef012345")
+        with self.assertRaises(ValueError):
+            converter.convert(bad, "chr1")
+
     def test_mt_is_explicitly_unavailable(self):
-        with self.assertRaisesRegex(ValueError, "explicit immutable MT source contract"):
-            converter.convert(self.inventory, "chrM")
+        for classification in ("absent", "not_inventoried"):
+            inventory = copy.deepcopy(self.inventory)
+            inventory.pop("canonical_payload_sha256_before_digest_field")
+            inventory["mt"]["classification"] = classification
+            with self.assertRaisesRegex(ValueError, "explicit immutable MT source contract"):
+                converter.convert(inventory, "chrM")
 
     def test_inventory_digest_drift_is_rejected(self):
         inventory = copy.deepcopy(self.inventory)
