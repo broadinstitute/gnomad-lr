@@ -38,6 +38,18 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::ValidateHistograms(args) => {
+            tokio::task::spawn_blocking(move || {
+                let report = loader::histograms::validation::validate(&args);
+                println!("{}", serde_json::to_string(&report)?);
+                anyhow::ensure!(
+                    !report.failed(),
+                    "histogram validation failed (see redacted JSON report)"
+                );
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+        }
         Commands::Load { target } => {
             tokio::task::spawn_blocking(move || run_load(target)).await??;
         }

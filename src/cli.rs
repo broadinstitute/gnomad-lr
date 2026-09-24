@@ -13,6 +13,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Read-only histogram validation; JSON counters on stdout, no database target
+    ValidateHistograms(ValidateHistogramsArgs),
     /// Load data into ClickHouse
     Load {
         #[command(subcommand)]
@@ -610,6 +612,33 @@ pub struct MetadataArgs {
     /// Stop after inserting this many metadata rows (intended for smoke tests)
     #[arg(long)]
     pub limit: Option<usize>,
+}
+
+#[derive(Args, Clone)]
+pub struct ValidateHistogramsArgs {
+    /// Plain TSV local file or canonical gs://bucket/object (no decompression)
+    #[arg(long)]
+    pub source: String,
+
+    /// Expected complete source size, not a prefix size
+    #[arg(long)]
+    pub source_size_bytes: u64,
+
+    /// Expected complete body MD5, standard base64 encoded
+    #[arg(long)]
+    pub source_md5_base64: String,
+
+    /// Required for GCS; forbidden for local files (local origin is not attested)
+    #[arg(long)]
+    pub source_generation: Option<String>,
+
+    /// Bound nonblank data rows examined, including validated empty rows
+    #[arg(long)]
+    pub max_rows: Option<u64>,
+
+    /// Bound bytes delivered to validation (GCS may prefetch one 8 MiB range)
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
 }
 
 #[derive(Args, Clone)]

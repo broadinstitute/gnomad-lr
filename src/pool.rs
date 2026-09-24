@@ -210,6 +210,9 @@ impl TaskHandler for LrTaskHandler {
             "load_coverage" => handle_coverage_tasks(payload, tasks).await,
             "load_metadata" => handle_metadata_tasks(payload, tasks).await,
             "load_histograms" => handle_histograms_tasks(payload, tasks).await,
+            "load_histogram_source_v1" => {
+                loader::histograms::source::ingest::handle_tasks(payload, tasks).await
+            }
             "load_methylation" => handle_methylation_tasks(payload, tasks).await,
             "load_methylation_source_haplotype" => {
                 handle_methylation_source_haplotype_tasks(payload, tasks).await
